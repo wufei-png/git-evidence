@@ -12,7 +12,7 @@ LANGUAGES = ("en", "zh-CN")
 
 LABELS = {
     "en": {
-        "title": "Engineering Activity Report",
+        "title": "Git Platform Engineering Activity Report",
         "window": "Window",
         "projects": "Projects and topics",
         "project_activity": "Project activity",
@@ -26,7 +26,7 @@ LABELS = {
         "actor_warning": "Actor view is informational only; it is not a productivity or performance score.",
     },
     "zh-CN": {
-        "title": "工程活动报告",
+        "title": "Git 平台工程活动报告",
         "window": "时间窗口",
         "projects": "项目与专题",
         "project_activity": "项目活动",
