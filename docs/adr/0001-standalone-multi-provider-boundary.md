@@ -5,7 +5,7 @@ date: 2026-08-01
 
 # Standalone multi-provider boundary
 
-The project is the standalone `git-platform-evidence-engine` repository,
+The project is the standalone `git-evidence` repository,
 separate from the private weekly-report workspace. Its public core owns a
 platform-neutral provider contract and first-class GitLab, GitHub, and Gitee
 adapters; no private organization profile or compatibility workflow is

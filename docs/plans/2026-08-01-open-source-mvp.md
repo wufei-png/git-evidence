@@ -30,7 +30,7 @@ summary templates or the presence of an LLM.
 
 ## Accepted direction
 
-- Standalone project: `git-platform-evidence-engine`.
+- Standalone project: `git-evidence`.
 - First-class provider targets: GitLab, GitHub, and Gitee.
 - Public core boundary: provider contract plus adapters; no private
   organization profile or compatibility infrastructure is shipped.

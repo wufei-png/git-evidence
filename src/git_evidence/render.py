@@ -12,7 +12,7 @@ LANGUAGES = ("en", "zh-CN")
 
 LABELS = {
     "en": {
-        "title": "Git Platform Engineering Activity Report",
+        "title": "Git Evidence Engineering Activity Report",
         "window": "Window",
         "projects": "Projects and topics",
         "project_activity": "Project activity",

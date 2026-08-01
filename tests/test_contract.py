@@ -11,10 +11,10 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from git_platform_evidence_engine.model import load_bundle  # noqa: E402
-from git_platform_evidence_engine.collect import collect_config  # noqa: E402
-from git_platform_evidence_engine.config import ConfigError, load_config  # noqa: E402
-from git_platform_evidence_engine.providers import (  # noqa: E402
+from git_evidence.model import load_bundle  # noqa: E402
+from git_evidence.collect import collect_config  # noqa: E402
+from git_evidence.config import ConfigError, load_config  # noqa: E402
+from git_evidence.providers import (  # noqa: E402
     CollectionRequest,
     GiteeProvider,
     GitHubProvider,
@@ -22,7 +22,7 @@ from git_platform_evidence_engine.providers import (  # noqa: E402
     RepositoryTarget,
     provider_catalog,
 )
-from git_platform_evidence_engine.providers.transport import (  # noqa: E402
+from git_evidence.providers.transport import (  # noqa: E402
     ApiError,
     ApiResponse,
     MappingTransport,
@@ -31,12 +31,12 @@ from git_platform_evidence_engine.providers.transport import (  # noqa: E402
     failure_class_for_status,
     paginate,
 )
-from git_platform_evidence_engine.providers.resource_base import (  # noqa: E402
+from git_evidence.providers.resource_base import (  # noqa: E402
     api_error_diagnostics,
     merge_diagnostics,
 )
-from git_platform_evidence_engine.render import render_bundle  # noqa: E402
-from git_platform_evidence_engine.validation import validate_bundle  # noqa: E402
+from git_evidence.render import render_bundle  # noqa: E402
+from git_evidence.validation import validate_bundle  # noqa: E402
 
 
 FIXTURE = ROOT / "fixtures" / "example_bundle.json"
@@ -433,7 +433,7 @@ class ContractTests(unittest.TestCase):
             retry_backoff=0,
         )
         with patch(
-            "git_platform_evidence_engine.providers.transport.urlopen",
+            "git_evidence.providers.transport.urlopen",
             side_effect=[retry_error, FakeHttpResponse(b'{"ok": true}', {"X-RateLimit-Remaining": "3"})],
         ) as urlopen:
             result = transport.get("/repos/example/project")
@@ -464,7 +464,7 @@ class ContractTests(unittest.TestCase):
                     retry_backoff=0,
                 )
                 with patch(
-                    "git_platform_evidence_engine.providers.transport.urlopen",
+                    "git_evidence.providers.transport.urlopen",
                     side_effect=[error],
                 ):
                     with self.assertRaises(ApiError) as caught:

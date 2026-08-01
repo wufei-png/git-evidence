@@ -1,7 +1,10 @@
-# Git Platform Evidence Engine
+# Git Evidence
 
-Evidence-first Git platform engineering activity report engine for GitLab,
-GitHub, and Gitee.
+Evidence-first engineering activity reports across GitHub, GitLab, and Gitee.
+
+Git Evidence is a provider-neutral engine that collects, normalizes, validates,
+and renders reproducible engineering activity reports with source-linked
+evidence and explicit coverage boundaries.
 
 It is not an engineering productivity scoring system or a generic AI
 summarizer: every publishable claim must remain tied to source evidence and an
@@ -53,12 +56,12 @@ The current slice can replay a bundle offline or collect an explicitly scoped
 bundle from configured providers:
 
 ```bash
-PYTHONPATH=src python3 -m git_platform_evidence_engine providers
-PYTHONPATH=src python3 -m git_platform_evidence_engine doctor --config config.example.yml
-PYTHONPATH=src python3 -m git_platform_evidence_engine collect --config config.example.yml \
+PYTHONPATH=src python3 -m git_evidence providers
+PYTHONPATH=src python3 -m git_evidence doctor --config config.example.yml
+PYTHONPATH=src python3 -m git_evidence collect --config config.example.yml \
   --output evidence/bundle.json
-PYTHONPATH=src python3 -m git_platform_evidence_engine validate fixtures/example_bundle.json
-PYTHONPATH=src python3 -m git_platform_evidence_engine render fixtures/example_bundle.json \
+PYTHONPATH=src python3 -m git_evidence validate fixtures/example_bundle.json
+PYTHONPATH=src python3 -m git_evidence render fixtures/example_bundle.json \
   --profile project-first --output report.md
 ```
 

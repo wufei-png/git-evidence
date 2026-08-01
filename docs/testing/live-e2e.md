@@ -62,11 +62,11 @@ Run the same flow for each provider with a provider-specific target and token
 environment variable:
 
 ```bash
-PYTHONPATH=src python3 -m git_platform_evidence_engine collect \
+PYTHONPATH=src python3 -m git_evidence collect \
   --config /tmp/live-config.yml \
   --output /tmp/live-bundle.json
-PYTHONPATH=src python3 -m git_platform_evidence_engine validate /tmp/live-bundle.json
-PYTHONPATH=src python3 -m git_platform_evidence_engine render \
+PYTHONPATH=src python3 -m git_evidence validate /tmp/live-bundle.json
+PYTHONPATH=src python3 -m git_evidence render \
   /tmp/live-bundle.json --profile timeline --output /tmp/live-report.md
 ```
 

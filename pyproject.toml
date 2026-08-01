@@ -3,16 +3,16 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "git-platform-evidence-engine"
+name = "git-evidence"
 version = "0.1.0"
-description = "Evidence-first Git platform engineering activity report engine"
+description = "Git Evidence: evidence-first engineering activity reports across GitHub, GitLab, and Gitee"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 dependencies = ["PyYAML>=6.0"]
 
 [project.scripts]
-git-evidence = "git_platform_evidence_engine.cli:main"
+git-evidence = "git_evidence.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Git Platform Evidence Engine canonical bundle",
+  "title": "Git Evidence canonical bundle",
   "type": "object",
   "additionalProperties": true,
   "required": [

@@ -144,7 +144,7 @@ class UrllibTransport:
         url = self._url(path, params)
         headers = {
             "Accept": "application/json",
-            "User-Agent": "git-platform-evidence-engine/0.1",
+            "User-Agent": "git-evidence/0.1",
         }
         if self.token and not self.token_param:
             headers[self.token_header] = f"{self.token_prefix} {self.token}" if self.token_prefix else self.token
