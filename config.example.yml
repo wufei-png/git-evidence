@@ -1,0 +1,23 @@
+window:
+  start: 2026-07-27T00:00:00Z
+  end: 2026-08-03T00:00:00Z
+  timezone: UTC
+
+scope:
+  repositories:
+    - provider: github
+      instance: github.com
+      owner: example
+      name: project
+  actors: []
+
+providers:
+  github:
+    token_env: GITHUB_TOKEN
+    include_activity_api: false
+    verify_tls: true
+
+report:
+  profile: project-first
+  language: en
+  display_actor_names: false

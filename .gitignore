@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+venv/
+.pytest_cache/
+dist/
+build/
+.coverage
+coverage.xml
+
+# Evidence bundles can contain private repository data.
+evidence/
+reports/

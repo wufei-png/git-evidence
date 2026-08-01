@@ -1,0 +1,106 @@
+{
+  "repository": {
+    "path_with_namespace": "example/project",
+    "name": "project",
+    "web_url": "https://gitlab.com/example/project"
+  },
+  "issues": [
+    {
+      "iid": 1,
+      "title": "Synthetic issue",
+      "state": "opened",
+      "created_at": "2026-07-30T12:00:00Z",
+      "updated_at": "2026-07-30T12:00:00Z",
+      "web_url": "https://gitlab.com/example/project/-/issues/1",
+      "author": {"id": 7, "username": "synthetic-user", "name": "Synthetic User"}
+    }
+  ],
+  "merge_requests": [
+    {
+      "iid": 2,
+      "title": "Synthetic merge request",
+      "state": "merged",
+      "merged_at": "2026-07-30T12:00:00Z",
+      "updated_at": "2026-07-30T12:00:00Z",
+      "created_at": "2026-07-30T12:00:00Z",
+      "web_url": "https://gitlab.com/example/project/-/merge_requests/2",
+      "author": {"id": 7, "username": "synthetic-user", "name": "Synthetic User"},
+      "diff_refs": {"head_sha": "abc123"},
+      "merge_commit_sha": "merge123"
+    }
+  ],
+  "issue_notes": {
+    "1": [
+      {
+        "id": 101,
+        "created_at": "2026-07-30T12:00:00Z",
+        "noteable_url": "https://gitlab.com/example/project/-/issues/1#note_101",
+        "author": {"id": 7, "username": "synthetic-user", "name": "Synthetic User"}
+      }
+    ]
+  },
+  "merge_request_notes": {
+    "2": [
+      {
+        "id": 201,
+        "created_at": "2026-07-30T12:00:00Z",
+        "noteable_url": "https://gitlab.com/example/project/-/merge_requests/2#note_201",
+        "author": {"id": 7, "username": "synthetic-user", "name": "Synthetic User"}
+      }
+    ]
+  },
+  "commits": [
+    {
+      "id": "abc123",
+      "title": "Synthetic commit",
+      "message": "Synthetic commit",
+      "committed_date": "2026-07-30T12:00:00Z",
+      "web_url": "https://gitlab.com/example/project/-/commit/abc123",
+      "author_name": "Synthetic User",
+      "author_email": "synthetic@example.invalid"
+    }
+  ],
+  "releases": [
+    {
+      "tag_name": "v1.0.0",
+      "name": "Synthetic release",
+      "released_at": "2026-07-30T12:00:00Z",
+      "_links": {"self": "https://gitlab.com/example/project/-/releases/v1.0.0"}
+    }
+  ],
+  "events": [
+    {
+      "id": 401,
+      "action_name": "pushed",
+      "created_at": "2026-07-30T12:00:00Z",
+      "author": {"id": 7, "username": "synthetic-user", "name": "Synthetic User"},
+      "push_data": {
+        "commit_count": 1,
+        "ref_count": 1,
+        "ref_type": "branch",
+        "ref": "main",
+        "commit_from": "000000",
+        "commit_to": "abc123"
+      }
+    },
+    {
+      "id": 402,
+      "action_name": "pushed",
+      "created_at": "2026-07-30T12:00:00Z",
+      "author": {"id": 7, "username": "synthetic-user", "name": "Synthetic User"},
+      "push_data": {
+        "commit_count": 3,
+        "ref_count": 2,
+        "ref_type": "branch",
+        "ref": null,
+        "commit_from": null,
+        "commit_to": null
+      }
+    }
+  ],
+  "commit_merge_requests": {
+    "abc123": [
+      {"iid": 2}
+    ]
+  }
+}

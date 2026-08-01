@@ -1,0 +1,176 @@
+{
+  "repository": {
+    "full_name": "example/project",
+    "name": "project",
+    "html_url": "https://github.com/example/project"
+  },
+  "issues": [
+    {
+      "number": 1,
+      "title": "Synthetic issue",
+      "state": "open",
+      "created_at": "2026-07-30T12:00:00Z",
+      "updated_at": "2026-07-30T12:00:00Z",
+      "html_url": "https://github.com/example/project/issues/1",
+      "user": {"id": 7, "login": "synthetic-user"}
+    }
+  ],
+  "pulls": [
+    {
+      "number": 2,
+      "title": "Synthetic pull",
+      "state": "closed",
+      "merged_at": "2026-07-30T12:00:00Z",
+      "updated_at": "2026-07-30T12:00:00Z",
+      "created_at": "2026-07-30T12:00:00Z",
+      "html_url": "https://github.com/example/project/pull/2",
+      "user": {"id": 7, "login": "synthetic-user"},
+      "head": {"sha": "abc123"},
+      "merge_commit_sha": "merge123"
+    },
+    {
+      "number": 3,
+      "title": "Synthetic ambiguous pull",
+      "state": "open",
+      "merged_at": null,
+      "updated_at": "2026-07-30T12:00:00Z",
+      "created_at": "2026-07-30T12:00:00Z",
+      "html_url": "https://github.com/example/project/pull/3",
+      "user": {"id": 7, "login": "synthetic-user"},
+      "head": {"sha": "multi123"},
+      "merge_commit_sha": null
+    }
+  ],
+  "issue_comments": {
+    "1": [
+      {
+        "id": 101,
+        "created_at": "2026-07-30T12:00:00Z",
+        "html_url": "https://github.com/example/project/issues/1#issuecomment-101",
+        "user": {"id": 7, "login": "synthetic-user"}
+      }
+    ],
+    "2": [],
+    "3": []
+  },
+  "reviews": {
+    "2": [
+      {
+        "id": 201,
+        "submitted_at": "2026-07-30T12:00:00Z",
+        "html_url": "https://github.com/example/project/pull/2#review-201",
+        "user": {"id": 7, "login": "synthetic-user"}
+      }
+    ],
+    "3": []
+  },
+  "review_comments": {
+    "2": [
+      {
+        "id": 202,
+        "created_at": "2026-07-30T12:00:00Z",
+        "html_url": "https://github.com/example/project/pull/2#discussion_r202",
+        "user": {"id": 7, "login": "synthetic-user"}
+      }
+    ],
+    "3": []
+  },
+  "commits": [
+    {
+      "sha": "abc123",
+      "html_url": "https://github.com/example/project/commit/abc123",
+      "commit": {
+        "message": "Synthetic commit\n\nDetails",
+        "committer": {"date": "2026-07-30T12:00:00Z"},
+        "author": {"date": "2026-07-30T12:00:00Z"}
+      },
+      "author": {"id": 7, "login": "synthetic-user"}
+    },
+    {
+      "sha": "def456",
+      "html_url": "https://github.com/example/project/commit/def456",
+      "commit": {
+        "message": "Synthetic unlinked commit",
+        "committer": {"date": "2026-07-30T12:00:00Z"},
+        "author": {"date": "2026-07-30T12:00:00Z"}
+      },
+      "author": {"id": 7, "login": "synthetic-user"}
+    },
+    {
+      "sha": "multi123",
+      "html_url": "https://github.com/example/project/commit/multi123",
+      "commit": {
+        "message": "Synthetic ambiguous commit",
+        "committer": {"date": "2026-07-30T12:00:00Z"},
+        "author": {"date": "2026-07-30T12:00:00Z"}
+      },
+      "author": {"id": 7, "login": "synthetic-user"}
+    }
+  ],
+  "releases": [
+    {
+      "id": 301,
+      "tag_name": "v1.0.0",
+      "name": "Synthetic release",
+      "published_at": "2026-07-30T12:00:00Z",
+      "html_url": "https://github.com/example/project/releases/tag/v1.0.0"
+    }
+  ],
+  "events": [
+    {
+      "id": "event-1",
+      "type": "PushEvent",
+      "created_at": "2026-07-30T12:00:00Z",
+      "actor": {"id": 7, "login": "synthetic-user"},
+      "repo": {"name": "example/project"},
+      "payload": {
+        "push_id": 401,
+        "ref": "refs/heads/main",
+        "before": "000000",
+        "head": "abc123",
+        "size": 1,
+        "commits": [{"sha": "abc123"}]
+      }
+    },
+    {
+      "id": "event-2",
+      "type": "PushEvent",
+      "created_at": "2026-07-30T12:00:00Z",
+      "actor": {"id": 7, "login": "synthetic-user"},
+      "repo": {"name": "example/project"},
+      "payload": {
+        "push_id": 402,
+        "ref": "refs/heads/main",
+        "before": "abc123",
+        "head": "def456",
+        "size": 1,
+        "commits": [{"sha": "def456"}]
+      }
+    },
+    {
+      "id": "event-3",
+      "type": "PushEvent",
+      "created_at": "2026-07-30T12:00:00Z",
+      "actor": {"id": 7, "login": "synthetic-user"},
+      "repo": {"name": "example/project"},
+      "payload": {
+        "push_id": 403,
+        "ref": "refs/heads/feature",
+        "before": "def456",
+        "head": "multi123",
+        "size": 1,
+        "commits": [{"sha": "multi123"}]
+      }
+    }
+  ],
+  "commit_pulls": {
+    "abc123": [
+      {"number": 2}
+    ],
+    "def456": [],
+    "multi123": [
+      {"number": 2},
+      {"number": 3}
+    ]
+  }
+}

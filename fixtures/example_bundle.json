@@ -1,0 +1,228 @@
+{
+  "schema_version": "0.1",
+  "run": {
+    "run_id": "run:example:2026-08-01",
+    "window": {
+      "start": "2026-07-27T00:00:00Z",
+      "end": "2026-08-03T00:00:00Z",
+      "timezone": "UTC"
+    },
+    "scope": {
+      "repositories": ["repo:github:github.com:example/project"],
+      "actors": []
+    }
+  },
+  "providers": [
+    {
+      "id": "provider:github:github.com",
+      "kind": "github",
+      "instance": "github.com",
+      "capabilities": {
+        "repositories": "supported",
+        "work_items": "supported",
+        "change_requests": "supported",
+        "interactions": "supported",
+        "commits": "supported",
+        "releases": "supported",
+        "ref_changes": "unavailable"
+      }
+    }
+  ],
+  "repositories": [
+    {
+      "id": "repo:github:github.com:example/project",
+      "provider_id": "provider:github:github.com",
+      "full_name": "example/project",
+      "web_url": "https://github.com/example/project"
+    }
+  ],
+  "actors": [
+    {
+      "id": "actor:github:github.com:42",
+      "provider_id": "provider:github:github.com",
+      "source_id": "42",
+      "handle": "example-maintainer"
+    }
+  ],
+  "work_items": [
+    {
+      "id": "work_item:github:github.com:example/project:7",
+      "kind": "issue",
+      "repository_id": "repo:github:github.com:example/project",
+      "number": 7,
+      "title": "Document the evidence export",
+      "state": "open",
+      "web_url": "https://github.com/example/project/issues/7"
+    }
+  ],
+  "change_requests": [
+    {
+      "id": "change_request:github:github.com:example/project:12",
+      "kind": "pull_request",
+      "repository_id": "repo:github:github.com:example/project",
+      "number": 12,
+      "title": "Add replayable evidence output",
+      "state": "merged",
+      "merged_at": "2026-07-29T10:00:00Z",
+      "web_url": "https://github.com/example/project/pull/12"
+    }
+  ],
+  "interactions": [
+    {
+      "id": "interaction:github:github.com:example/project:issue-comment:91",
+      "kind": "issue_comment",
+      "repository_id": "repo:github:github.com:example/project",
+      "subject_id": "work_item:github:github.com:example/project:7",
+      "actor_id": "actor:github:github.com:42",
+      "occurred_at": "2026-07-30T09:00:00Z",
+      "body_collected": false,
+      "web_url": "https://github.com/example/project/issues/7#issuecomment-91"
+    }
+  ],
+  "commits": [
+    {
+      "id": "commit:github:github.com:example/project:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repository_id": "repo:github:github.com:example/project",
+      "actor_id": "actor:github:github.com:42",
+      "occurred_at": "2026-07-29T09:30:00Z",
+      "title": "Add evidence bundle replay",
+      "web_url": "https://github.com/example/project/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "ref_changes": [
+    {
+      "id": "ref_change:github:github.com:example/project:1",
+      "repository_id": "repo:github:github.com:example/project",
+      "kind": "push",
+      "ref": "refs/heads/main",
+      "occurred_at": "2026-07-29T09:30:00Z",
+      "commit_ids": ["commit:github:github.com:example/project:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+      "change_association": "unknown",
+      "evidence_ids": []
+    }
+  ],
+  "releases": [
+    {
+      "id": "release:github:github.com:example/project:v0.1.0",
+      "repository_id": "repo:github:github.com:example/project",
+      "tag": "v0.1.0",
+      "name": "Evidence contract preview",
+      "occurred_at": "2026-07-31T12:00:00Z",
+      "web_url": "https://github.com/example/project/releases/tag/v0.1.0"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "evidence:issue:7",
+      "provider_id": "provider:github:github.com",
+      "subject_type": "work_item",
+      "subject_id": "work_item:github:github.com:example/project:7",
+      "source": "resource_api",
+      "url": "https://github.com/example/project/issues/7"
+    },
+    {
+      "id": "evidence:pull:12",
+      "provider_id": "provider:github:github.com",
+      "subject_type": "change_request",
+      "subject_id": "change_request:github:github.com:example/project:12",
+      "source": "resource_api",
+      "url": "https://github.com/example/project/pull/12"
+    },
+    {
+      "id": "evidence:commit:a",
+      "provider_id": "provider:github:github.com",
+      "subject_type": "commit",
+      "subject_id": "commit:github:github.com:example/project:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "source": "resource_api",
+      "url": "https://github.com/example/project/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "id": "evidence:release:v0.1.0",
+      "provider_id": "provider:github:github.com",
+      "subject_type": "release",
+      "subject_id": "release:github:github.com:example/project:v0.1.0",
+      "source": "resource_api",
+      "url": "https://github.com/example/project/releases/tag/v0.1.0"
+    },
+    {
+      "id": "evidence:comment:91",
+      "provider_id": "provider:github:github.com",
+      "subject_type": "interaction",
+      "subject_id": "interaction:github:github.com:example/project:issue-comment:91",
+      "source": "resource_api",
+      "url": "https://github.com/example/project/issues/7#issuecomment-91"
+    }
+  ],
+  "facts": [
+    {
+      "id": "fact:issue-context",
+      "kind": "work_item_observed",
+      "section": "project",
+      "repository_id": "repo:github:github.com:example/project",
+      "occurred_at": "2026-07-28T08:00:00Z",
+      "summary": "Issue tracks the evidence export documentation",
+      "evidence_ids": ["evidence:issue:7"]
+    },
+    {
+      "id": "fact:merged-change",
+      "kind": "change_request_merged",
+      "section": "release",
+      "repository_id": "repo:github:github.com:example/project",
+      "actor_id": "actor:github:github.com:42",
+      "occurred_at": "2026-07-29T10:00:00Z",
+      "summary": "Merged replayable evidence output",
+      "evidence_ids": ["evidence:pull:12"]
+    },
+    {
+      "id": "fact:commit-observed",
+      "kind": "commit_observed",
+      "section": "change",
+      "repository_id": "repo:github:github.com:example/project",
+      "actor_id": "actor:github:github.com:42",
+      "occurred_at": "2026-07-29T09:30:00Z",
+      "summary": "Observed a commit adding evidence bundle replay",
+      "evidence_ids": ["evidence:commit:a"]
+    },
+    {
+      "id": "fact:release",
+      "kind": "release_published",
+      "section": "release",
+      "repository_id": "repo:github:github.com:example/project",
+      "occurred_at": "2026-07-31T12:00:00Z",
+      "summary": "Published v0.1.0 evidence contract preview",
+      "evidence_ids": ["evidence:release:v0.1.0"]
+    },
+    {
+      "id": "fact:comment",
+      "kind": "interaction_observed",
+      "section": "project",
+      "repository_id": "repo:github:github.com:example/project",
+      "actor_id": "actor:github:github.com:42",
+      "occurred_at": "2026-07-30T09:00:00Z",
+      "summary": "Observed an Issue comment without collecting its body",
+      "evidence_ids": ["evidence:comment:91"]
+    }
+  ],
+  "coverage": {
+    "required_sources": [
+      "repositories",
+      "work_items",
+      "change_requests",
+      "interactions",
+      "commits",
+      "releases"
+    ],
+    "observations": [
+      {"source": "repositories", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported"},
+      {"source": "work_items", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported"},
+      {"source": "change_requests", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported"},
+      {"source": "interactions", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported", "note": "metadata only"},
+      {"source": "commits", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported"},
+      {"source": "releases", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported"},
+      {"source": "ref_changes", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "unavailable", "note": "activity API not enabled; ref completeness is not claimed"}
+    ],
+    "fatal": [],
+    "allow_publish": true
+  }
+}
