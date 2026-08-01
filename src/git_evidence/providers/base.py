@@ -49,6 +49,14 @@ class RepositoryTarget:
         return f"repo:{self.provider_kind}:{self.instance}:{self.owner}/{self.name}"
 
 
+def instance_web_base(instance: str) -> str:
+    """Return an HTTPS-or-explicit-scheme web base for a provider instance."""
+    value = instance.rstrip("/")
+    if value.startswith(("http://", "https://")):
+        return value
+    return f"https://{value}"
+
+
 @dataclass(frozen=True)
 class CollectionRequest:
     provider_kind: str
@@ -58,6 +66,7 @@ class CollectionRequest:
     window_end: str
     timezone: str
     include_activity_api: bool = False
+    actor_ids: tuple[str, ...] = ()
 
     @property
     def repository_ids(self) -> tuple[str, ...]:

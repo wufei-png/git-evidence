@@ -62,12 +62,16 @@ PYTHONPATH=src python3 -m git_evidence collect --config config.example.yml \
   --output evidence/bundle.json
 PYTHONPATH=src python3 -m git_evidence validate fixtures/example_bundle.json
 PYTHONPATH=src python3 -m git_evidence render fixtures/example_bundle.json \
-  --profile project-first --output report.md
+  --config config.example.yml --profile project-first --output report.md
 ```
 
 The example configuration names `GITHUB_TOKEN`; set that environment variable
 before `collect`, or remove `token_env` for an intentionally anonymous public
 run.
+
+Actor names remain anonymous by default. To render a name, set
+`report.display_actor_names: true` and provide its full canonical actor ID in
+`report.actor_labels`; pass the same configuration to `render --config`.
 
 GitLab, GitHub, and Gitee each have an experimental resource-API collector in
 this slice. They are exercised with recorded responses and emit explicit

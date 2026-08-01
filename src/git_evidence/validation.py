@@ -6,6 +6,7 @@ from typing import Any, Iterable
 from urllib.parse import urlparse
 
 from .model import COLLECTION_KEYS, collection
+from .providers.base import ACTIVITY_SOURCES, RESOURCE_SOURCES
 
 CAPABILITY_STATES = {"supported", "unsupported", "unavailable", "incomplete"}
 ASSOCIATION_STATES = {"linked", "unlinked", "ambiguous", "unknown"}
@@ -21,6 +22,7 @@ FAILURE_CLASSES = {
     "fixture_missing",
     "http_error",
 }
+KNOWN_COVERAGE_SOURCES = frozenset((*RESOURCE_SOURCES, *ACTIVITY_SOURCES))
 
 
 @dataclass(frozen=True)
@@ -70,11 +72,13 @@ def _validate_ids(
     return indexes
 
 
-def _validate_run(bundle: dict[str, Any], issues: list[ValidationIssue]) -> set[str]:
+def _validate_run(
+    bundle: dict[str, Any], issues: list[ValidationIssue]
+) -> tuple[set[str], set[str] | None]:
     run = bundle.get("run")
     if not isinstance(run, dict):
         _issue(issues, "run.missing", "run must be an object")
-        return set()
+        return set(), None
     window = run.get("window")
     if not isinstance(window, dict):
         _issue(issues, "window.missing", "run.window must be an object")
@@ -90,14 +94,25 @@ def _validate_run(bundle: dict[str, Any], issues: list[ValidationIssue]) -> set[
     scope = run.get("scope")
     if not isinstance(scope, dict):
         _issue(issues, "scope.missing", "run.scope must be an object")
-        return set()
+        return set(), None
     repositories = scope.get("repositories")
     if not isinstance(repositories, list) or not repositories or not all(
         isinstance(value, str) and value for value in repositories
     ):
         _issue(issues, "scope.repositories", "run.scope.repositories must be a non-empty id allowlist")
-        return set()
-    return set(repositories)
+        return set(), None
+    if len(repositories) != len(set(repositories)):
+        _issue(issues, "scope.repositories_duplicate", "run.scope.repositories must not contain duplicate IDs")
+    actors = scope.get("actors", [])
+    if not isinstance(actors, list) or not all(isinstance(value, str) and value for value in actors):
+        _issue(issues, "scope.actors", "run.scope.actors must be an array of non-empty actor IDs")
+        actor_ids: set[str] | None = None
+    elif len(actors) != len(set(actors)):
+        _issue(issues, "scope.actors_duplicate", "run.scope.actors must not contain duplicate IDs")
+        actor_ids = set(actors)
+    else:
+        actor_ids = set(actors)
+    return set(repositories), actor_ids
 
 
 def _validate_evidence(
@@ -160,12 +175,19 @@ def _validate_evidence(
 def _validate_scope(
     indexes: dict[str, dict[str, dict[str, Any]]],
     scope_repository_ids: set[str],
+    scope_actor_ids: set[str] | None,
     issues: list[ValidationIssue],
 ) -> None:
     repositories = indexes.get("repositories", {})
+    for repository_id in sorted(set(repositories) - scope_repository_ids):
+        _issue(issues, "scope.entity_outside", f"repositories {repository_id} is outside the repository allowlist")
     missing = scope_repository_ids - set(repositories)
     for repository_id in sorted(missing):
         _issue(issues, "scope.repository_missing", f"allowlisted repository is not in bundle: {repository_id}")
+    actors = indexes.get("actors", {})
+    if scope_actor_ids:
+        for actor_id in sorted(set(actors) - scope_actor_ids):
+            _issue(issues, "scope.actor_outside", f"actor {actor_id} is outside the actor allowlist")
     for key in (
         "work_items",
         "change_requests",
@@ -177,8 +199,20 @@ def _validate_scope(
     ):
         for entity_id, item in indexes.get(key, {}).items():
             repository_id = item.get("repository_id")
-            if repository_id and repository_id not in scope_repository_ids:
+            if not isinstance(repository_id, str) or not repository_id:
+                _issue(issues, "scope.entity_repository_missing", f"{key} {entity_id} has no repository_id")
+            elif repository_id not in scope_repository_ids:
                 _issue(issues, "scope.entity_outside", f"{key} {entity_id} is outside the repository allowlist")
+            actor_id = item.get("actor_id")
+            if actor_id is None:
+                continue
+            if not isinstance(actor_id, str) or not actor_id:
+                _issue(issues, "scope.actor_ref_invalid", f"{key} {entity_id} has an invalid actor_id")
+            else:
+                if actor_id not in actors:
+                    _issue(issues, "scope.actor_ref_missing", f"{key} {entity_id} references missing actor {actor_id}")
+                if scope_actor_ids and actor_id not in scope_actor_ids:
+                    _issue(issues, "scope.actor_outside", f"{key} {entity_id} has an actor outside the actor allowlist")
 
 
 def _validate_coverage(
@@ -192,9 +226,24 @@ def _validate_coverage(
         return
     required_sources = coverage.get("required_sources")
     observations = coverage.get("observations")
-    if not isinstance(required_sources, list) or not all(isinstance(value, str) for value in required_sources):
+    if not isinstance(required_sources, list) or not all(
+        isinstance(value, str) and value for value in required_sources
+    ):
         _issue(issues, "coverage.required_sources", "coverage.required_sources must be an array of strings")
         required_sources = []
+    else:
+        if not required_sources:
+            _issue(issues, "coverage.required_sources_empty", "coverage.required_sources must not be empty")
+        if len(required_sources) != len(set(required_sources)):
+            _issue(issues, "coverage.required_sources_duplicate", "coverage.required_sources must not contain duplicates")
+        unknown_sources = sorted(set(required_sources) - KNOWN_COVERAGE_SOURCES)
+        if unknown_sources:
+            _issue(
+                issues,
+                "coverage.required_source_unknown",
+                "coverage.required_sources contains unknown sources: " + ", ".join(unknown_sources),
+            )
+            required_sources = [source for source in required_sources if source in KNOWN_COVERAGE_SOURCES]
     if not isinstance(observations, list):
         _issue(issues, "coverage.observations", "coverage.observations must be an array")
         observations = []
@@ -274,8 +323,8 @@ def validate_bundle(bundle: dict[str, Any]) -> list[ValidationIssue]:
     if bundle.get("schema_version") != "0.1":
         _issue(issues, "schema.version", "schema_version must be '0.1'")
     indexes = _validate_ids(bundle, issues)
-    scope_repository_ids = _validate_run(bundle, issues)
-    _validate_scope(indexes, scope_repository_ids, issues)
+    scope_repository_ids, scope_actor_ids = _validate_run(bundle, issues)
+    _validate_scope(indexes, scope_repository_ids, scope_actor_ids, issues)
     _validate_evidence(indexes, issues)
     _validate_coverage(bundle, scope_repository_ids, issues)
     for key in ("work_items", "change_requests", "interactions", "commits", "ref_changes", "releases", "facts"):

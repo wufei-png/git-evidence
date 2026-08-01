@@ -53,6 +53,16 @@ allowlist/coverage invariants that JSON Schema alone cannot express.
 - Every `fact` has at least one `evidence_id`; every evidence ID resolves to an
   evidence record with a source URL or an explicit non-URL source reference.
 - A fact or entity outside the repository allowlist is invalid for the run.
+- Every repository-scoped entity has a non-empty `repository_id` that belongs
+  to the run allowlist; repository entities themselves must also belong to that
+  allowlist.
+- When `run.scope.actors` is non-empty, every actor entity and every
+  `actor_id` reference belongs to that actor allowlist. Every non-empty
+  `actor_id` reference must also resolve to an actor entity; actor-neutral
+  records remain valid.
+- `coverage.required_sources` is a non-empty, duplicate-free list of known
+  resource or activity source names. An unknown or empty required-source list
+  is invalid.
 - Every required source has a coverage observation for every in-scope
   provider/repository combination.
 - `allow_publish` is false when a required source is fatal, incomplete, or
@@ -68,7 +78,14 @@ allowlist/coverage invariants that JSON Schema alone cannot express.
   When one logical source aggregates child requests with different causes, it
   carries `failure_classes` instead of pretending that the last child error is
   the only cause.
+- A transport diagnostic may carry only the safe rate-limit headers
+  `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset`, and
+  `retry-after`; authentication headers and other response headers are not
+  propagated.
 - A resource-observed commit cannot imply a complete push/ref-change claim.
+- A malformed item inside an otherwise valid provider page is omitted from
+  canonical entities, while valid siblings remain; that source is marked
+  `incomplete` with `failure_class: malformed_response`.
 - A `ref_change` may carry `commit_ids` for commits observed in the same bundle
   and `commit_shas` when the activity source exposes a SHA that is not yet a
   resource entity. Neither field makes an incomplete activity source complete.

@@ -48,11 +48,13 @@ def _merge_bundles(
     window_end: str,
     timezone: str,
     repository_ids: list[str],
+    actor_ids: list[str],
 ) -> dict[str, Any]:
     identity = json.dumps(
         {
             "window": [window_start, window_end, timezone],
             "repositories": repository_ids,
+            "actors": actor_ids,
         },
         ensure_ascii=True,
         sort_keys=True,
@@ -63,7 +65,7 @@ def _merge_bundles(
         "run": {
             "run_id": f"run:aggregate:{run_digest}",
             "window": {"start": window_start, "end": window_end, "timezone": timezone},
-            "scope": {"repositories": repository_ids, "actors": []},
+            "scope": {"repositories": repository_ids, "actors": actor_ids},
         },
         "providers": [],
         "repositories": [],
@@ -129,6 +131,11 @@ def collect_config(
     repositories = scope.get("repositories")
     if not isinstance(repositories, list) or not repositories:
         raise CollectionError("scope.repositories must be a non-empty allowlist")
+    actor_ids = scope.get("actors", [])
+    if not isinstance(actor_ids, list) or not all(isinstance(value, str) and value for value in actor_ids):
+        raise CollectionError("scope.actors must be an array of non-empty actor IDs")
+    if len(actor_ids) != len(set(actor_ids)):
+        raise CollectionError("scope.actors must not contain duplicate actor IDs")
     provider_configs = config.get("providers")
     if not isinstance(provider_configs, dict):
         raise CollectionError("providers must be an object")
@@ -172,6 +179,7 @@ def collect_config(
             window_end=window_end,
             timezone=timezone,
             include_activity_api=bool(options.get("include_activity_api", False)),
+            actor_ids=tuple(actor_ids),
         )
         collected.append(provider.collect(request))
 
@@ -185,4 +193,5 @@ def collect_config(
         window_end=window_end,
         timezone=timezone,
         repository_ids=repository_ids,
+        actor_ids=actor_ids,
     )

@@ -8,8 +8,26 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
+
+
+RATE_LIMIT_HEADERS = (
+    "x-ratelimit-limit",
+    "x-ratelimit-remaining",
+    "x-ratelimit-reset",
+    "retry-after",
+)
+
+
+def rate_limit_headers(headers: Mapping[str, Any] | None) -> dict[str, str]:
+    if not headers:
+        return {}
+    return {
+        str(key).lower(): str(value)
+        for key, value in headers.items()
+        if str(key).lower() in RATE_LIMIT_HEADERS
+    }
 
 
 class ApiError(RuntimeError):
@@ -22,6 +40,7 @@ class ApiError(RuntimeError):
         retryable: bool = False,
         retry_after: float | None = None,
         failure_class: str | None = None,
+        rate_limit: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -29,6 +48,7 @@ class ApiError(RuntimeError):
         self.retryable = retryable
         self.retry_after = retry_after
         self.failure_class = failure_class
+        self.rate_limit = dict(rate_limit or {})
 
 
 class ResponseShapeError(ApiError):
@@ -117,6 +137,21 @@ class UrllibTransport:
         ]
         return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
+    def _redact_text(self, value: Any) -> str:
+        text = str(value)
+        if self.token:
+            for token in (self.token, quote(self.token, safe="")):
+                if token:
+                    text = text.replace(token, "[REDACTED]")
+        if self.token_param:
+            text = re.sub(
+                rf"([?&]{re.escape(self.token_param)}=)[^&#\s]+",
+                r"\1[REDACTED]",
+                text,
+                flags=re.IGNORECASE,
+            )
+        return text
+
     @staticmethod
     def _retry_after(headers: Mapping[str, Any]) -> float | None:
         value = headers.get("Retry-After") or headers.get("retry-after")
@@ -160,8 +195,7 @@ class UrllibTransport:
             except HTTPError as exc:
                 raw = exc.read()
                 detail = raw.decode("utf-8", errors="replace")[:300]
-                if self.token:
-                    detail = detail.replace(self.token, "[REDACTED]")
+                detail = self._redact_text(detail)
                 retry_after = self._retry_after(exc.headers or {})
                 can_retry = exc.code in retryable_statuses and attempt <= self.max_retries
                 if can_retry:
@@ -175,6 +209,7 @@ class UrllibTransport:
                     retryable=exc.code in retryable_statuses,
                     retry_after=retry_after,
                     failure_class=failure_class_for_status(exc.code),
+                    rate_limit=rate_limit_headers(exc.headers),
                 ) from exc
             except URLError as exc:
                 can_retry = attempt <= self.max_retries
@@ -182,7 +217,18 @@ class UrllibTransport:
                     self.sleep_fn(min(self.retry_backoff * (2 ** (attempt - 1)), 60.0))
                     continue
                 raise ApiError(
-                    f"GET {self._redact_url(url)} failed: {exc.reason}",
+                    f"GET {self._redact_url(url)} failed: {self._redact_text(getattr(exc, 'reason', exc))}",
+                    attempts=attempt,
+                    retryable=True,
+                    failure_class="network_error",
+                ) from exc
+            except (TimeoutError, OSError) as exc:
+                can_retry = attempt <= self.max_retries
+                if can_retry:
+                    self.sleep_fn(min(self.retry_backoff * (2 ** (attempt - 1)), 60.0))
+                    continue
+                raise ApiError(
+                    f"GET {self._redact_url(url)} failed: {self._redact_text(exc)}",
                     attempts=attempt,
                     retryable=True,
                     failure_class="network_error",
@@ -218,16 +264,7 @@ def paginate(
     diagnostics: dict[str, Any] = {}
     for page_number in range(1, max_pages + 1):
         response = transport.get(current_path, current_params)
-        rate_limit = {
-            key: response.headers[key]
-            for key in (
-                "x-ratelimit-limit",
-                "x-ratelimit-remaining",
-                "x-ratelimit-reset",
-                "retry-after",
-            )
-            if key in response.headers
-        }
+        rate_limit = rate_limit_headers(response.headers)
         if rate_limit:
             diagnostics["rate_limit"] = rate_limit
         if not isinstance(response.body, list):

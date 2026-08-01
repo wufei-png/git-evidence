@@ -4,7 +4,7 @@ from datetime import timedelta
 from typing import Any
 from urllib.parse import quote
 
-from .base import RESOURCE_SOURCES, CollectionRequest, RepositoryTarget
+from .base import RESOURCE_SOURCES, CollectionRequest, RepositoryTarget, instance_web_base
 from .catalog import PROVIDER_DESCRIPTORS
 from .resource_base import (
     RepositorySnapshot,
@@ -17,7 +17,7 @@ from .resource_base import (
     merge_diagnostics,
     parse_timestamp,
 )
-from .transport import ApiError, JsonTransport, PageResult, UrllibTransport, paginate
+from .transport import ApiError, JsonTransport, PageResult, ResponseShapeError, UrllibTransport, paginate
 
 
 class GitLabProvider(ResourceProvider):
@@ -78,7 +78,7 @@ class GitLabProvider(ResourceProvider):
             "provider_id": f"provider:gitlab:{target.instance}",
             "full_name": raw.get("path_with_namespace") or f"{target.owner}/{target.name}",
             "name": raw.get("name") or target.name,
-            "web_url": raw.get("web_url") or f"https://{target.instance}/{target.owner}/{target.name}",
+            "web_url": raw.get("web_url") or f"{instance_web_base(target.instance)}/{target.owner}/{target.name}",
         }
         issue_result = self._safe_page(
             "work_items",
@@ -131,10 +131,15 @@ class GitLabProvider(ResourceProvider):
             ),
         )
         commit_result.items = [
-            self._normalize_commit(target, item)
+            item
             for item in commit_result.items
             if in_window(first_timestamp(item, "committed_date", "created_at"), request)
         ]
+        commit_result = self._normalize_items(
+            commit_result,
+            "commits",
+            lambda item: self._normalize_commit(target, item),
+        )
 
         release_result = self._safe_page(
             "releases",
@@ -236,7 +241,7 @@ class GitLabProvider(ResourceProvider):
                     "ref": ref,
                     "occurred_at": first_timestamp(event, "created_at"),
                     "web_url": (
-                        f"https://{target.instance}/{target.owner}/{target.name}/-/commit/{commit_to}"
+                        f"{instance_web_base(target.instance)}/{target.owner}/{target.name}/-/commit/{commit_to}"
                         if isinstance(commit_to, str) and commit_to
                         else None
                     ),
@@ -414,7 +419,10 @@ class GitLabProvider(ResourceProvider):
 
     def _normalize_commit(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
         sha = item.get("id")
-        title = item.get("title") or str(item.get("message") or "").splitlines()[0]
+        message = item.get("title") or item.get("message")
+        if not isinstance(message, str) or not message.strip():
+            raise ResponseShapeError(f"commit {sha} has no commit message")
+        title = message.splitlines()[0].strip()
         actor = actor_from(item, "author")
         if actor is None and item.get("author_name"):
             actor = {

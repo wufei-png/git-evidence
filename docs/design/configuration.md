@@ -27,18 +27,25 @@ report:
   profile: project-first
   language: en
   display_actor_names: false
+  actor_labels: {}
 ```
 
 Rules:
 
 - `scope.repositories` is required and is the allowlist authority.
+- `scope.actors` is an optional narrowing allowlist of canonical actor IDs. It
+  filters records that carry an actor; repository and other actor-neutral
+  entities remain in scope. Bundle validation also rejects actor references
+  that do not resolve to an actor entity or fall outside a non-empty allowlist.
 - `window` is a timezone-aware half-open interval `[start, end)`.
 - Tokens come from environment variables, a keyring, or a CI secret; they are
   never stored in this file or passed as a command-line value.
 - `include_activity_api: false` is honest: resource-backed facts remain
   available, but push/ref completeness is unavailable.
-- `display_actor_names` defaults to false. An explicit identity map is required
-  to render names.
+- `display_actor_names` defaults to false. Names are rendered only when it is
+  true and `report.actor_labels` contains an explicit mapping from the full
+  canonical actor ID to a non-empty display label. Bundle-provided names are
+  never trusted by the renderer.
 - Report profile and language change presentation only; they cannot relax
   required coverage or evidence validation.
 
@@ -49,6 +56,10 @@ instances are collected as separate provider groups. If `token_env` is set,
 the runtime reads that environment variable and never accepts a token on the
 command line. A missing environment variable is treated as a collection
 configuration error rather than silently lowering authorization.
+
+`git-evidence render --config config.yml bundle.json` applies the report
+profile, language, actor display flag, and explicit `actor_labels` map without
+making any provider request.
 
 For an intentionally anonymous public run, omit `token_env` explicitly and
 accept the provider's anonymous rate and visibility limits.

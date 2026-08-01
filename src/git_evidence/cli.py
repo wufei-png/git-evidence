@@ -22,8 +22,9 @@ def _parser() -> argparse.ArgumentParser:
 
     render = subparsers.add_parser("render", help="render a validated evidence bundle")
     render.add_argument("bundle", type=Path)
-    render.add_argument("--profile", choices=PROFILES, default="project-first")
-    render.add_argument("--language", choices=LANGUAGES, default="en")
+    render.add_argument("--config", type=Path, help="optional configuration for report and identity display")
+    render.add_argument("--profile", choices=PROFILES)
+    render.add_argument("--language", choices=LANGUAGES)
     render.add_argument("--output", "-o", type=Path)
 
     subparsers.add_parser("providers", help="list provider contracts")
@@ -85,8 +86,28 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print("VALIDATION: none")
         return 0
+    report_config: dict[str, object] = {}
+    if args.config:
+        try:
+            config = load_config(args.config)
+        except ConfigError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        report = config.get("report") or {}
+        if isinstance(report, dict):
+            report_config = report
+    profile = args.profile or str(report_config.get("profile", "project-first"))
+    language = args.language or str(report_config.get("language", "en"))
+    display_actor_names = bool(report_config.get("display_actor_names", False))
+    actor_labels = report_config.get("actor_labels")
     try:
-        rendered = render_bundle(bundle, profile=args.profile, language=args.language)
+        rendered = render_bundle(
+            bundle,
+            profile=profile,
+            language=language,
+            display_actor_names=display_actor_names,
+            actor_labels=actor_labels if isinstance(actor_labels, dict) else None,
+        )
     except RenderError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

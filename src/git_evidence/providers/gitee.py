@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import RESOURCE_SOURCES, CollectionRequest, RepositoryTarget
+from .base import RESOURCE_SOURCES, CollectionRequest, RepositoryTarget, instance_web_base
 from .catalog import PROVIDER_DESCRIPTORS
 from .resource_base import (
     RepositorySnapshot,
@@ -74,7 +74,7 @@ class GiteeProvider(ResourceProvider):
             "provider_id": f"provider:gitee:{target.instance}",
             "full_name": raw.get("full_name") or f"{target.owner}/{target.name}",
             "name": raw.get("name") or target.name,
-            "web_url": raw.get("html_url") or f"https://{target.instance}/{target.owner}/{target.name}",
+            "web_url": raw.get("html_url") or f"{instance_web_base(target.instance)}/{target.owner}/{target.name}",
         }
         issue_result = self._safe_page(
             "work_items",
@@ -206,10 +206,12 @@ class GiteeProvider(ResourceProvider):
         diagnostics: dict[str, Any] = {}
         for item in [*issues, *pulls]:
             number = item.get("number")
+            collection = "issues" if item.get("kind") == "issue" else "pulls"
             result = self._safe_page(
                 "interactions",
-                lambda number=number: self._page(
-                    f"{self._repo_path(target)}/issues/{number}/comments", {}
+                lambda number=number, collection=collection: self._page(
+                    f"{self._repo_path(target)}/{collection}/{number}/comments",
+                    {},
                 ),
             )
             merge_diagnostics(diagnostics, result.diagnostics)

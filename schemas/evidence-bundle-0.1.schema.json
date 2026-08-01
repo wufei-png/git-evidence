@@ -62,7 +62,7 @@
           "required": ["repositories"],
           "properties": {
             "repositories": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-            "actors": {"type": "array", "items": {"type": "string"}}
+            "actors": {"type": "array", "items": {"type": "string", "minLength": 1}}
           },
           "additionalProperties": true
         }
@@ -140,7 +140,17 @@
         "status_code": {"type": "integer"},
         "attempts": {"type": "integer", "minimum": 1},
         "retryable": {"type": "boolean"},
-        "retry_after_seconds": {"type": "number", "minimum": 0}
+        "retry_after_seconds": {"type": "number", "minimum": 0},
+        "rate_limit": {
+          "type": "object",
+          "properties": {
+            "x-ratelimit-limit": {"type": "string"},
+            "x-ratelimit-remaining": {"type": "string"},
+            "x-ratelimit-reset": {"type": "string"},
+            "retry-after": {"type": "string"}
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": true
     },
@@ -148,7 +158,23 @@
       "type": "object",
       "required": ["required_sources", "observations", "fatal", "allow_publish"],
       "properties": {
-        "required_sources": {"type": "array", "items": {"type": "string"}},
+        "required_sources": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "repositories",
+              "work_items",
+              "change_requests",
+              "interactions",
+              "commits",
+              "releases",
+              "activities",
+              "ref_changes"
+            ]
+          }
+        },
         "observations": {
           "type": "array",
           "items": {

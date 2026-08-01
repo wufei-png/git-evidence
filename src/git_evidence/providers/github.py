@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import RESOURCE_SOURCES, CollectionRequest, RepositoryTarget
+from .base import RESOURCE_SOURCES, CollectionRequest, RepositoryTarget, instance_web_base
 from .catalog import PROVIDER_DESCRIPTORS
 from .resource_base import (
     RepositorySnapshot,
@@ -14,7 +14,7 @@ from .resource_base import (
     in_window,
     merge_diagnostics,
 )
-from .transport import ApiError, JsonTransport, PageResult, UrllibTransport, paginate
+from .transport import ApiError, JsonTransport, PageResult, ResponseShapeError, UrllibTransport, paginate
 
 
 class GitHubProvider(ResourceProvider):
@@ -70,7 +70,7 @@ class GitHubProvider(ResourceProvider):
             "provider_id": f"provider:github:{target.instance}",
             "full_name": raw.get("full_name") or f"{target.owner}/{target.name}",
             "name": raw.get("name") or target.name,
-            "web_url": raw.get("html_url") or f"https://{target.instance}/{target.owner}/{target.name}",
+            "web_url": raw.get("html_url") or f"{instance_web_base(target.instance)}/{target.owner}/{target.name}",
         }
 
         work_items = self._safe_page(
@@ -108,10 +108,13 @@ class GitHubProvider(ResourceProvider):
             ),
         )
         commits.items = [
-            self._normalize_commit(target, item)
-            for item in commits.items
-            if self._commit_in_window(item, request)
+            item for item in commits.items if self._commit_in_window(item, request)
         ]
+        commits = self._normalize_items(
+            commits,
+            "commits",
+            lambda item: self._normalize_commit(target, item),
+        )
 
         releases = self._safe_page(
             "releases",
@@ -150,7 +153,7 @@ class GitHubProvider(ResourceProvider):
         association_cache: dict[str, tuple[list[str], SourceResult]] = {}
         association_summary = {"attempted": 0, "complete": 0, "failed": 0}
         association_failure_classes: set[str] = set()
-        repository_url = f"https://{target.instance}/{target.owner}/{target.name}"
+        repository_url = f"{instance_web_base(target.instance)}/{target.owner}/{target.name}"
         for event in events:
             if event.get("type") != "PushEvent":
                 continue
@@ -390,17 +393,24 @@ class GitHubProvider(ResourceProvider):
 
     def _normalize_commit(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
         sha = item.get("sha")
-        commit = item.get("commit") or {}
-        committer = commit.get("committer") or {}
+        commit = item.get("commit")
+        if not isinstance(commit, dict):
+            raise ResponseShapeError(f"commit {sha} has no commit object")
+        message = commit.get("message")
+        if not isinstance(message, str) or not message.strip():
+            raise ResponseShapeError(f"commit {sha} has no commit message")
+        committer = commit.get("committer") if isinstance(commit.get("committer"), dict) else {}
+        author = commit.get("author") if isinstance(commit.get("author"), dict) else {}
+        title = message.splitlines()[0].strip()
         return {
             "id": self._id(target, "commit", sha),
             "sha": sha,
             "repository_id": target.canonical_id,
-            "occurred_at": first_timestamp(committer, "date") or first_timestamp(commit.get("author") or {}, "date"),
-            "title": str(commit.get("message") or "").splitlines()[0],
+            "occurred_at": first_timestamp(committer, "date") or first_timestamp(author, "date"),
+            "title": title,
             "web_url": item.get("html_url"),
             "_actor": actor_from(item, "author", "committer"),
-            "_summary": str(commit.get("message") or "").splitlines()[0] or f"Commit {sha}",
+            "_summary": title or f"Commit {sha}",
             "_section": "change",
         }
 

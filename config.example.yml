@@ -21,3 +21,4 @@ report:
   profile: project-first
   language: en
   display_actor_names: false
+  actor_labels: {}

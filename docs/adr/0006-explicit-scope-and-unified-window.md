@@ -12,3 +12,7 @@ optional narrowing filters, not the source of scope. The private weekly
 Friday convention is not carried into the public product. This makes
 cross-platform runs reproducible and prevents an empty actor or activity
 stream from being mistaken for an empty repository.
+
+When an actor allowlist is present, records with an attributable actor are
+retained only when that actor matches the canonical allowlist. Actor-neutral
+entities such as repositories and releases remain in scope.

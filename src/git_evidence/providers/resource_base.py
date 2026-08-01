@@ -103,6 +103,8 @@ def api_error_diagnostics(error: ApiError) -> dict[str, Any]:
         diagnostics["status_code"] = error.status_code
     if error.retry_after is not None:
         diagnostics["retry_after_seconds"] = error.retry_after
+    if error.rate_limit:
+        diagnostics["rate_limit"] = dict(error.rate_limit)
     return diagnostics
 
 
@@ -147,7 +149,7 @@ class BundleBuilder:
                     "end": request.window_end,
                     "timezone": request.timezone,
                 },
-                "scope": {"repositories": list(request.repository_ids), "actors": []},
+                "scope": {"repositories": list(request.repository_ids), "actors": list(request.actor_ids)},
             },
             "providers": [{
                 "id": self.provider_id,
@@ -223,6 +225,9 @@ class BundleBuilder:
             entity_id = record.get("id")
             if not isinstance(entity_id, str) or not entity_id:
                 continue
+            actor_id = self._actor_id(actor)
+            if self.request.actor_ids and actor is not None and actor_id not in self.request.actor_ids:
+                continue
             if category == "change_requests":
                 for sha in association_shas:
                     self._change_request_ids_by_sha.setdefault((target.canonical_id, sha), set()).add(entity_id)
@@ -258,7 +263,8 @@ class BundleBuilder:
                     association_attempted=association_attempted,
                     association_complete=association_complete,
                 )
-            actor_id = self._add_actor(actor)
+            if actor_id:
+                self._add_actor(actor)
             if actor_id:
                 record["actor_id"] = actor_id
             self._add_entity(category, record)
@@ -305,7 +311,7 @@ class BundleBuilder:
     ) -> str:
         if association_attempted:
             if not commit_shas or not association_complete:
-                return "ambiguous" if len(explicit_change_request_ids) > 1 else "unknown"
+                return "unknown"
             if explicit_change_request_ids:
                 return "linked" if len(explicit_change_request_ids) == 1 else "ambiguous"
             return "unlinked"
@@ -328,11 +334,18 @@ class BundleBuilder:
             return "unknown"
         return "linked"
 
-    def _add_actor(self, actor: dict[str, Any] | None) -> str | None:
-        if not actor or actor.get("source_id") is None:
+    def _actor_id(self, actor: dict[str, Any] | None) -> str | None:
+        if not isinstance(actor, dict) or actor.get("source_id") is None:
             return None
         source_id = str(actor["source_id"])
-        actor_id = self._actor_ids.setdefault(
+        return f"actor:{self.descriptor.kind}:{self.request.instance}:{source_id}"
+
+    def _add_actor(self, actor: dict[str, Any] | None) -> str | None:
+        actor_id = self._actor_id(actor)
+        if actor_id is None:
+            return None
+        source_id = str(actor["source_id"])
+        self._actor_ids.setdefault(
             source_id, f"actor:{self.descriptor.kind}:{self.request.instance}:{source_id}"
         )
         if actor_id not in self._seen["actors"]:
@@ -430,6 +443,31 @@ class ResourceProvider:
                         evidence_source="activity_api",
                     )
         return builder.finish()
+
+    def _normalize_items(
+        self,
+        result: SourceResult,
+        source: str,
+        normalizer: Callable[[dict[str, Any]], dict[str, Any]],
+    ) -> SourceResult:
+        """Normalize valid records while turning malformed items into diagnostics."""
+        normalized: list[dict[str, Any]] = []
+        malformed_count = 0
+        for item in result.items:
+            try:
+                normalized.append(normalizer(item))
+            except (AttributeError, IndexError, KeyError, TypeError, ValueError, ResponseShapeError):
+                malformed_count += 1
+        result.items = normalized
+        if malformed_count:
+            result.status = "incomplete"
+            note = f"{source} response contained {malformed_count} malformed item(s)"
+            result.note = f"{result.note}; {note}" if result.note else note
+            merge_diagnostics(
+                result.diagnostics,
+                {"failure_class": "malformed_response", "malformed_items": malformed_count},
+            )
+        return result
 
     def _safe_page(
         self,

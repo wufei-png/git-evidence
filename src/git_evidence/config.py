@@ -63,6 +63,12 @@ def load_config(path: str | Path) -> dict[str, Any]:
         if repository["provider"] not in PROVIDER_DESCRIPTORS:
             raise ConfigError(f"scope.repositories[{index}].provider is unsupported: {repository['provider']}")
 
+    actors = scope.get("actors", [])
+    if not isinstance(actors, list) or not all(isinstance(value, str) and value for value in actors):
+        raise ConfigError("scope.actors must be an array of non-empty actor IDs")
+    if len(actors) != len(set(actors)):
+        raise ConfigError("scope.actors must not contain duplicate actor IDs")
+
     providers = raw.get("providers")
     if not isinstance(providers, dict):
         raise ConfigError("providers is required")
@@ -100,5 +106,13 @@ def load_config(path: str | Path) -> dict[str, Any]:
         raise ConfigError(f"report.language must be one of {', '.join(LANGUAGES)}")
     if not isinstance(report.get("display_actor_names", False), bool):
         raise ConfigError("report.display_actor_names must be boolean")
+    actor_labels = report.get("actor_labels", {})
+    if not isinstance(actor_labels, dict):
+        raise ConfigError("report.actor_labels must be an object")
+    for actor_id, label in actor_labels.items():
+        if not isinstance(actor_id, str) or not actor_id:
+            raise ConfigError("report.actor_labels keys must be non-empty actor IDs")
+        if not isinstance(label, str) or not label.strip():
+            raise ConfigError(f"report.actor_labels[{actor_id!r}] must be a non-empty label")
 
     return raw
