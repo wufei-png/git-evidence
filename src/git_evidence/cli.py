@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .collect import CollectionError, collect_config
-from .config import ConfigError, load_config
+from .config import ConfigError, load_collection_config, load_report_config
 from .model import BundleLoadError, load_bundle
 from .providers import RESOURCE_SOURCES, provider_catalog
 from .render import LANGUAGES, PROFILES, RenderError, render_bundle
@@ -45,19 +45,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "doctor":
         try:
-            config = load_config(args.config)
+            config = load_collection_config(args.config)
         except ConfigError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
         repositories = config["scope"]["repositories"]
-        print(
-            f"CONFIGURATION: valid ({len(repositories)} allowlisted repositories; "
-            f"profile={config.get('report', {}).get('profile', 'project-first')})"
-        )
+        print(f"CONFIGURATION: valid ({len(repositories)} allowlisted repositories)")
         return 0
     if args.command == "collect":
         try:
-            config = load_config(args.config)
+            config = load_collection_config(args.config)
             bundle = collect_config(config)
         except (ConfigError, CollectionError) as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
@@ -95,17 +92,18 @@ def main(argv: list[str] | None = None) -> int:
     report_config: dict[str, object] = {}
     if args.config:
         try:
-            config = load_config(args.config)
+            report_config = load_report_config(args.config)
         except ConfigError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
-        report = config.get("report") or {}
-        if isinstance(report, dict):
-            report_config = report
     profile = args.profile or str(report_config.get("profile", "project-first"))
     language = args.language or str(report_config.get("language", "en"))
     display_actor_names = bool(report_config.get("display_actor_names", False))
     actor_labels = report_config.get("actor_labels")
+    privacy = report_config.get("privacy")
+    allow_source_urls = True
+    if isinstance(privacy, dict):
+        allow_source_urls = bool(privacy.get("allow_source_urls", True))
     try:
         rendered = render_bundle(
             bundle,
@@ -113,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
             language=language,
             display_actor_names=display_actor_names,
             actor_labels=actor_labels if isinstance(actor_labels, dict) else None,
+            allow_source_urls=allow_source_urls,
         )
     except RenderError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

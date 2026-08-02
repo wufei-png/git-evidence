@@ -7,6 +7,7 @@ from typing import Any, Mapping
 from urllib.parse import quote
 
 from .model import collection
+from .privacy import sanitize_public_url
 from .validation import format_issues, validate_bundle
 
 PROFILES = ("project-first", "timeline", "release-focused", "actor-summary")
@@ -56,7 +57,7 @@ def _escape_text(value: Any) -> str:
 
 
 def _link(label: str, url: str) -> str:
-    safe_url = quote(str(url), safe=":/?#[]@!$&'()*+,;=%-._~")
+    safe_url = quote(str(sanitize_public_url(url)), safe=":/?#[]@!$&'()*+,;=%-._~")
     return f"[{_escape_text(label)}](<{safe_url}>)"
 
 
@@ -107,6 +108,8 @@ def _fact_line(
     evidence: dict[str, dict[str, Any]],
     actor_labels: dict[str, str],
     language: str,
+    *,
+    allow_source_urls: bool = True,
 ) -> str:
     labels = LABELS[language]
     summary = _escape_text(fact.get("summary") or fact.get("title") or fact.get("kind") or "verified activity")
@@ -120,7 +123,7 @@ def _fact_line(
         if not item:
             continue
         url = item.get("url")
-        if url:
+        if allow_source_urls and url:
             links.append(_link(labels["evidence"], str(url)))
     suffix = f" ({', '.join(links)})" if links else ""
     return f"- {summary}{suffix}"
@@ -149,6 +152,7 @@ def render_bundle(
     *,
     display_actor_names: bool = False,
     actor_labels: Mapping[str, str] | None = None,
+    allow_source_urls: bool = True,
 ) -> str:
     """Render a validated bundle using a deterministic built-in profile."""
     if profile not in PROFILES:
@@ -187,7 +191,15 @@ def render_bundle(
                 lines.append(f"### {date}")
                 lines.append("")
                 current_date = date
-            lines.append(_fact_line(fact, evidence, rendered_actor_labels, language))
+            lines.append(
+                _fact_line(
+                    fact,
+                    evidence,
+                    rendered_actor_labels,
+                    language,
+                    allow_source_urls=allow_source_urls,
+                )
+            )
     elif profile == "actor-summary":
         lines.extend([f"## {labels['actors']}", "", f"> {labels['actor_warning']}", ""])
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -197,7 +209,15 @@ def render_bundle(
             lines.append(f"### {rendered_actor_labels.get(actor_id, labels['anonymous'])}")
             lines.append("")
             for fact in grouped[actor_id]:
-                lines.append(_fact_line(fact, evidence, rendered_actor_labels, language))
+                lines.append(
+                    _fact_line(
+                        fact,
+                        evidence,
+                        rendered_actor_labels,
+                        language,
+                        allow_source_urls=allow_source_urls,
+                    )
+                )
             lines.append("")
     else:
         project_facts: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -213,7 +233,15 @@ def render_bundle(
             release_facts = [fact for fact in facts if str(fact.get("section")) == "release"]
             lines.extend([f"## {labels['releases']}", ""])
             for fact in release_facts:
-                lines.append(_fact_line(fact, evidence, rendered_actor_labels, language))
+                lines.append(
+                    _fact_line(
+                        fact,
+                        evidence,
+                        rendered_actor_labels,
+                        language,
+                        allow_source_urls=allow_source_urls,
+                    )
+                )
             if not release_facts:
                 lines.append("- No verified releases or release changes.")
             lines.append("")
@@ -227,12 +255,28 @@ def render_bundle(
             for fact in project_facts[repository_id]:
                 if profile == "release-focused" and str(fact.get("section")) == "release":
                     continue
-                lines.append(_fact_line(fact, evidence, rendered_actor_labels, language))
+                lines.append(
+                    _fact_line(
+                        fact,
+                        evidence,
+                        rendered_actor_labels,
+                        language,
+                        allow_source_urls=allow_source_urls,
+                    )
+                )
             lines.append("")
         if other_facts:
             lines.extend([f"## {labels['other']}", ""])
             for fact in other_facts:
-                lines.append(_fact_line(fact, evidence, rendered_actor_labels, language))
+                lines.append(
+                    _fact_line(
+                        fact,
+                        evidence,
+                        rendered_actor_labels,
+                        language,
+                        allow_source_urls=allow_source_urls,
+                    )
+                )
             lines.append("")
 
     lines.extend(_render_coverage(bundle, language))

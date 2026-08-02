@@ -13,6 +13,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import SchemaError
 
 from .model import COLLECTION_KEYS, collection
+from .privacy import iter_privacy_violations
 from .providers.base import ACTIVITY_SOURCES, RESOURCE_SOURCES
 
 CAPABILITY_STATES = {"supported", "unsupported", "unavailable", "incomplete"}
@@ -32,6 +33,7 @@ FAILURE_CLASSES = {
     "unexpected_error",
     "unexpected_normalizer_error",
     "budget_exhausted",
+    "privacy_violation",
 }
 KNOWN_COVERAGE_SOURCES = frozenset((*RESOURCE_SOURCES, *ACTIVITY_SOURCES))
 SUBJECT_COLLECTIONS = {
@@ -555,6 +557,26 @@ def _validate_coverage(
         _issue(issues, "coverage.publish_blocked", "coverage.allow_publish is not true")
 
 
+def _validate_privacy(bundle: dict[str, Any], issues: list[ValidationIssue]) -> None:
+    for path, reason in iter_privacy_violations(bundle):
+        _issue(issues, f"privacy.{reason}", f"public payload is unsafe at {path}")
+
+    policy = bundle.get("privacy")
+    if policy is None:
+        # 0.1 bundles predating the explicit policy remain compatible; the
+        # renderer still applies the anonymous/default-deny behavior below.
+        return
+    if not isinstance(policy, dict):
+        _issue(issues, "privacy.policy_shape", "privacy must be an object")
+        return
+    if policy.get("actor_display") != "anonymous":
+        _issue(issues, "privacy.actor_display", "bundle actor display policy must be anonymous")
+    if policy.get("source_urls") != "sanitized":
+        _issue(issues, "privacy.source_urls", "bundle source URLs must be sanitized")
+    if policy.get("auth_redaction") is not True:
+        _issue(issues, "privacy.auth_redaction", "bundle auth redaction must be enabled")
+
+
 def validate_bundle(
     bundle: dict[str, Any],
     *,
@@ -571,6 +593,7 @@ def validate_bundle(
     scope_repository_ids, scope_actor_ids = _validate_run(bundle, issues)
     _validate_scope(indexes, scope_repository_ids, scope_actor_ids, issues)
     _validate_evidence(indexes, issues)
+    _validate_privacy(bundle, issues)
     contract = (
         tuple(RESOURCE_SOURCES)
         if required_sources_contract is None

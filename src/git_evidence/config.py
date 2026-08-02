@@ -2,16 +2,45 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 
+from .providers.catalog import PROVIDER_REGISTRY
 from .render import LANGUAGES, PROFILES
-from .providers.catalog import PROVIDER_DESCRIPTORS
 
 
 class ConfigError(ValueError):
-    """Configuration is unsafe or insufficient for a collection plan."""
+    """Configuration is unsafe or insufficient for a collection or report."""
+
+
+DEFAULT_REPORT_PROFILE = "project-first"
+DEFAULT_REPORT_LANGUAGE = "en"
+DEFAULT_ACTOR_DISPLAY = "anonymous"
+DEFAULT_ALLOW_SOURCE_URLS = True
+INLINE_SECRET_KEYS = frozenset(
+    {
+        "authorization",
+        "api_key",
+        "apikey",
+        "access_token",
+        "client_secret",
+        "cookie",
+        "credential",
+        "credentials",
+        "id_token",
+        "password",
+        "private_token",
+        "proxy_authorization",
+        "refresh_token",
+        "secret",
+        "token",
+    }
+)
+
+
+def _normalized_key(value: Any) -> str:
+    return str(value).strip().lower().replace("-", "_")
 
 
 def provider_runtime_options(provider_kind: str, provider_config: dict[str, Any]) -> dict[str, Any]:
@@ -82,14 +111,17 @@ def _aware_timestamp(value: Any, field: str) -> datetime:
     return timestamp
 
 
-def load_config(path: str | Path) -> dict[str, Any]:
+def _read_config(path: str | Path) -> dict[str, Any]:
     try:
         raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
         raise ConfigError(str(exc)) from exc
     if not isinstance(raw, dict):
         raise ConfigError("configuration root must be an object")
+    return raw
 
+
+def _validate_collection_mapping(raw: Mapping[str, Any]) -> None:
     window = raw.get("window")
     if not isinstance(window, dict):
         raise ConfigError("window is required")
@@ -112,8 +144,9 @@ def load_config(path: str | Path) -> dict[str, Any]:
         for key in ("provider", "instance", "owner", "name"):
             if not isinstance(repository.get(key), str) or not repository[key]:
                 raise ConfigError(f"scope.repositories[{index}].{key} is required")
-        if repository["provider"] not in PROVIDER_DESCRIPTORS:
-            raise ConfigError(f"scope.repositories[{index}].provider is unsupported: {repository['provider']}")
+        provider = repository["provider"]
+        if not PROVIDER_REGISTRY.contains(provider):
+            raise ConfigError(f"scope.repositories[{index}].provider is unsupported: {provider}")
 
     actors = scope.get("actors", [])
     if not isinstance(actors, list) or not all(isinstance(value, str) and value for value in actors):
@@ -127,8 +160,13 @@ def load_config(path: str | Path) -> dict[str, Any]:
     for provider_kind, provider_config in providers.items():
         if not isinstance(provider_kind, str) or not isinstance(provider_config, dict):
             raise ConfigError("providers entries must be objects keyed by provider kind")
-        if provider_kind not in PROVIDER_DESCRIPTORS:
+        if not PROVIDER_REGISTRY.contains(provider_kind):
             raise ConfigError(f"unsupported provider: {provider_kind}")
+        for key in provider_config:
+            if _normalized_key(key) in INLINE_SECRET_KEYS:
+                raise ConfigError(
+                    f"providers.{provider_kind}.{key} must not contain credentials; use token_env"
+                )
         token_env = provider_config.get("token_env")
         if token_env is not None and (not isinstance(token_env, str) or not token_env):
             raise ConfigError(f"providers.{provider_kind}.token_env must be a non-empty string")
@@ -148,16 +186,28 @@ def load_config(path: str | Path) -> dict[str, Any]:
             "missing provider configuration: " + ", ".join(missing_provider_config)
         )
 
-    report = raw.get("report") or {}
+
+def _report_mapping(raw: Mapping[str, Any]) -> Mapping[str, Any]:
+    report = raw.get("report") if "report" in raw else raw
+    if report is None:
+        return {}
     if not isinstance(report, dict):
         raise ConfigError("report must be an object")
-    profile = report.get("profile", "project-first")
-    language = report.get("language", "en")
+    return report
+
+
+def validate_report_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and normalize only report/profile/privacy settings."""
+    report = _report_mapping(config)
+    profile = report.get("profile", DEFAULT_REPORT_PROFILE)
+    language = report.get("language", DEFAULT_REPORT_LANGUAGE)
     if profile not in PROFILES:
         raise ConfigError(f"report.profile must be one of {', '.join(PROFILES)}")
     if language not in LANGUAGES:
         raise ConfigError(f"report.language must be one of {', '.join(LANGUAGES)}")
-    if not isinstance(report.get("display_actor_names", False), bool):
+
+    display_actor_names = report.get("display_actor_names", False)
+    if not isinstance(display_actor_names, bool):
         raise ConfigError("report.display_actor_names must be boolean")
     actor_labels = report.get("actor_labels", {})
     if not isinstance(actor_labels, dict):
@@ -168,4 +218,62 @@ def load_config(path: str | Path) -> dict[str, Any]:
         if not isinstance(label, str) or not label.strip():
             raise ConfigError(f"report.actor_labels[{actor_id!r}] must be a non-empty label")
 
+    privacy = report.get("privacy", {})
+    if privacy is None:
+        privacy = {}
+    if not isinstance(privacy, dict):
+        raise ConfigError("report.privacy must be an object")
+    actor_display = privacy.get("actor_display", DEFAULT_ACTOR_DISPLAY)
+    if actor_display not in {"anonymous", "explicit-labels"}:
+        raise ConfigError("report.privacy.actor_display must be anonymous or explicit-labels")
+    if display_actor_names and "actor_display" in privacy and actor_display == "anonymous":
+        raise ConfigError(
+            "report.display_actor_names conflicts with report.privacy.actor_display=anonymous"
+        )
+    if display_actor_names:
+        actor_display = "explicit-labels"
+    allow_source_urls = privacy.get("allow_source_urls", DEFAULT_ALLOW_SOURCE_URLS)
+    if not isinstance(allow_source_urls, bool):
+        raise ConfigError("report.privacy.allow_source_urls must be boolean")
+    auth_redaction = privacy.get("auth_redaction", True)
+    if auth_redaction is not True:
+        raise ConfigError("report.privacy.auth_redaction must remain true")
+
+    return {
+        "profile": profile,
+        "language": language,
+        "display_actor_names": actor_display == "explicit-labels",
+        "actor_labels": dict(actor_labels),
+        "privacy": {
+            "actor_display": actor_display,
+            "allow_source_urls": allow_source_urls,
+            "auth_redaction": True,
+        },
+    }
+
+
+def validate_collection_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate only collection/window/scope/provider settings."""
+    if not isinstance(config, Mapping):
+        raise ConfigError("configuration root must be an object")
+    _validate_collection_mapping(config)
+    return dict(config)
+
+
+def load_collection_config(path: str | Path) -> dict[str, Any]:
+    """Load a collection plan without evaluating report settings."""
+    raw = _read_config(path)
+    return validate_collection_config(raw)
+
+
+def load_report_config(path: str | Path) -> dict[str, Any]:
+    """Load normalized report/profile/privacy settings without collection checks."""
+    return validate_report_config(_read_config(path))
+
+
+def load_config(path: str | Path) -> dict[str, Any]:
+    """Legacy single-file loader that validates both configuration domains."""
+    raw = _read_config(path)
+    validate_collection_config(raw)
+    validate_report_config(raw)
     return raw

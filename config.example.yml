@@ -34,3 +34,7 @@ report:
   language: en
   display_actor_names: false
   actor_labels: {}
+  privacy:
+    actor_display: anonymous
+    allow_source_urls: true
+    auth_redaction: true

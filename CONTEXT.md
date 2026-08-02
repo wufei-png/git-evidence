@@ -87,6 +87,20 @@ The operational cause attached to a coverage diagnostic, such as
 `malformed_response`. It explains why a capability state was not supported; it
 does not replace the capability state.
 
+**Configuration boundary**:
+Collection configuration owns the time window, repository/actor allowlists,
+provider registry selection, runtime limits, and environment-only credential
+references. Report configuration owns profile, language, privacy, and explicit
+actor labels. The two domains are independently validated; the compatibility
+single-file loader may validate both, but `collect` and `render` consume only
+their respective domains.
+
+**Privacy default**:
+Actors are anonymous unless an explicit actor-ID-to-label map is supplied.
+Tokens, credentials, and auth headers are never part of a public bundle. Source
+URLs may remain evidence after auth query/userinfo redaction, while an unsafe
+URL or sensitive payload field blocks publication.
+
 **Actor identity**:
 The provider-qualified identity used to attribute an observation. Its stable
 identity may remain in the evidence bundle while display names are hidden

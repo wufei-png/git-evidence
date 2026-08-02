@@ -10,9 +10,9 @@ It is not an engineering productivity scoring system or a generic AI
 summarizer: every publishable claim must remain tied to source evidence and an
 explicit coverage boundary.
 
-This project is in the design and extraction stage. Its intended product is a
-standalone CLI/library that collects platform data, normalizes it into a
-versioned evidence bundle, validates coverage, and renders reproducible
+This project is in the implementation and contract-hardening stage. Its
+product is a standalone CLI/library that collects platform data, normalizes it
+into a versioned evidence bundle, validates coverage, and renders reproducible
 Markdown or JSON reports. Agent skills and scheduled jobs are optional
 adapters around that core, not the source of truth.
 
@@ -46,6 +46,12 @@ collection into a confident report.
 - The public baseline is Apache-2.0 with synthetic or anonymous fixtures only.
 - Comment bodies and private organization data are excluded by default.
 - The default model has no productivity score, ranking, or performance claim.
+- Provider descriptors and instance factories are registered together and
+  unknown provider kinds fail closed.
+- Collection and report configuration are independently validated; the legacy
+  single-file loader remains available for compatibility.
+- Actors are anonymous by default, credentials are environment-only, and
+  source URLs are retained only after auth material is redacted.
 
 See [CONTEXT.md](CONTEXT.md), the [accepted ADRs](docs/adr/), and the current
 [MVP plan](docs/plans/2026-08-01-open-source-mvp.md).
@@ -87,8 +93,9 @@ adapters; they are not claims that the live APIs behave identically across
 instances or versions.
 
 The live replay boundary and offline verification checklist are documented in
-[`docs/testing/live-e2e.md`](docs/testing/live-e2e.md). Live bundles are kept
-outside the public fixture set.
+[`docs/testing/live-e2e.md`](docs/testing/live-e2e.md) and the
+[`offline/CI/live-canary contract`](docs/runbook/offline-ci-live-canary.md).
+Live bundles are kept outside the public fixture set.
 
 With `include_activity_api: true`, GitLab and GitHub may add bounded push/ref
 observations marked `incomplete`; Gitee remains explicitly `unsupported` for
@@ -97,6 +104,9 @@ a complete push/ref claim.
 
 ## Status
 
-No provider is advertised as production-complete yet. A provider becomes
-supported only when its capability declaration, contract fixtures, coverage
-behavior, live replay gates, and report replay tests pass.
+The P2 contract slice includes the provider registry, collection/report config
+split, and fail-closed privacy publication gate. No provider is advertised as
+production-complete: this checkout's offline fixtures and renderer tests do not
+constitute a live-provider canary, and no current live canary is claimed.
+A provider becomes supported only when its capability declaration, contract
+fixtures, coverage behavior, live replay gates, and report replay tests pass.

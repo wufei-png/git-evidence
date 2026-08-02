@@ -389,7 +389,7 @@ class ContractTests(unittest.TestCase):
         output_path.unlink(missing_ok=True)
         stderr = StringIO()
         try:
-            with patch("git_evidence.cli.load_config", return_value={}):
+            with patch("git_evidence.cli.load_collection_config", return_value={}):
                 with patch("git_evidence.cli.collect_config", return_value=bundle):
                     with patch("sys.stderr", stderr):
                         result = cli_main(
@@ -665,7 +665,7 @@ class ContractTests(unittest.TestCase):
 
         stdout = StringIO()
         stderr = StringIO()
-        with patch("git_evidence.cli.load_config", return_value={}), patch(
+        with patch("git_evidence.cli.load_collection_config", return_value={}), patch(
             "git_evidence.cli.collect_config", return_value=bundle
         ), patch("sys.stdout", stdout), patch("sys.stderr", stderr):
             result = cli_main(["collect", "--config", "ignored-config.yml"])

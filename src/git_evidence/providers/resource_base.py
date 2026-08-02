@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
 
+from ..privacy import sanitize_public_payload
 from .base import (
     ACTIVITY_SOURCES,
     RESOURCE_SOURCES,
@@ -248,6 +249,11 @@ class BundleBuilder:
                 },
                 "metrics": transport_metrics(transport),
             },
+            "privacy": {
+                "actor_display": "anonymous",
+                "source_urls": "sanitized",
+                "auth_redaction": True,
+            },
             "coverage": {
                 "required_sources": list(RESOURCE_SOURCES),
                 "observations": [],
@@ -284,7 +290,7 @@ class BundleBuilder:
             )
 
     def add_repository(self, record: dict[str, Any]) -> None:
-        self._add_entity("repositories", record)
+        self._add_entity("repositories", sanitize_public_payload(record))
 
     def add_records(
         self,
@@ -353,6 +359,7 @@ class BundleBuilder:
                 self._add_actor(actor)
             if actor_id:
                 record["actor_id"] = actor_id
+            record = sanitize_public_payload(record)
             self._add_entity(category, record)
             evidence_id = f"evidence:{category}:{entity_id}"
             evidence = {
@@ -447,6 +454,7 @@ class BundleBuilder:
         return actor_id
 
     def _add_entity(self, category: str, record: dict[str, Any]) -> None:
+        record = sanitize_public_payload(record)
         entity_id = record.get("id")
         if not isinstance(entity_id, str) or not entity_id:
             return

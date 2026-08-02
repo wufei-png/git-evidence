@@ -34,6 +34,7 @@
     "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
     "facts": {"type": "array", "items": {"$ref": "#/$defs/fact"}},
     "collection": {"$ref": "#/$defs/collection"},
+    "privacy": {"$ref": "#/$defs/privacy"},
     "coverage": {"$ref": "#/$defs/coverage"}
   },
   "$defs": {
@@ -135,7 +136,8 @@
             "provider_not_ready",
             "unexpected_error",
             "unexpected_normalizer_error",
-            "budget_exhausted"
+            "budget_exhausted",
+            "privacy_violation"
           ]
         },
         "failure_classes": {
@@ -156,7 +158,8 @@
             "provider_not_ready",
             "unexpected_error",
             "unexpected_normalizer_error",
-            "budget_exhausted"
+            "budget_exhausted",
+            "privacy_violation"
             ]
           }
         },
@@ -176,6 +179,16 @@
         }
       },
       "additionalProperties": true
+    },
+    "privacy": {
+      "type": "object",
+      "required": ["actor_display", "source_urls", "auth_redaction"],
+      "properties": {
+        "actor_display": {"const": "anonymous"},
+        "source_urls": {"const": "sanitized"},
+        "auth_redaction": {"const": true}
+      },
+      "additionalProperties": false
     },
     "collection": {
       "type": "object",

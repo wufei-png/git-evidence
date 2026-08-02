@@ -9,7 +9,8 @@ from typing import Any, Callable
 
 from .config import provider_runtime_options
 from .model import COLLECTION_KEYS
-from .providers import CollectionRequest, GiteeProvider, GitHubProvider, GitLabProvider, RepositoryTarget
+from .privacy import PrivacyError, sanitize_public_payload
+from .providers import CollectionRequest, PROVIDER_REGISTRY, RepositoryTarget
 from .providers.base import ACTIVITY_SOURCES, ProviderNotReady, RESOURCE_SOURCES
 from .providers.resource_base import StrictNormalizationError, api_error_diagnostics
 from .providers.transport import ApiError, ResponseShapeError, empty_transport_metrics
@@ -32,23 +33,11 @@ def _timestamp_text(value: Any, field: str) -> str:
     raise CollectionError(f"{field} must be a non-empty timestamp")
 
 
-def _default_provider_factory(
-    kind: str, instance: str, provider_config: dict[str, Any], token: str | None
-) -> Any:
-    verify_tls = provider_config.get("verify_tls", True)
-    runtime = provider_runtime_options(kind, provider_config)
-    if kind == "github":
-        return GitHubProvider(instance=instance, token=token, verify_tls=verify_tls, **runtime)
-    if kind == "gitlab":
-        return GitLabProvider(instance=instance, token=token, verify_tls=verify_tls, **runtime)
-    if kind == "gitee":
-        return GiteeProvider(instance=instance, token=token, verify_tls=verify_tls, **runtime)
-    raise CollectionError(f"unsupported provider: {kind}")
-
-
 def _group_failure_diagnostics(error: Exception) -> tuple[str, dict[str, Any]]:
     if isinstance(error, ProviderNotReady):
         return "provider_not_ready", {"failure_class": "provider_not_ready"}
+    if isinstance(error, PrivacyError):
+        return "privacy_violation", {"failure_class": "privacy_violation"}
     if isinstance(error, (StrictNormalizationError, ResponseShapeError)):
         return "malformed_response", api_error_diagnostics(error)
     if isinstance(error, ApiError):
@@ -61,6 +50,10 @@ def _group_failure_diagnostics(error: Exception) -> tuple[str, dict[str, Any]]:
 
 def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
     """Validate the container shapes consumed by the group merge boundary."""
+    try:
+        bundle = sanitize_public_payload(bundle)
+    except PrivacyError as exc:
+        raise ResponseShapeError(str(exc)) from exc
     if not isinstance(bundle, dict):
         raise ResponseShapeError("provider returned a non-object bundle")
 
@@ -184,6 +177,11 @@ def _failed_group_bundle(
             },
             "metrics": empty_transport_metrics(cache_enabled=bool(runtime["cache_enabled"])),
         },
+        "privacy": {
+            "actor_display": "anonymous",
+            "source_urls": "sanitized",
+            "auth_redaction": True,
+        },
         "coverage": {
             "required_sources": list(RESOURCE_SOURCES),
             "observations": observations,
@@ -234,6 +232,11 @@ def _merge_bundles(
         "collection": {
             "groups": [],
             "metrics": empty_transport_metrics(),
+        },
+        "privacy": {
+            "actor_display": "anonymous",
+            "source_urls": "sanitized",
+            "auth_redaction": True,
         },
         "coverage": {
             "required_sources": list(RESOURCE_SOURCES),
@@ -335,6 +338,8 @@ def collect_config(
         name = item.get("name")
         if not all(isinstance(value, str) and value for value in (kind, instance, owner, name)):
             raise CollectionError(f"scope.repositories[{index}] has incomplete provider target")
+        if not PROVIDER_REGISTRY.contains(kind):
+            raise CollectionError(f"unsupported provider: {kind}")
         provider_config = provider_configs.get(kind)
         if not isinstance(provider_config, dict):
             raise CollectionError(f"missing provider configuration: {kind}")
@@ -346,7 +351,6 @@ def collect_config(
         except ValueError as exc:
             raise CollectionError(str(exc)) from exc
 
-    factory = provider_factory or _default_provider_factory
     collected: list[dict[str, Any]] = []
     group_plans: list[tuple[tuple[str, str], list[RepositoryTarget], dict[str, Any], str | None]] = []
     for group_key, targets in sorted(grouped.items()):
@@ -380,7 +384,16 @@ def collect_config(
             retry_after_max_seconds=float(runtime["retry_after_max_seconds"]),
         )
         try:
-            provider = factory(kind, instance, options, token)
+            if provider_factory is not None:
+                provider = provider_factory(kind, instance, options, token)
+            else:
+                provider = PROVIDER_REGISTRY.create(
+                    kind,
+                    instance=instance,
+                    provider_config=options,
+                    token=token,
+                    runtime_options=runtime,
+                )
             collected.append(_validate_provider_bundle_shape(provider.collect(request)))
         except CollectionError:
             raise

@@ -40,6 +40,10 @@ report:
   language: en
   display_actor_names: false
   actor_labels: {}
+  privacy:
+    actor_display: anonymous
+    allow_source_urls: true
+    auth_redaction: true
 ```
 
 Rules:
@@ -58,6 +62,14 @@ Rules:
   true and `report.actor_labels` contains an explicit mapping from the full
   canonical actor ID to a non-empty display label. Bundle-provided names are
   never trusted by the renderer.
+- Collection and report settings have separate validators. `collect` uses
+  `load_collection_config` and ignores invalid report settings; `render` uses
+  `load_report_config` and ignores collection settings. `load_config` remains
+  the strict legacy single-file compatibility loader.
+- `report.privacy.actor_display` defaults to `anonymous`; `explicit-labels`
+  displays only labels supplied in `report.actor_labels`. `auth_redaction` is
+  mandatory and source URLs remain allowed evidence after auth query/userinfo
+  sanitization. Inline credentials are rejected; use `token_env` instead.
 - Report profile and language change presentation only; they cannot relax
   required coverage or evidence validation.
 - Provider request limits are bounded per `(provider, instance)` group. The

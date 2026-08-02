@@ -6,7 +6,13 @@ from .base import (
     ProviderNotReady,
     RepositoryTarget,
 )
-from .catalog import provider_catalog
+from .catalog import (
+    PROVIDER_REGISTRY,
+    ProviderRegistration,
+    ProviderRegistry,
+    ProviderRegistryError,
+    provider_catalog,
+)
 from .gitee import GiteeProvider
 from .github import GitHubProvider
 from .gitlab import GitLabProvider
@@ -20,6 +26,10 @@ __all__ = [
     "GitLabProvider",
     "ProviderDescriptor",
     "ProviderNotReady",
+    "ProviderRegistration",
+    "ProviderRegistry",
+    "ProviderRegistryError",
+    "PROVIDER_REGISTRY",
     "RepositoryTarget",
     "provider_catalog",
 ]

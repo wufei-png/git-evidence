@@ -1,13 +1,14 @@
 # Open-source MVP plan
 
-Status: implementation gates in progress.
+Status: P2 contract gates implemented locally; live canary remains unverified.
 
 The first collection slice is now implemented: canonical bundle loading,
 fail-closed validation, four deterministic offline report profiles, a
-three-provider catalog, and experimental resource-API collectors exercised by
-public synthetic replay fixtures. Live smoke replays now cover GitHub, GitLab,
-and Gitee resource paths, but live production support remains explicitly
-unadvertised until provider-specific coverage and replay gates pass.
+three-provider registry, and experimental resource-API collectors exercised by
+public synthetic replay fixtures. The P2 contract also separates collection
+and report config validation and makes anonymous actor display, credential
+redaction, and auth-safe evidence URLs publication gates. No live provider
+canary is claimed by offline replay.
 
 The configuration-driven `collect` command now groups explicit repository
 targets by provider/instance and merges them into one canonical bundle. A
@@ -17,6 +18,9 @@ cannot be rendered as a publishable report.
 The optional activity slice is also wired: GitLab and GitHub can emit bounded
 push/ref observations with conservative association states; Gitee remains
 explicitly unsupported for activity/ref collection.
+
+The offline/CI versus live-canary acceptance boundary is recorded in
+[`docs/runbook/offline-ci-live-canary.md`](../runbook/offline-ci-live-canary.md).
 
 ## Product promise
 
