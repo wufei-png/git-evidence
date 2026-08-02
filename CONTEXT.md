@@ -110,3 +110,16 @@ unless a report configuration explicitly allows them.
 A commit or repository change found through a resource API. It may be shown as
 an observed change, but it is not a push/ref-change claim unless the provider
 has corresponding ref evidence.
+
+## Boundary language
+
+**Independent domain boundary**:
+Git Evidence owns the meanings of repository, provider, capability, coverage,
+publication, and privacy as one product context; similarly named terms from
+another system are not synonyms.
+_Avoid_: Shared domain model, common runtime
+
+**Thin protocol**:
+A documentation-level agreement containing only genuinely shared vocabulary or
+exchange rules while each context retains its own meaning and ownership.
+_Avoid_: Shared implementation, runtime dependency
