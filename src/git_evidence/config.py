@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 import yaml
 
+from .providers.base import validate_instance
 from .providers.catalog import PROVIDER_REGISTRY
 from .limits import (
     MAX_CACHE_ENTRIES,
@@ -199,6 +200,10 @@ def _validate_collection_mapping(raw: Mapping[str, Any]) -> None:
         provider = repository["provider"]
         if not PROVIDER_REGISTRY.contains(provider):
             raise ConfigError(f"scope.repositories[{index}].provider is unsupported: {provider}")
+        try:
+            validate_instance(repository["instance"])
+        except ValueError as exc:
+            raise ConfigError(f"scope.repositories[{index}].instance is unsafe: {exc}") from exc
 
     actors = scope.get("actors", [])
     if not isinstance(actors, list) or not all(isinstance(value, str) and value for value in actors):

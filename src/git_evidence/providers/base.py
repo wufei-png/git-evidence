@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from typing import Any, Mapping, Protocol
+from urllib.parse import urlsplit
 
 from ..limits import (
     MAX_PAGES,
@@ -56,13 +57,43 @@ class RepositoryTarget:
     owner: str
     name: str
 
+    def __post_init__(self) -> None:
+        validate_instance(self.instance)
+
     @property
     def canonical_id(self) -> str:
         return f"repo:{self.provider_kind}:{self.instance}:{self.owner}/{self.name}"
 
 
+def validate_instance(instance: Any) -> str:
+    """Validate an instance authority while allowing a safe base path."""
+    if not isinstance(instance, str) or not instance or instance != instance.strip():
+        raise ValueError("instance must be a non-empty URL host or http(s) base")
+    if any(character.isspace() or ord(character) < 0x20 for character in instance):
+        raise ValueError("instance must not contain whitespace or control characters")
+    if "?" in instance or "#" in instance:
+        raise ValueError("instance must not contain a query or fragment")
+    candidate = instance if instance.startswith(("http://", "https://")) else f"//{instance}"
+    try:
+        parts = urlsplit(candidate)
+        hostname = parts.hostname
+        parts.port
+    except ValueError as exc:
+        raise ValueError("instance is not a valid URL authority") from exc
+    if parts.scheme and parts.scheme not in {"http", "https"}:
+        raise ValueError("instance must use http or https")
+    if not parts.netloc or not hostname:
+        raise ValueError("instance must contain a host")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("instance must not contain URL userinfo")
+    if parts.query or parts.fragment:
+        raise ValueError("instance must not contain a query or fragment")
+    return instance
+
+
 def instance_web_base(instance: str) -> str:
     """Return an HTTPS-or-explicit-scheme web base for a provider instance."""
+    validate_instance(instance)
     value = instance.rstrip("/")
     if value.startswith(("http://", "https://")):
         return value
@@ -87,6 +118,12 @@ class CollectionRequest:
     retry_after_max_seconds: float = 60.0
 
     def __post_init__(self) -> None:
+        validate_instance(self.instance)
+        for target in self.repositories:
+            if not isinstance(target, RepositoryTarget):
+                raise ValueError("repositories must contain RepositoryTarget values")
+            if target.provider_kind != self.provider_kind or target.instance != self.instance:
+                raise ValueError("repository target provider and instance must match the request")
         if (
             isinstance(self.timeout_seconds, bool)
             or not isinstance(self.timeout_seconds, (int, float))

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 import re
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -107,22 +107,42 @@ def is_sensitive_field(name: Any) -> bool:
     )
 
 
-def is_auth_query_name(name: Any) -> bool:
+def _additional_auth_query_names(names: Iterable[Any] | None) -> set[str]:
+    if names is None:
+        return set()
+    if isinstance(names, str):
+        names = (names,)
+    return {_normalized_key(name) for name in names}
+
+
+def is_auth_query_name(name: Any, *, additional_query_names: Iterable[Any] | None = None) -> bool:
     normalized = _normalized_key(name)
     return (
         normalized in AUTH_QUERY_NAMES
         or _is_auth_suffix(normalized)
         or is_sensitive_field(normalized)
+        or normalized in _additional_auth_query_names(additional_query_names)
     )
 
 
-def _fragment_contains_auth(fragment: str) -> bool:
+def _fragment_contains_auth(
+    fragment: str,
+    *,
+    additional_query_names: Iterable[Any] | None = None,
+) -> bool:
     if not fragment:
         return False
-    return any(is_auth_query_name(key) for key, _ in parse_qsl(fragment, keep_blank_values=True))
+    return any(
+        is_auth_query_name(key, additional_query_names=additional_query_names)
+        for key, _ in parse_qsl(fragment, keep_blank_values=True)
+    )
 
 
-def has_auth_material(url: Any) -> bool:
+def has_auth_material(
+    url: Any,
+    *,
+    additional_query_names: Iterable[Any] | None = None,
+) -> bool:
     """Return whether a URL contains userinfo or an auth-bearing query/fragment."""
     if not isinstance(url, str) or not url:
         return False
@@ -132,12 +152,19 @@ def has_auth_material(url: Any) -> bool:
         return False
     if parts.username is not None or parts.password is not None:
         return True
-    if any(is_auth_query_name(key) for key, _ in parse_qsl(parts.query, keep_blank_values=True)):
+    if any(
+        is_auth_query_name(key, additional_query_names=additional_query_names)
+        for key, _ in parse_qsl(parts.query, keep_blank_values=True)
+    ):
         return True
-    return _fragment_contains_auth(parts.fragment)
+    return _fragment_contains_auth(parts.fragment, additional_query_names=additional_query_names)
 
 
-def is_redacted_public_url(url: Any) -> bool:
+def is_redacted_public_url(
+    url: Any,
+    *,
+    additional_query_names: Iterable[Any] | None = None,
+) -> bool:
     """Return true only for URLs whose auth query values are explicit redactions."""
     if not isinstance(url, str) or not url:
         return False
@@ -150,19 +177,23 @@ def is_redacted_public_url(url: Any) -> bool:
     auth_values = [
         value
         for key, value in parse_qsl(parts.query, keep_blank_values=True)
-        if is_auth_query_name(key)
+        if is_auth_query_name(key, additional_query_names=additional_query_names)
     ]
     auth_fragment_values = [
         value
         for key, value in parse_qsl(parts.fragment, keep_blank_values=True)
-        if is_auth_query_name(key)
+        if is_auth_query_name(key, additional_query_names=additional_query_names)
     ]
     return bool(auth_values or auth_fragment_values) and all(
         value == "[REDACTED]" for value in (*auth_values, *auth_fragment_values)
     )
 
 
-def redact_public_url(value: Any) -> Any:
+def redact_public_url(
+    value: Any,
+    *,
+    additional_query_names: Iterable[Any] | None = None,
+) -> Any:
     """Redact auth query values while retaining a safe diagnostic URL shape."""
     if not isinstance(value, str) or not value:
         return value
@@ -174,7 +205,12 @@ def redact_public_url(value: Any) -> Any:
         return value
     netloc = parts.netloc.rsplit("@", 1)[-1]
     query = [
-        (key, "[REDACTED]" if is_auth_query_name(key) else item)
+        (
+            key,
+            "[REDACTED]"
+            if is_auth_query_name(key, additional_query_names=additional_query_names)
+            else item,
+        )
         for key, item in parse_qsl(parts.query, keep_blank_values=True)
     ]
     fragment = parts.fragment
@@ -183,7 +219,12 @@ def redact_public_url(value: Any) -> Any:
         if fragment_pairs:
             fragment = urlencode(
                 [
-                    (key, "[REDACTED]" if is_auth_query_name(key) else item)
+                    (
+                        key,
+                        "[REDACTED]"
+                        if is_auth_query_name(key, additional_query_names=additional_query_names)
+                        else item,
+                    )
                     for key, item in fragment_pairs
                 ]
             )

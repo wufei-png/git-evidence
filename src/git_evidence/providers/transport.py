@@ -39,6 +39,7 @@ from ..privacy import (
     is_url_field,
     redact_public_url,
 )
+from .base import validate_instance
 
 
 RATE_LIMIT_HEADERS = (
@@ -66,11 +67,12 @@ _NUMERIC_RATE_HEADER_NAMES = frozenset(
         "x_rate_limit_reset",
     }
 )
-_LINK_HEADER_PATTERN = re.compile(
-    r"\s*<[^<>]+>\s*;\s*rel\s*=\s*(?:\"[^\"]+\"|'[^']+'|[^,\s]+)"
-    r"(?:\s*;\s*[^,]+)*(?:\s*,\s*<[^<>]+>\s*;\s*rel\s*=\s*"
-    r"(?:\"[^\"]+\"|'[^']+'|[^,\s]+)(?:\s*;\s*[^,]+)*)*\s*"
+_LINK_ENTRY_PATTERN = re.compile(
+    r"\s*<(?P<url>[^<>]+)>\s*;\s*rel\s*=\s*"
+    r"(?P<rel>\"[^\"]+\"|'[^']+'|[^,\s]+)"
+    r"(?:\s*;\s*[^,]+)*\s*"
 )
+_URL_CANDIDATE_PATTERN = re.compile(r"(?:https?://|/)[^\s<>\"']+")
 
 TRANSPORT_METRIC_KEYS = (
     "request_count",
@@ -103,10 +105,68 @@ def _is_success_status(status_code: Any) -> bool:
     )
 
 
+def is_success_status(status_code: Any) -> bool:
+    """Return true only for a non-boolean HTTP 2xx status."""
+    return _is_success_status(status_code)
+
+
 def _status_failure_class(status_code: Any) -> str:
     if isinstance(status_code, int) and not isinstance(status_code, bool):
         return failure_class_for_status(status_code)
     return "http_error"
+
+
+def _finite_cache_timestamp(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        timestamp = float(value)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(timestamp) or timestamp < 0:
+        return None
+    return timestamp
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant is not allowed: {value}")
+
+
+def parse_link_header(value: Any) -> tuple[tuple[str, str], ...] | None:
+    """Parse the conservative Link syntax accepted by cache and pagination."""
+    if not isinstance(value, str):
+        return None
+    if not value.strip():
+        return ()
+    entries: list[tuple[str, str]] = []
+    position = 0
+    while position < len(value):
+        match = _LINK_ENTRY_PATTERN.match(value, position)
+        if match is None:
+            return None
+        entries.append(
+            (
+                match.group("url"),
+                match.group("rel").strip("\"'").strip(),
+            )
+        )
+        position = match.end()
+        if position >= len(value):
+            break
+        if value[position] != ",":
+            return None
+        position += 1
+    return tuple(entries)
+
+
+def next_link_url(value: Any) -> str | None:
+    parsed = parse_link_header(value)
+    if parsed is None:
+        return None
+    for url, relation in parsed:
+        if "next" in relation.split():
+            return url
+    return None
 
 
 @dataclass
@@ -182,6 +242,7 @@ class LocalResponseCache:
         ttl_seconds: float,
         max_entries: int,
         clock: Callable[[], float] = time.time,
+        credential_query_names: tuple[str, ...] = (),
     ) -> None:
         if (
             isinstance(ttl_seconds, bool)
@@ -199,23 +260,56 @@ class LocalResponseCache:
         self.ttl_seconds = ttl_seconds
         self.max_entries = max_entries
         self.clock = clock
+        self.credential_query_names = tuple(credential_query_names)
 
     @staticmethod
-    def _contains_sensitive_material(value: Any, token: str | None) -> bool:
+    def _contains_sensitive_material(
+        value: Any,
+        token: str | None,
+        credential_query_names: tuple[str, ...] = (),
+    ) -> bool:
         if isinstance(value, dict):
             for key, child in value.items():
                 if is_sensitive_field(key):
                     return True
                 if is_url_field(key):
-                    if has_auth_material(child) and not is_redacted_public_url(child):
+                    if has_auth_material(
+                        child,
+                        additional_query_names=credential_query_names,
+                    ) and not is_redacted_public_url(
+                        child,
+                        additional_query_names=credential_query_names,
+                    ):
                         return True
-                if LocalResponseCache._contains_sensitive_material(child, token):
+                if LocalResponseCache._contains_sensitive_material(
+                    child,
+                    token,
+                    credential_query_names,
+                ):
                     return True
             return False
         if isinstance(value, (list, tuple)):
-            return any(LocalResponseCache._contains_sensitive_material(item, token) for item in value)
-        if token and isinstance(value, str) and token in value:
-            return True
+            return any(
+                LocalResponseCache._contains_sensitive_material(
+                    item,
+                    token,
+                    credential_query_names,
+                )
+                for item in value
+            )
+        if isinstance(value, str):
+            if token and token in value:
+                return True
+            for candidate in _URL_CANDIDATE_PATTERN.findall(value):
+                candidate = candidate.rstrip(".,);]")
+                if has_auth_material(
+                    candidate,
+                    additional_query_names=credential_query_names,
+                ) and not is_redacted_public_url(
+                    candidate,
+                    additional_query_names=credential_query_names,
+                ):
+                    return True
         return False
 
     def _read(self) -> dict[str, Any]:
@@ -226,18 +320,32 @@ class LocalResponseCache:
         if mode is not None and (mode & 0o077 or self.path.is_symlink()):
             return {"entries": {}}
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, TypeError):
+            raw = json.loads(
+                self.path.read_text(encoding="utf-8"),
+                parse_constant=_reject_json_constant,
+            )
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return {"entries": {}}
         if not isinstance(raw, dict) or not isinstance(raw.get("entries"), dict):
             return {"entries": {}}
         return {"entries": raw["entries"]}
 
     @staticmethod
-    def _header_value_has_sensitive_material(value: str, token: str | None) -> bool:
-        if LocalResponseCache._contains_sensitive_material(value, token):
+    def _header_value_has_sensitive_material(
+        value: str,
+        token: str | None,
+        credential_query_names: tuple[str, ...] = (),
+    ) -> bool:
+        if LocalResponseCache._contains_sensitive_material(
+            value,
+            token,
+            credential_query_names,
+        ):
             return True
-        return has_auth_material(value)
+        return has_auth_material(
+            value,
+            additional_query_names=credential_query_names,
+        )
 
     @classmethod
     def _safe_headers(
@@ -245,6 +353,7 @@ class LocalResponseCache:
         headers: Mapping[str, Any] | None,
         *,
         token: str | None = None,
+        credential_query_names: tuple[str, ...] = (),
     ) -> dict[str, str] | None:
         if not headers:
             return {}
@@ -255,13 +364,27 @@ class LocalResponseCache:
             normalized = canonicalize_field_name(key)
             if normalized not in CACHE_HEADER_NAMES:
                 continue
-            if not isinstance(value, str) or cls._header_value_has_sensitive_material(value, token):
+            if not isinstance(value, str) or cls._header_value_has_sensitive_material(
+                value,
+                token,
+                credential_query_names,
+            ):
                 return None
             if normalized == "link":
-                if _LINK_HEADER_PATTERN.fullmatch(value) is None:
+                if parse_link_header(value) is None:
                     return None
                 urls = re.findall(r"<([^>]+)>", value)
-                if any(has_auth_material(url) and not is_redacted_public_url(url) for url in urls):
+                if any(
+                    has_auth_material(
+                        url,
+                        additional_query_names=credential_query_names,
+                    )
+                    and not is_redacted_public_url(
+                        url,
+                        additional_query_names=credential_query_names,
+                    )
+                    for url in urls
+                ):
                     return None
             elif normalized in _NEXT_PAGE_HEADER_NAMES:
                 if re.fullmatch(r"[1-9][0-9]*", value.strip()) is None:
@@ -289,7 +412,7 @@ class LocalResponseCache:
         if not isinstance(entry, dict):
             return None
         try:
-            stored_at = float(entry["stored_at"])
+            stored_at = _finite_cache_timestamp(entry["stored_at"])
             response = entry["response"]
             url = response["url"]
             status_code = response["status_code"]
@@ -298,35 +421,72 @@ class LocalResponseCache:
         except (KeyError, TypeError, ValueError):
             # A pre-header cache entry cannot prove pagination completeness.
             return None
-        safe_headers = self._safe_headers(headers, token=token)
+        if stored_at is None:
+            return None
+        safe_headers = self._safe_headers(
+            headers,
+            token=token,
+            credential_query_names=self.credential_query_names,
+        )
         if safe_headers is None or not isinstance(headers, dict) or headers != safe_headers:
             return None
-        if self.clock() - stored_at >= self.ttl_seconds:
+        now = _finite_cache_timestamp(self.clock())
+        if now is None or now - stored_at >= self.ttl_seconds:
             return None
         if not isinstance(url, str) or not _is_success_status(status_code):
             return None
-        if (has_auth_material(url) and not is_redacted_public_url(url)) or self._contains_sensitive_material(body, token):
+        if (
+            has_auth_material(url, additional_query_names=self.credential_query_names)
+            and not is_redacted_public_url(
+                url,
+                additional_query_names=self.credential_query_names,
+            )
+        ) or self._contains_sensitive_material(
+            body,
+            token,
+            self.credential_query_names,
+        ):
             return None
         return ApiResponse(url, status_code, headers, body)
 
     def put(self, key: str, response: ApiResponse, *, token: str | None) -> None:
+        stored_at = _finite_cache_timestamp(self.clock())
         if (
+            stored_at is None
+            or
             not _is_success_status(response.status_code)
-            or (has_auth_material(response.url) and not is_redacted_public_url(response.url))
-            or self._contains_sensitive_material(response.body, token)
+            or (
+                has_auth_material(
+                    response.url,
+                    additional_query_names=self.credential_query_names,
+                )
+                and not is_redacted_public_url(
+                    response.url,
+                    additional_query_names=self.credential_query_names,
+                )
+            )
+            or self._contains_sensitive_material(
+                response.body,
+                token,
+                self.credential_query_names,
+            )
         ):
             return
-        safe_headers = self._safe_headers(response.headers, token=token)
+        safe_headers = self._safe_headers(
+            response.headers,
+            token=token,
+            credential_query_names=self.credential_query_names,
+        )
         if safe_headers is None:
             return
         try:
-            json.dumps(response.body, ensure_ascii=True)
+            json.dumps(response.body, ensure_ascii=True, allow_nan=False)
         except (TypeError, ValueError):
             return
         payload = self._read()
         entries = payload["entries"]
         entries[key] = {
-            "stored_at": self.clock(),
+            "stored_at": stored_at,
             "response": {
                 "url": response.url,
                 "status_code": response.status_code,
@@ -334,17 +494,19 @@ class LocalResponseCache:
                 "body": response.body,
             },
         }
-        now = self.clock()
+        now = _finite_cache_timestamp(self.clock())
+        if now is None:
+            return
         live_entries = {
             item_key: item
             for item_key, item in entries.items()
             if isinstance(item, dict)
-            and isinstance(item.get("stored_at"), (int, float))
-            and now - float(item["stored_at"]) < self.ttl_seconds
+            and _finite_cache_timestamp(item.get("stored_at")) is not None
+            and now - _finite_cache_timestamp(item["stored_at"]) < self.ttl_seconds
         }
         ordered = sorted(
             live_entries.items(),
-            key=lambda item: float(item[1]["stored_at"]),
+            key=lambda item: _finite_cache_timestamp(item[1]["stored_at"]) or 0.0,
             reverse=True,
         )[: self.max_entries]
         payload = {"version": 1, "entries": dict(ordered)}
@@ -357,7 +519,7 @@ class LocalResponseCache:
             try:
                 os.fchmod(file_descriptor, 0o600)
                 with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
-                    handle.write(json.dumps(payload, ensure_ascii=True))
+                    handle.write(json.dumps(payload, ensure_ascii=True, allow_nan=False))
                 os.replace(temporary, self.path)
                 os.chmod(self.path, 0o600)
             except Exception:
@@ -399,11 +561,36 @@ def transport_metrics(transport: Any) -> dict[str, Any]:
 def rate_limit_headers(headers: Mapping[str, Any] | None) -> dict[str, str]:
     if not headers:
         return {}
+    try:
+        items = headers.items()
+    except AttributeError:
+        return {}
     return {
         str(key).lower(): str(value)
-        for key, value in headers.items()
+        for key, value in items
         if str(key).lower() in RATE_LIMIT_HEADERS
     }
+
+
+def _header_get(headers: Any, name: str) -> Any:
+    if headers is None:
+        return None
+    try:
+        value = headers.get(name)
+        if value is not None:
+            return value
+        value = headers.get(name.lower())
+        if value is not None:
+            return value
+    except AttributeError:
+        return None
+    try:
+        for key, value in headers.items():
+            if str(key).lower() == name.lower():
+                return value
+    except AttributeError:
+        return None
+    return None
 
 
 class ApiError(RuntimeError):
@@ -489,6 +676,53 @@ class ApiResponse:
     body: Any
 
 
+def _retry_after_from_headers(headers: Mapping[str, Any] | None) -> float | None:
+    if not headers:
+        return None
+    value = _header_get(headers, "Retry-After")
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError, OverflowError):
+        try:
+            target = parsedate_to_datetime(str(value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return max(0.0, target.timestamp() - time.time())
+
+
+def response_status_error(
+    response: ApiResponse,
+    *,
+    redact_url: Callable[[str], str] | None = None,
+    message: str | None = None,
+) -> ApiError:
+    """Create one safe, structured error for a non-success API response."""
+    status_code = (
+        response.status_code
+        if isinstance(response.status_code, int) and not isinstance(response.status_code, bool)
+        else None
+    )
+    safe_url = (
+        redact_url(response.url)
+        if callable(redact_url)
+        else redact_public_url(response.url)
+    )
+    headers = response.headers if callable(getattr(response.headers, "get", None)) else {}
+    if message is None:
+        message = f"unexpected HTTP status from {safe_url}: {response.status_code}"
+    retryable = status_code in {429, 500, 502, 503, 504}
+    return ApiError(
+        message,
+        status_code,
+        retryable=retryable,
+        retry_after=_retry_after_from_headers(headers),
+        failure_class=_status_failure_class(response.status_code),
+        rate_limit=rate_limit_headers(headers),
+    )
+
+
 class JsonTransport(Protocol):
     def get(self, path: str, params: Mapping[str, Any] | None = None) -> ApiResponse:
         """GET a JSON resource."""
@@ -521,6 +755,11 @@ class UrllibTransport:
         cache_max_entries: int = 256,
         random_fn: Callable[[float, float], float] = random.uniform,
     ) -> None:
+        base_url = validate_instance(base_url)
+        if token_param is not None and (
+            not isinstance(token_param, str) or not token_param.strip()
+        ):
+            raise ValueError("token_param must be a non-empty string")
         if (
             isinstance(timeout, bool)
             or not isinstance(timeout, (int, float))
@@ -587,7 +826,12 @@ class UrllibTransport:
         self.retry_after_max = retry_after_max
         self.sleep_fn = sleep_fn
         self.provider_kind = provider_kind
-        self.instance = instance
+        if instance:
+            self.instance = validate_instance(instance)
+        elif instance == "":
+            self.instance = instance
+        else:
+            raise ValueError("instance must be a non-empty URL host or http(s) base")
         self.coordinator = RequestCoordinator(
             max_requests=max_requests,
             cache_enabled=cache_enabled,
@@ -597,6 +841,7 @@ class UrllibTransport:
                 cache_path or "",
                 ttl_seconds=cache_ttl_seconds,
                 max_entries=cache_max_entries,
+                credential_query_names=(token_param,) if token_param else (),
             )
             if cache_enabled
             else None
@@ -620,7 +865,10 @@ class UrllibTransport:
         return url + separator + urlencode(query)
 
     def _redact_url(self, url: str) -> str:
-        return redact_public_url(url)
+        return redact_public_url(
+            url,
+            additional_query_names=(self.token_param,) if self.token_param else (),
+        )
 
     def _redact_text(self, value: Any) -> str:
         text = str(value)
@@ -666,17 +914,7 @@ class UrllibTransport:
 
     @staticmethod
     def _retry_after(headers: Mapping[str, Any]) -> float | None:
-        value = headers.get("Retry-After") or headers.get("retry-after")
-        if value is None:
-            return None
-        try:
-            return max(0.0, float(value))
-        except (TypeError, ValueError):
-            try:
-                target = parsedate_to_datetime(str(value))
-            except (TypeError, ValueError, OverflowError):
-                return None
-            return max(0.0, target.timestamp() - time.time())
+        return _retry_after_from_headers(headers)
 
     @staticmethod
     def _decode_body(raw: bytes) -> Any:
@@ -730,24 +968,26 @@ class UrllibTransport:
                 raw = exc.read()
                 detail = raw.decode("utf-8", errors="replace")[:300]
                 detail = self._redact_text(detail)
-                retry_after = self._retry_after(exc.headers or {})
                 can_retry = exc.code in retryable_statuses and attempt <= self.max_retries
-                error = ApiError(
-                    f"GET {self._redact_url(url)} failed with HTTP {exc.code}: {detail}",
-                    exc.code,
-                    attempts=attempt,
-                    retryable=exc.code in retryable_statuses,
-                    retry_after=retry_after,
-                    failure_class=failure_class_for_status(exc.code),
-                    rate_limit=rate_limit_headers(exc.headers),
+                error = response_status_error(
+                    ApiResponse(
+                        self._redact_url(url),
+                        exc.code,
+                        exc.headers or {},
+                        None,
+                    ),
+                    redact_url=self._redact_url,
+                    message=f"GET {self._redact_url(url)} failed with HTTP {exc.code}: {detail}",
                 )
+                error.attempts = attempt
+                error.retryable = exc.code in retryable_statuses
                 if can_retry:
                     if primary_error is None:
                         primary_error = error
                     else:
                         _merge_api_errors(primary_error, error, attempts=attempt)
                     self.coordinator.record_retry()
-                    self.sleep_fn(self._retry_delay(attempt, retry_after))
+                    self.sleep_fn(self._retry_delay(attempt, error.retry_after))
                     continue
                 if primary_error is not None:
                     _merge_api_errors(primary_error, error, attempts=attempt)
@@ -803,9 +1043,6 @@ class PageResult:
     diagnostics: dict[str, Any] | None = None
 
 
-_NEXT_LINK = re.compile(r"<([^>]+)>;\s*rel=\"next\"")
-
-
 def paginate(
     transport: JsonTransport,
     path: str,
@@ -834,15 +1071,10 @@ def paginate(
         if callable(record_page):
             record_page()
         if not _is_success_status(response.status_code):
-            status_code = (
-                response.status_code
-                if isinstance(response.status_code, int) and not isinstance(response.status_code, bool)
-                else None
-            )
-            raise ApiError(
-                f"unexpected HTTP status from {response.url}: {response.status_code}",
-                status_code,
-                failure_class=_status_failure_class(response.status_code),
+            redact_url = getattr(transport, "_redact_url", None)
+            raise response_status_error(
+                response,
+                redact_url=redact_url if callable(redact_url) else None,
             )
         rate_limit = rate_limit_headers(response.headers)
         if rate_limit:
@@ -854,10 +1086,18 @@ def paginate(
             raise ResponseShapeError(f"provider returned a non-object item from {response.url}")
         items.extend(page_items)
 
-        next_url = _NEXT_LINK.search(response.headers.get("link", ""))
-        next_page = response.headers.get("x-next-page") or response.headers.get("x-next-page-number")
+        headers = response.headers if callable(getattr(response.headers, "get", None)) else {}
+        link_header = _header_get(headers, "link") or ""
+        parsed_links = parse_link_header(link_header) if link_header else ()
+        if parsed_links is None:
+            raise ResponseShapeError(f"invalid Link header from {response.url}")
+        next_url = next_link_url(link_header)
+        next_page = _header_get(headers, "x-next-page") or _header_get(
+            headers,
+            "x-next-page-number",
+        )
         if next_url:
-            current_path = next_url.group(1)
+            current_path = next_url
             current_params = None
             continue
         if next_page:

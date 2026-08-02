@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import RESOURCE_SOURCES, CollectionRequest, RepositoryTarget, instance_web_base
+from .base import (
+    RESOURCE_SOURCES,
+    CollectionRequest,
+    RepositoryTarget,
+    instance_web_base,
+    validate_instance,
+)
 from .catalog import PROVIDER_DESCRIPTORS
 from .resource_base import (
     RepositorySnapshot,
@@ -16,7 +22,16 @@ from .resource_base import (
     merge_diagnostics,
     native_id,
 )
-from .transport import ApiError, JsonTransport, PageResult, ResponseShapeError, UrllibTransport, paginate
+from .transport import (
+    ApiError,
+    JsonTransport,
+    PageResult,
+    ResponseShapeError,
+    UrllibTransport,
+    is_success_status,
+    paginate,
+    response_status_error,
+)
 
 
 class GitHubProvider(ResourceProvider):
@@ -43,6 +58,7 @@ class GitHubProvider(ResourceProvider):
         cache_ttl_seconds: float = 300.0,
         cache_max_entries: int = 256,
     ) -> None:
+        instance = validate_instance(instance)
         if instance == "github.com":
             api_base = "https://api.github.com"
         else:
@@ -91,6 +107,11 @@ class GitHubProvider(ResourceProvider):
     ) -> RepositorySnapshot:
         try:
             response = self.transport.get(self._repo_path(target))
+            if not is_success_status(response.status_code):
+                raise response_status_error(
+                    response,
+                    redact_url=getattr(self.transport, "_redact_url", None),
+                )
             if not isinstance(response.body, dict):
                 raise ApiError(f"expected repository object from {response.url}")
         except ApiError as exc:

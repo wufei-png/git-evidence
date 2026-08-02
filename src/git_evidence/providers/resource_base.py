@@ -13,6 +13,7 @@ from .base import (
     ProviderDescriptor,
     ProviderNotReady,
     RepositoryTarget,
+    validate_instance,
 )
 from .transport import (
     ApiError,
@@ -157,6 +158,50 @@ def merge_diagnostics(target: dict[str, Any], incoming: dict[str, Any]) -> None:
     if not incoming:
         return
 
+    protected = {
+        "status_code",
+        "attempts",
+        "retryable",
+        "retry_after_seconds",
+        "rate_limit",
+        "child_diagnostics",
+    }
+
+    def snapshot(value: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value[key]
+            for key in (
+                "failure_class",
+                "failure_classes",
+                "status_code",
+                "attempts",
+                "retryable",
+                "retry_after_seconds",
+                "rate_limit",
+            )
+            if key in value
+        }
+
+    collisions = {
+        key
+        for key in protected
+        if key != "child_diagnostics"
+        and key in target
+        and key in incoming
+        and target[key] != incoming[key]
+    }
+    if collisions:
+        children = target.get("child_diagnostics")
+        if not isinstance(children, list):
+            children = []
+            previous = snapshot(target)
+            if previous:
+                children.append(previous)
+            target["child_diagnostics"] = children
+        child = snapshot(incoming)
+        if child:
+            children.append(child)
+
     def classes(value: Any) -> set[str]:
         if isinstance(value, str) and value:
             return {value}
@@ -170,7 +215,9 @@ def merge_diagnostics(target: dict[str, Any], incoming: dict[str, Any]) -> None:
         | classes(incoming.get("failure_class"))
         | classes(incoming.get("failure_classes"))
     )
-    target.update(incoming)
+    for key, value in incoming.items():
+        if key not in protected or key not in target:
+            target[key] = value
     if len(failure_classes) == 1:
         target["failure_class"] = next(iter(failure_classes))
         target.pop("failure_classes", None)
@@ -605,7 +652,7 @@ class ResourceProvider:
         if max_pages < 1 or max_pages > MAX_PAGES:
             raise ValueError(f"max_pages must be in [1, {MAX_PAGES}]")
         self.transport = transport
-        self.instance = instance
+        self.instance = validate_instance(instance)
         self.max_pages = max_pages
 
     def probe(self) -> dict[str, Any]:
@@ -620,6 +667,17 @@ class ResourceProvider:
             raise ValueError(
                 f"request provider {request.provider_kind!r} does not match {self.descriptor.kind!r}"
             )
+        if self.instance != request.instance:
+            raise ValueError(
+                f"provider instance {self.instance!r} does not match request instance {request.instance!r}"
+            )
+        for target in request.repositories:
+            if (
+                not isinstance(target, RepositoryTarget)
+                or target.provider_kind != request.provider_kind
+                or target.instance != request.instance
+            ):
+                raise ValueError("repository target provider and instance must match the collection request")
         if isinstance(request.max_pages, bool) or not isinstance(request.max_pages, int):
             raise ValueError("request.max_pages must be an integer")
         if request.max_pages < 1 or request.max_pages > MAX_PAGES:

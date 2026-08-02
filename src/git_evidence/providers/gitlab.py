@@ -4,7 +4,13 @@ from datetime import timedelta
 from typing import Any
 from urllib.parse import quote
 
-from .base import RESOURCE_SOURCES, CollectionRequest, RepositoryTarget, instance_web_base
+from .base import (
+    RESOURCE_SOURCES,
+    CollectionRequest,
+    RepositoryTarget,
+    instance_web_base,
+    validate_instance,
+)
 from .catalog import PROVIDER_DESCRIPTORS
 from .resource_base import (
     RepositorySnapshot,
@@ -20,7 +26,16 @@ from .resource_base import (
     native_id,
     parse_timestamp,
 )
-from .transport import ApiError, JsonTransport, PageResult, ResponseShapeError, UrllibTransport, paginate
+from .transport import (
+    ApiError,
+    JsonTransport,
+    PageResult,
+    ResponseShapeError,
+    UrllibTransport,
+    is_success_status,
+    paginate,
+    response_status_error,
+)
 
 
 class GitLabProvider(ResourceProvider):
@@ -47,6 +62,7 @@ class GitLabProvider(ResourceProvider):
         cache_ttl_seconds: float = 300.0,
         cache_max_entries: int = 256,
     ) -> None:
+        instance = validate_instance(instance)
         base = instance if instance.startswith("http") else f"https://{instance}"
         super().__init__(
             transport
@@ -92,6 +108,11 @@ class GitLabProvider(ResourceProvider):
         project_path = self._project_path(target)
         try:
             response = self.transport.get(project_path)
+            if not is_success_status(response.status_code):
+                raise response_status_error(
+                    response,
+                    redact_url=getattr(self.transport, "_redact_url", None),
+                )
             if not isinstance(response.body, dict):
                 raise ApiError(f"expected project object from {response.url}")
         except ApiError as exc:
