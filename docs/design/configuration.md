@@ -78,13 +78,22 @@ Rules:
   0.25 seconds of jitter, and a 60-second `Retry-After` cap. GET retries are
   idempotent; exhausted limits remain visible in collection metrics and block
   publication for affected required sources.
+- The hard caps are 300 seconds for timeout, 10 retries, 1000 pages, 10000
+  requests, 60 seconds each for backoff/jitter, 300 seconds for the
+  `Retry-After` cap, 86400 seconds for cache TTL, and 10000 cache entries.
+  Non-finite values and unbounded `None` request budgets are rejected. If a
+  retryable 429/5xx response is followed by budget exhaustion, the original
+  `rate_limited`/`service_error` remains the primary failure and
+  `budget_exhausted` is recorded as an additional cause.
 - Cache is disabled unless `cache.enabled: true` and `path`, `ttl_seconds`,
   and `max_entries` are explicitly supplied. Cache keys include provider,
   instance, path, parameters, and a token-scope digest. Only redacted URL,
-  status, and safe JSON body data may be stored; authorization headers and
-  tokens are never written. Expired, unreadable, or unsafe entries are cache
-  misses. A cache hit follows the same normalizer and coverage gate and never
-  upgrades capability.
+  status, safe JSON body data, and allowlisted `Link`/next-page/rate-limit
+  headers may be stored; authorization headers and tokens are never written.
+  Cache files and temporary files are mode `0600`; expired, unreadable,
+  unredacted, unsafe, or old entries without headers are cache misses. A cache
+  hit follows the same normalizer and coverage gate and never upgrades
+  capability.
 
 `git-evidence collect` groups the allowlist by `(provider, instance)`, invokes
 each provider adapter, and merges the results into one canonical bundle. The
@@ -94,13 +103,15 @@ the runtime reads that environment variable and never accepts a token on the
 command line. A missing environment variable is treated as a collection
 configuration error rather than silently lowering authorization.
 
-A provider-group `ProviderNotReady`, API, or unexpected collection failure is
-recorded in `coverage.group_failures` with provider, instance, repository,
-source, and `failure_class`. Other groups remain in the bundle for diagnosis,
-but any failed required source sets `allow_publish: false`. Configuration and
-missing-token errors are preflight failures and return CLI status 2; a bundle
-with one or more failed provider groups returns status 3; ordinary schema or
-semantic publication failures return status 1.
+A provider-group `ProviderNotReady`, API, transport, budget, privacy, or
+unexpected collection failure is recorded in `coverage.group_failures` with
+provider, instance, repository, source, and `failure_class`, and is linked to
+the matching observation (and to a structured fatal entry for required
+sources). Other groups remain in the bundle for diagnosis, but any group
+failure forces `allow_publish: false`. Configuration and missing-token errors
+are preflight failures and return CLI status 2; a bundle with one or more
+failed provider groups returns status 3; ordinary schema or semantic
+publication failures return status 1.
 
 `git-evidence render --config config.yml bundle.json` applies the report
 profile, language, actor display flag, and explicit `actor_labels` map without

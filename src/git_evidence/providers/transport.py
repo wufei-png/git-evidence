@@ -2,18 +2,43 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import os
 from pathlib import Path
 import random
 import re
 import ssl
+import stat
+import tempfile
 import time
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import quote, urlencode, urljoin
 from urllib.request import Request, urlopen
+
+from ..limits import (
+    MAX_CACHE_ENTRIES,
+    MAX_CACHE_TTL_SECONDS,
+    MAX_PAGES,
+    MAX_REQUESTS,
+    MAX_RETRIES,
+    MAX_RETRY_AFTER_SECONDS,
+    MAX_RETRY_BACKOFF_SECONDS,
+    MAX_RETRY_JITTER_SECONDS,
+    MAX_TIMEOUT_SECONDS,
+    MIN_RETRY_AFTER_SECONDS,
+    MIN_TIMEOUT_SECONDS,
+)
+from ..privacy import (
+    canonicalize_field_name,
+    has_auth_material,
+    is_redacted_public_url,
+    is_sensitive_field,
+    is_url_field,
+    redact_public_url,
+)
 
 
 RATE_LIMIT_HEADERS = (
@@ -21,6 +46,14 @@ RATE_LIMIT_HEADERS = (
     "x-ratelimit-remaining",
     "x-ratelimit-reset",
     "retry-after",
+)
+
+CACHE_HEADER_NAMES = frozenset(
+    canonicalize_field_name(name)
+    for name in ("link", "x-next-page", "x-next-page-number", *RATE_LIMIT_HEADERS)
+)
+CACHE_HEADER_NAMES = CACHE_HEADER_NAMES | frozenset(
+    {"x_rate_limit_limit", "x_rate_limit_remaining", "x_rate_limit_reset"}
 )
 
 TRANSPORT_METRIC_KEYS = (
@@ -77,8 +110,14 @@ class RequestCoordinator:
         max_requests: int | None = 1000,
         cache_enabled: bool = False,
     ) -> None:
-        if max_requests is not None and max_requests < 1:
+        if max_requests is None:
+            raise ValueError("max_requests must be a finite integer")
+        if isinstance(max_requests, bool) or not isinstance(max_requests, int):
+            raise ValueError("max_requests must be an integer")
+        if max_requests < 1:
             raise ValueError("max_requests must be at least 1")
+        if max_requests > MAX_REQUESTS:
+            raise ValueError(f"max_requests must be at most {MAX_REQUESTS}")
         self.max_requests = max_requests
         self.metrics = RequestMetrics(cache_enabled=cache_enabled)
 
@@ -104,7 +143,7 @@ class RequestCoordinator:
 
 
 class LocalResponseCache:
-    """Small JSON cache that stores only redacted URLs, status, and JSON bodies."""
+    """Small private JSON cache with conservative replay and header allowlisting."""
 
     def __init__(
         self,
@@ -114,10 +153,18 @@ class LocalResponseCache:
         max_entries: int,
         clock: Callable[[], float] = time.time,
     ) -> None:
-        if ttl_seconds <= 0:
-            raise ValueError("cache ttl_seconds must be greater than zero")
-        if max_entries < 1:
-            raise ValueError("cache max_entries must be at least 1")
+        if (
+            isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, (int, float))
+            or not math.isfinite(float(ttl_seconds))
+        ):
+            raise ValueError("cache ttl_seconds must be finite numeric")
+        if ttl_seconds <= 0 or ttl_seconds > MAX_CACHE_TTL_SECONDS:
+            raise ValueError(f"cache ttl_seconds must be in (0, {MAX_CACHE_TTL_SECONDS}]")
+        if isinstance(max_entries, bool) or not isinstance(max_entries, int):
+            raise ValueError("cache max_entries must be an integer")
+        if max_entries < 1 or max_entries > MAX_CACHE_ENTRIES:
+            raise ValueError(f"cache max_entries must be in [1, {MAX_CACHE_ENTRIES}]")
         self.path = Path(path).expanduser()
         self.ttl_seconds = ttl_seconds
         self.max_entries = max_entries
@@ -125,21 +172,13 @@ class LocalResponseCache:
 
     @staticmethod
     def _contains_sensitive_material(value: Any, token: str | None) -> bool:
-        sensitive_names = {
-            "authorization",
-            "proxy-authorization",
-            "access_token",
-            "refresh_token",
-            "id_token",
-            "cookie",
-            "set-cookie",
-            "headers",
-        }
         if isinstance(value, dict):
             for key, child in value.items():
-                normalized = str(key).lower().replace("-", "_")
-                if normalized in sensitive_names or normalized.endswith("_token") or normalized == "token":
+                if is_sensitive_field(key):
                     return True
+                if is_url_field(key):
+                    if has_auth_material(child) and not is_redacted_public_url(child):
+                        return True
                 if LocalResponseCache._contains_sensitive_material(child, token):
                     return True
             return False
@@ -151,6 +190,12 @@ class LocalResponseCache:
 
     def _read(self) -> dict[str, Any]:
         try:
+            mode = stat.S_IMODE(self.path.stat().st_mode)
+        except OSError:
+            mode = None
+        if mode is not None and (mode & 0o077 or self.path.is_symlink()):
+            return {"entries": {}}
+        try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, TypeError):
             return {"entries": {}}
@@ -158,7 +203,25 @@ class LocalResponseCache:
             return {"entries": {}}
         return {"entries": raw["entries"]}
 
-    def get(self, key: str) -> ApiResponse | None:
+    @staticmethod
+    def _safe_headers(headers: Mapping[str, Any] | None) -> dict[str, str]:
+        if not headers:
+            return {}
+        safe: dict[str, str] = {}
+        for key, value in headers.items():
+            normalized = canonicalize_field_name(key)
+            if normalized not in CACHE_HEADER_NAMES or not isinstance(value, str):
+                continue
+            if normalized == "link":
+                # A Link header may carry a URL. Do not cache it if redaction
+                # would be required; losing pagination is safer than leaking.
+                urls = re.findall(r"<([^>]+)>", value)
+                if any(has_auth_material(url) and not is_redacted_public_url(url) for url in urls):
+                    continue
+            safe[str(key).lower()] = value
+        return safe
+
+    def get(self, key: str, *, token: str | None = None) -> ApiResponse | None:
         payload = self._read()
         entry = payload["entries"].get(key)
         if not isinstance(entry, dict):
@@ -168,17 +231,26 @@ class LocalResponseCache:
             response = entry["response"]
             url = response["url"]
             status_code = response["status_code"]
+            headers = response["headers"]
             body = response["body"]
         except (KeyError, TypeError, ValueError):
+            # A pre-header cache entry cannot prove pagination completeness.
+            return None
+        if not isinstance(headers, dict) or headers != self._safe_headers(headers):
             return None
         if self.clock() - stored_at >= self.ttl_seconds:
             return None
         if not isinstance(url, str) or not isinstance(status_code, int):
             return None
-        return ApiResponse(url, status_code, {}, body)
+        if (has_auth_material(url) and not is_redacted_public_url(url)) or self._contains_sensitive_material(body, token):
+            return None
+        return ApiResponse(url, status_code, headers, body)
 
     def put(self, key: str, response: ApiResponse, *, token: str | None) -> None:
-        if self._contains_sensitive_material(response.body, token):
+        if (
+            (has_auth_material(response.url) and not is_redacted_public_url(response.url))
+            or self._contains_sensitive_material(response.body, token)
+        ):
             return
         try:
             json.dumps(response.body, ensure_ascii=True)
@@ -191,6 +263,7 @@ class LocalResponseCache:
             "response": {
                 "url": response.url,
                 "status_code": response.status_code,
+                "headers": self._safe_headers(response.headers),
                 "body": response.body,
             },
         }
@@ -210,9 +283,26 @@ class LocalResponseCache:
         payload = {"version": 1, "entries": dict(ordered)}
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_name(self.path.name + ".tmp")
-            temporary.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
-            os.replace(temporary, self.path)
+            file_descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f"{self.path.name}.", suffix=".tmp", dir=str(self.path.parent)
+            )
+            temporary = Path(temporary_name)
+            try:
+                os.fchmod(file_descriptor, 0o600)
+                with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+                    handle.write(json.dumps(payload, ensure_ascii=True))
+                os.replace(temporary, self.path)
+                os.chmod(self.path, 0o600)
+            except Exception:
+                try:
+                    os.close(file_descriptor)
+                except OSError:
+                    pass
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
         except (OSError, TypeError, ValueError):
             return
 
@@ -260,6 +350,7 @@ class ApiError(RuntimeError):
         retry_after: float | None = None,
         failure_class: str | None = None,
         rate_limit: Mapping[str, str] | None = None,
+        failure_classes: tuple[str, ...] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -268,6 +359,18 @@ class ApiError(RuntimeError):
         self.retry_after = retry_after
         self.failure_class = failure_class
         self.rate_limit = dict(rate_limit or {})
+        self.failure_classes = tuple(
+            dict.fromkeys(
+                value
+                for value in ((failure_class,) + tuple(failure_classes or ()))
+                if isinstance(value, str) and value
+            )
+        )
+
+    def add_failure_class(self, failure_class: str | None) -> None:
+        if not isinstance(failure_class, str) or not failure_class:
+            return
+        self.failure_classes = tuple(dict.fromkeys((*self.failure_classes, failure_class)))
 
 
 class ResponseShapeError(ApiError):
@@ -329,14 +432,57 @@ class UrllibTransport:
         cache_max_entries: int = 256,
         random_fn: Callable[[float, float], float] = random.uniform,
     ) -> None:
-        if timeout <= 0:
-            raise ValueError("timeout must be greater than zero")
-        if max_retries < 0:
-            raise ValueError("max_retries must not be negative")
-        if retry_backoff < 0 or retry_jitter < 0:
-            raise ValueError("retry delays must not be negative")
-        if retry_after_max <= 0:
-            raise ValueError("retry_after_max must be greater than zero")
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(float(timeout))
+            or timeout < MIN_TIMEOUT_SECONDS
+            or timeout > MAX_TIMEOUT_SECONDS
+        ):
+            raise ValueError(
+                f"timeout must be finite and in [{MIN_TIMEOUT_SECONDS}, {MAX_TIMEOUT_SECONDS}]"
+            )
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int):
+            raise ValueError("max_retries must be an integer")
+        if max_retries < 0 or max_retries > MAX_RETRIES:
+            raise ValueError(f"max_retries must be in [0, {MAX_RETRIES}]")
+        for name, value, maximum in (
+            ("retry_backoff", retry_backoff, MAX_RETRY_BACKOFF_SECONDS),
+            ("retry_jitter", retry_jitter, MAX_RETRY_JITTER_SECONDS),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+                or value > maximum
+            ):
+                raise ValueError(f"{name} must be finite and in [0, {maximum}]")
+        if (
+            isinstance(retry_after_max, bool)
+            or not isinstance(retry_after_max, (int, float))
+            or not math.isfinite(float(retry_after_max))
+            or retry_after_max < MIN_RETRY_AFTER_SECONDS
+            or retry_after_max > MAX_RETRY_AFTER_SECONDS
+        ):
+            raise ValueError(
+                f"retry_after_max must be finite and in [{MIN_RETRY_AFTER_SECONDS}, {MAX_RETRY_AFTER_SECONDS}]"
+            )
+        if (
+            isinstance(cache_ttl_seconds, bool)
+            or not isinstance(cache_ttl_seconds, (int, float))
+            or not math.isfinite(float(cache_ttl_seconds))
+            or cache_ttl_seconds <= 0
+            or cache_ttl_seconds > MAX_CACHE_TTL_SECONDS
+        ):
+            raise ValueError(f"cache_ttl_seconds must be finite and in (0, {MAX_CACHE_TTL_SECONDS}]")
+        if (
+            isinstance(cache_max_entries, bool)
+            or not isinstance(cache_max_entries, int)
+            or cache_max_entries < 1
+            or cache_max_entries > MAX_CACHE_ENTRIES
+        ):
+            raise ValueError(f"cache_max_entries must be in [1, {MAX_CACHE_ENTRIES}]")
         if cache_enabled and not cache_path:
             raise ValueError("cache_path is required when cache_enabled is true")
         self.base_url = base_url.rstrip("/") + "/"
@@ -385,14 +531,7 @@ class UrllibTransport:
         return url + separator + urlencode(query)
 
     def _redact_url(self, url: str) -> str:
-        if not self.token_param:
-            return url
-        parts = urlsplit(url)
-        query = [
-            (key, "[REDACTED]" if key == self.token_param else value)
-            for key, value in parse_qsl(parts.query, keep_blank_values=True)
-        ]
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+        return redact_public_url(url)
 
     def _redact_text(self, value: Any) -> str:
         text = str(value)
@@ -463,7 +602,7 @@ class UrllibTransport:
         url = self._url(path, params)
         cache_key = self._cache_key(path, params) if self._cache is not None else None
         if self._cache is not None and cache_key is not None:
-            cached = self._cache.get(cache_key)
+            cached = self._cache.get(cache_key, token=self.token)
             if cached is not None:
                 self.coordinator.metrics.cache_hits += 1
                 return cached
@@ -477,6 +616,7 @@ class UrllibTransport:
         request = Request(url, headers=headers, method="GET")
         context = ssl.create_default_context() if self.verify_tls else ssl._create_unverified_context()
         retryable_statuses = {429, 500, 502, 503, 504}
+        primary_error: ApiError | None = None
         for attempt in range(1, self.max_retries + 2):
             try:
                 self.coordinator.reserve_request()
@@ -492,17 +632,18 @@ class UrllibTransport:
                     if self._cache is not None and cache_key is not None:
                         self._cache.put(cache_key, result, token=self.token)
                     return result
+            except ApiError as exc:
+                if primary_error is not None and exc.failure_class == "budget_exhausted":
+                    primary_error.add_failure_class("budget_exhausted")
+                    raise primary_error from exc
+                raise
             except HTTPError as exc:
                 raw = exc.read()
                 detail = raw.decode("utf-8", errors="replace")[:300]
                 detail = self._redact_text(detail)
                 retry_after = self._retry_after(exc.headers or {})
                 can_retry = exc.code in retryable_statuses and attempt <= self.max_retries
-                if can_retry:
-                    self.coordinator.record_retry()
-                    self.sleep_fn(self._retry_delay(attempt, retry_after))
-                    continue
-                raise ApiError(
+                error = ApiError(
                     f"GET {self._redact_url(url)} failed with HTTP {exc.code}: {detail}",
                     exc.code,
                     attempts=attempt,
@@ -510,31 +651,59 @@ class UrllibTransport:
                     retry_after=retry_after,
                     failure_class=failure_class_for_status(exc.code),
                     rate_limit=rate_limit_headers(exc.headers),
-                ) from exc
+                )
+                if can_retry:
+                    if primary_error is None:
+                        primary_error = error
+                    else:
+                        primary_error.add_failure_class(error.failure_class)
+                    self.coordinator.record_retry()
+                    self.sleep_fn(self._retry_delay(attempt, retry_after))
+                    continue
+                if primary_error is not None:
+                    primary_error.add_failure_class(error.failure_class)
+                    raise primary_error from exc
+                raise error from exc
             except URLError as exc:
                 can_retry = attempt <= self.max_retries
-                if can_retry:
-                    self.coordinator.record_retry()
-                    self.sleep_fn(self._retry_delay(attempt))
-                    continue
-                raise ApiError(
+                error = ApiError(
                     f"GET {self._redact_url(url)} failed: {self._redact_text(getattr(exc, 'reason', exc))}",
                     attempts=attempt,
                     retryable=True,
                     failure_class="network_error",
-                ) from exc
-            except (TimeoutError, OSError) as exc:
-                can_retry = attempt <= self.max_retries
+                )
                 if can_retry:
+                    if primary_error is None:
+                        primary_error = error
+                    else:
+                        primary_error.add_failure_class(error.failure_class)
                     self.coordinator.record_retry()
                     self.sleep_fn(self._retry_delay(attempt))
                     continue
-                raise ApiError(
+                if primary_error is not None:
+                    primary_error.add_failure_class(error.failure_class)
+                    raise primary_error from exc
+                raise error from exc
+            except (TimeoutError, OSError) as exc:
+                can_retry = attempt <= self.max_retries
+                error = ApiError(
                     f"GET {self._redact_url(url)} failed: {self._redact_text(exc)}",
                     attempts=attempt,
                     retryable=True,
                     failure_class="network_error",
-                ) from exc
+                )
+                if can_retry:
+                    if primary_error is None:
+                        primary_error = error
+                    else:
+                        primary_error.add_failure_class(error.failure_class)
+                    self.coordinator.record_retry()
+                    self.sleep_fn(self._retry_delay(attempt))
+                    continue
+                if primary_error is not None:
+                    primary_error.add_failure_class(error.failure_class)
+                    raise primary_error from exc
+                raise error from exc
 
 
 @dataclass
@@ -557,6 +726,12 @@ def paginate(
     max_pages: int = 100,
 ) -> PageResult:
     """Follow Link, x-next-page, or page-size pagination without silent truncation."""
+    if isinstance(per_page, bool) or not isinstance(per_page, int) or per_page < 1:
+        raise ValueError("per_page must be a positive integer")
+    if isinstance(max_pages, bool) or not isinstance(max_pages, int):
+        raise ValueError("max_pages must be an integer")
+    if max_pages < 1 or max_pages > MAX_PAGES:
+        raise ValueError(f"max_pages must be in [1, {MAX_PAGES}]")
     base_params = dict(params or {})
     base_params.setdefault("per_page", per_page)
     page = 1

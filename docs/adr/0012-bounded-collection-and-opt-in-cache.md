@@ -21,6 +21,13 @@ exponential backoff, at most 0.25 seconds of jitter, and a 60-second
 signals are exposed as safe collection metrics and, when relevant, coverage
 diagnostics.
 
+The hard caps are 300 seconds for timeout, 10 retries, 1000 pages, 10000
+requests, 60 seconds for backoff and jitter, 300 seconds for the retry-after
+cap, 86400 seconds for cache TTL, and 10000 cache entries. Non-finite values
+and unbounded request budgets are rejected. A retryable remote failure remains
+the primary failure if a later retry is stopped by the request budget; the
+ledger may additionally record `budget_exhausted`.
+
 Every resource and activity/ref item is normalized independently. Missing or
 ill-typed native identity, repository identity, or required occurrence time is
 dropped, while valid siblings remain. The affected source becomes
@@ -38,5 +45,8 @@ failure, and status 1 for ordinary validation/publication failure.
 The cache is enabled only when `enabled: true` and explicit `path`,
 `ttl_seconds`, and `max_entries` are present. Its key contains provider,
 instance, request path, parameters, and a digest of token scope. Entries store
-only a redacted URL, status, and safe JSON body; unreadable, expired, or
-credential-bearing entries behave as misses.
+only a redacted URL, status, safe JSON body, and allowlisted pagination/
+rate-limit headers. Cache files and temporary files are mode `0600`; missing
+headers in an old entry, unreadable, expired, unredacted, or
+credential-bearing entries behave as misses so replay cannot claim complete
+pagination.

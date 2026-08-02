@@ -14,10 +14,18 @@ from .providers import CollectionRequest, PROVIDER_REGISTRY, RepositoryTarget
 from .providers.base import ACTIVITY_SOURCES, ProviderNotReady, RESOURCE_SOURCES
 from .providers.resource_base import StrictNormalizationError, api_error_diagnostics
 from .providers.transport import ApiError, ResponseShapeError, empty_transport_metrics
+from .validation import validate_bundle
 
 
 class CollectionError(ValueError):
     """The collection plan cannot be executed safely."""
+
+
+class PrivacyResponseError(ResponseShapeError):
+    """Provider output crossed the public boundary with credential material."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, failure_class="privacy_violation")
 
 
 ProviderFactory = Callable[[str, str, dict[str, Any], str | None], Any]
@@ -39,7 +47,8 @@ def _group_failure_diagnostics(error: Exception) -> tuple[str, dict[str, Any]]:
     if isinstance(error, PrivacyError):
         return "privacy_violation", {"failure_class": "privacy_violation"}
     if isinstance(error, (StrictNormalizationError, ResponseShapeError)):
-        return "malformed_response", api_error_diagnostics(error)
+        diagnostics = api_error_diagnostics(error)
+        return diagnostics.get("failure_class", "malformed_response"), diagnostics
     if isinstance(error, ApiError):
         return error.failure_class or "transport_error", api_error_diagnostics(error)
     return "unexpected_error", {
@@ -53,7 +62,7 @@ def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
     try:
         bundle = sanitize_public_payload(bundle)
     except PrivacyError as exc:
-        raise ResponseShapeError(str(exc)) from exc
+        raise PrivacyResponseError(str(exc)) from exc
     if not isinstance(bundle, dict):
         raise ResponseShapeError("provider returned a non-object bundle")
 
@@ -63,9 +72,16 @@ def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
         value = bundle[key]
         if not isinstance(value, list):
             raise ResponseShapeError(f"provider bundle {key} must be an array")
+        seen_ids: set[str] = set()
         for position, item in enumerate(value):
             if not isinstance(item, dict):
                 raise ResponseShapeError(f"provider bundle {key}[{position}] must be an object")
+            entity_id = item.get("id")
+            if not isinstance(entity_id, str) or not entity_id.strip():
+                raise ResponseShapeError(f"provider bundle {key}[{position}] is missing a non-empty id")
+            if entity_id in seen_ids:
+                raise ResponseShapeError(f"provider bundle {key} contains duplicate id: {entity_id}")
+            seen_ids.add(entity_id)
 
     coverage = bundle.get("coverage")
     if coverage is not None and not isinstance(coverage, dict):
@@ -88,6 +104,21 @@ def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
             if key in collection and collection[key] is not None and not isinstance(collection[key], dict):
                 raise ResponseShapeError(f"provider bundle collection.{key} must be an object")
 
+    # A provider group may legitimately be partial when its coverage ledger
+    # records a failed repository. Validate all other schema/semantic
+    # invariants before the aggregate merge; coverage and the corresponding
+    # missing repository are diagnosed by the final bundle gate.
+    validation_issues = validate_bundle(bundle)
+    group_failures = (bundle.get("coverage") or {}).get("group_failures", [])
+    hard_issues = [
+        issue
+        for issue in validation_issues
+        if not issue.code.startswith("coverage.")
+        and not (issue.code == "scope.repository_missing" and group_failures)
+    ]
+    if hard_issues:
+        details = "; ".join(issue.code for issue in hard_issues[:4])
+        raise ResponseShapeError(f"provider bundle semantic validation failed: {details}")
     return bundle
 
 
@@ -192,6 +223,80 @@ def _failed_group_bundle(
     }
 
 
+def _bundle_group_identity(bundle: dict[str, Any]) -> tuple[str, str, list[str]]:
+    collection = bundle.get("collection")
+    if isinstance(collection, dict):
+        provider = collection.get("provider")
+        instance = collection.get("instance")
+        if isinstance(provider, str) and isinstance(instance, str):
+            scope = (bundle.get("run") or {}).get("scope") if isinstance(bundle.get("run"), dict) else {}
+            repositories = scope.get("repositories", []) if isinstance(scope, dict) else []
+            return provider, instance, [item for item in repositories if isinstance(item, str)]
+    providers = bundle.get("providers")
+    if isinstance(providers, list) and providers and isinstance(providers[0], dict):
+        provider = providers[0]
+        kind = provider.get("kind")
+        instance = provider.get("instance")
+        if isinstance(kind, str) and isinstance(instance, str):
+            scope = (bundle.get("run") or {}).get("scope") if isinstance(bundle.get("run"), dict) else {}
+            repositories = scope.get("repositories", []) if isinstance(scope, dict) else []
+            return kind, instance, [item for item in repositories if isinstance(item, str)]
+    return "unknown", "unknown", []
+
+
+def _record_merge_failure(
+    merged: dict[str, Any],
+    bundle: dict[str, Any],
+    source_category: str,
+    item: Any,
+    reason: str,
+) -> None:
+    provider, instance, scoped_repositories = _bundle_group_identity(bundle)
+    repository = item.get("repository_id") if isinstance(item, dict) else None
+    if not isinstance(repository, str) or not repository:
+        repository = scoped_repositories[0] if scoped_repositories else "unknown-repository"
+    source = source_category if source_category in RESOURCE_SOURCES else "repositories"
+    provider_id = f"provider:{provider}:{instance}"
+    failure = {
+        "provider": provider,
+        "instance": instance,
+        "repository": repository,
+        "source": source,
+        "failure_class": "malformed_response",
+        "reason": reason,
+    }
+    merged["coverage"]["group_failures"].append(failure)
+    observations = [
+        item
+        for item in merged["coverage"]["observations"]
+        if isinstance(item, dict)
+        and item.get("source") == source
+        and item.get("provider_id") == provider_id
+        and item.get("repository_id") == repository
+    ]
+    if not observations:
+        merged["coverage"]["observations"].append(
+            {
+                "source": source,
+                "provider_id": provider_id,
+                "repository_id": repository,
+                "status": "incomplete",
+                "diagnostics": {"failure_class": "malformed_response", "group_failure": True, "reason": reason},
+            }
+        )
+    else:
+        for observation in observations:
+            observation["status"] = "incomplete"
+            diagnostics = observation.setdefault("diagnostics", {})
+            if isinstance(diagnostics, dict):
+                diagnostics.update(
+                    {"failure_class": "malformed_response", "group_failure": True, "reason": reason}
+                )
+    if source in RESOURCE_SOURCES:
+        merged["coverage"]["fatal"].append(failure)
+    merged["coverage"]["allow_publish"] = False
+
+
 def _merge_bundles(
     bundles: list[dict[str, Any]],
     *,
@@ -261,19 +366,23 @@ def _merge_bundles(
     )
     seen: dict[str, set[str]] = {key: set() for key in collection_keys}
     for bundle in bundles:
-        for key in collection_keys:
-            for item in bundle.get(key, []):
-                entity_id = item.get("id") if isinstance(item, dict) else None
-                if not isinstance(entity_id, str) or entity_id in seen[key]:
-                    continue
-                seen[key].add(entity_id)
-                merged[key].append(item)
         coverage = bundle.get("coverage") or {}
         merged["coverage"]["observations"].extend(coverage.get("observations") or [])
         merged["coverage"]["fatal"].extend(coverage.get("fatal") or [])
         merged["coverage"]["group_failures"].extend(coverage.get("group_failures") or [])
         if coverage.get("allow_publish") is not True:
             merged["coverage"]["allow_publish"] = False
+        for key in collection_keys:
+            for item in bundle.get(key, []):
+                entity_id = item.get("id") if isinstance(item, dict) else None
+                if not isinstance(entity_id, str) or not entity_id.strip():
+                    _record_merge_failure(merged, bundle, key, item, "record is missing a non-empty id")
+                    continue
+                if entity_id in seen[key]:
+                    _record_merge_failure(merged, bundle, key, item, f"duplicate record id: {entity_id}")
+                    continue
+                seen[key].add(entity_id)
+                merged[key].append(item)
         collection = bundle.get("collection") or {}
         if isinstance(collection, dict):
             group = collection.get("group")

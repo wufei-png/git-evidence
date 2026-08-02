@@ -12,11 +12,9 @@ from .resource_base import (
     api_error_diagnostics,
     first_timestamp,
     in_window_or_malformed,
-    in_window,
     is_valid_native_id,
     merge_diagnostics,
     native_id,
-    parse_timestamp,
 )
 from .transport import ApiError, JsonTransport, PageResult, ResponseShapeError, UrllibTransport, paginate
 
@@ -397,7 +395,7 @@ class GitHubProvider(ResourceProvider):
                     target, comment, number, "issue_comment"
                 ),
                 filter_item=lambda comment: in_window_or_malformed(
-                    comment, request, "created_at", "updated_at"
+                    comment, request, "created_at", "submitted_at", "updated_at"
                 ),
             )
             merge_diagnostics(diagnostics, result.diagnostics)
@@ -407,8 +405,16 @@ class GitHubProvider(ResourceProvider):
             records.extend(result.items)
             if number in pull_numbers:
                 for endpoint, kind, timestamp_fields in (
-                    (f"{self._repo_path(target)}/pulls/{number}/reviews", "review", ("submitted_at", "updated_at")),
-                    (f"{self._repo_path(target)}/pulls/{number}/comments", "review_comment", ("created_at", "updated_at")),
+                    (
+                        f"{self._repo_path(target)}/pulls/{number}/reviews",
+                        "review",
+                        ("created_at", "submitted_at", "updated_at"),
+                    ),
+                    (
+                        f"{self._repo_path(target)}/pulls/{number}/comments",
+                        "review_comment",
+                        ("created_at", "submitted_at", "updated_at"),
+                    ),
                 ):
                     result = self._safe_page("interactions", lambda endpoint=endpoint: self._page(endpoint, {}))
                     result = self._normalize_items(
@@ -435,23 +441,19 @@ class GitHubProvider(ResourceProvider):
 
     @staticmethod
     def _change_request_in_window(item: dict[str, Any], request: CollectionRequest) -> bool:
-        return in_window_or_malformed(item, request, "created_at", "updated_at", "closed_at", "merged_at")
+        return in_window_or_malformed(item, request, "merged_at", "updated_at", "created_at")
 
     @staticmethod
     def _commit_in_window(item: dict[str, Any], request: CollectionRequest) -> bool:
         if not isinstance(item, dict):
             return True
         commit = item.get("commit") or {}
-        values = [
-            first_timestamp(commit.get(field) or {}, "date")
-            for field in ("committer", "author")
-            if isinstance(commit.get(field), dict)
-        ]
-        if not values:
-            return True
-        return in_window_or_malformed({"timestamp": values[0]}, request, "timestamp") or any(
-            in_window(value, request) for value in values if parse_timestamp(value) is not None
+        occurred_at = first_timestamp(commit.get("committer") or {}, "date") or first_timestamp(
+            commit.get("author") or {}, "date"
         )
+        if occurred_at is None:
+            return True
+        return in_window_or_malformed({"timestamp": occurred_at}, request, "timestamp")
 
     def _normalize_commit(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
         sha = item.get("sha")

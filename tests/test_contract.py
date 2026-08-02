@@ -578,7 +578,15 @@ class ContractTests(unittest.TestCase):
         bundle = GitHubProvider(transport).collect(
             request_for("github", "github.com", include_activity_api=True)
         )
-        self.assertEqual(validate_bundle(bundle), [])
+        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertTrue(
+            any(
+                failure["source"] == "ref_changes"
+                and failure["failure_class"] == "fixture_missing"
+                for failure in bundle["coverage"]["group_failures"]
+            )
+        )
+        self.assertIn("coverage.publish_blocked", {issue.code for issue in validate_bundle(bundle)})
         self.assertEqual(bundle["ref_changes"][0]["change_association"], "unknown")
         ref_coverage = next(
             item

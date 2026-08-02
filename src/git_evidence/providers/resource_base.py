@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
 
+from ..limits import MAX_PAGES
 from ..privacy import sanitize_public_payload
 from .base import (
     ACTIVITY_SOURCES,
@@ -59,30 +60,25 @@ def native_id(item: dict[str, Any], *fields: str) -> Any:
 
 
 def in_window_or_malformed(item: Any, request: CollectionRequest, *fields: str) -> bool:
-    """Keep unknown-time records for strict diagnostics; filter known out-of-window items."""
+    """Use the same first-occurrence selector as the normalizer."""
     if not isinstance(item, dict):
         return True
-    values = [item.get(field) for field in fields]
-    parsed_values = []
-    for value in values:
-        if value is None:
-            continue
-        parsed = parse_timestamp(value)
-        if parsed is None:
-            return True
-        parsed_values.append(parsed)
-    if not parsed_values:
+    value = occurrence_timestamp(item, *fields)
+    if value is None:
         return True
-    return any(in_window(value, request) for value in values if value is not None)
+    if parse_timestamp(value) is None:
+        return True
+    return in_window(value, request)
 
 
 def parse_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    return parsed if parsed.tzinfo is not None else None
 
 
 def in_window(value: Any, request: CollectionRequest) -> bool:
@@ -94,12 +90,17 @@ def in_window(value: Any, request: CollectionRequest) -> bool:
     return start <= timestamp.astimezone(start.tzinfo) < end.astimezone(start.tzinfo)
 
 
-def first_timestamp(item: dict[str, Any], *fields: str) -> str | None:
+def occurrence_timestamp(item: dict[str, Any], *fields: str) -> str | None:
     for field in fields:
         value = item.get(field)
         if isinstance(value, str) and value:
             return value
     return None
+
+
+def first_timestamp(item: dict[str, Any], *fields: str) -> str | None:
+    """Backward-compatible name for the canonical occurrence selector."""
+    return occurrence_timestamp(item, *fields)
 
 
 def actor_from(item: dict[str, Any], *fields: str) -> dict[str, Any] | None:
@@ -140,6 +141,8 @@ def api_error_diagnostics(error: ApiError) -> dict[str, Any]:
         else:
             failure_class = "transport_error"
     diagnostics["failure_class"] = failure_class
+    if len(error.failure_classes) > 1:
+        diagnostics["failure_classes"] = list(error.failure_classes)
     if error.status_code is not None:
         diagnostics["status_code"] = error.status_code
     if error.retry_after is not None:
@@ -258,6 +261,7 @@ class BundleBuilder:
                 "required_sources": list(RESOURCE_SOURCES),
                 "observations": [],
                 "fatal": [],
+                "group_failures": [],
                 "allow_publish": True,
             },
         }
@@ -265,6 +269,26 @@ class BundleBuilder:
         self._actor_ids: dict[str, str] = {}
         self._commit_ids_by_sha: dict[tuple[str, str], set[str]] = {}
         self._change_request_ids_by_sha: dict[tuple[str, str], set[str]] = {}
+
+    @staticmethod
+    def _failure_classes(diagnostics: dict[str, Any]) -> set[str]:
+        values: set[str] = set()
+        def visit(value: Any) -> None:
+            if isinstance(value, dict):
+                failure_class = value.get("failure_class")
+                if isinstance(failure_class, str) and failure_class:
+                    values.add(failure_class)
+                failure_classes = value.get("failure_classes")
+                if isinstance(failure_classes, list):
+                    values.update(item for item in failure_classes if isinstance(item, str) and item)
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+
+        visit(diagnostics)
+        return values
 
     def add_coverage(self, source: str, target: RepositoryTarget, result: SourceResult) -> None:
         observation = {
@@ -283,7 +307,37 @@ class BundleBuilder:
             observation["diagnostics"] = diagnostics
         self.bundle["coverage"]["observations"].append(observation)
         self.bundle["providers"][0]["capabilities"][source] = result.status
-        if source in RESOURCE_SOURCES and result.status != "supported":
+        failure_classes = self._failure_classes(diagnostics)
+        group_failure_classes = failure_classes & {
+            "permission_denied",
+            "rate_limited",
+            "service_error",
+            "not_found",
+            "request_rejected",
+            "network_error",
+            "transport_error",
+            "fixture_missing",
+            "http_error",
+            "provider_not_ready",
+            "unexpected_error",
+            "budget_exhausted",
+            "privacy_violation",
+        }
+        if result.status != "supported" and group_failure_classes:
+            observation.setdefault("diagnostics", {})["group_failure"] = True
+            for failure_class in sorted(group_failure_classes):
+                failure = {
+                    "provider": self.descriptor.kind,
+                    "instance": self.request.instance,
+                    "repository": target.canonical_id,
+                    "source": source,
+                    "failure_class": failure_class,
+                }
+                self.bundle["coverage"]["group_failures"].append(failure)
+                if source in RESOURCE_SOURCES:
+                    self.bundle["coverage"]["fatal"].append(failure)
+            self.bundle["coverage"]["allow_publish"] = False
+        elif source in RESOURCE_SOURCES and result.status != "supported":
             self.bundle["coverage"]["allow_publish"] = False
             self.bundle["coverage"]["fatal"].append(
                 f"{target.canonical_id}:{source}:{result.status}:{result.note}"
@@ -472,6 +526,10 @@ class ResourceProvider:
     descriptor: ProviderDescriptor
 
     def __init__(self, transport: JsonTransport, instance: str, *, max_pages: int = 100) -> None:
+        if isinstance(max_pages, bool) or not isinstance(max_pages, int):
+            raise ValueError("max_pages must be an integer")
+        if max_pages < 1 or max_pages > MAX_PAGES:
+            raise ValueError(f"max_pages must be in [1, {MAX_PAGES}]")
         self.transport = transport
         self.instance = instance
         self.max_pages = max_pages
@@ -488,6 +546,10 @@ class ResourceProvider:
             raise ValueError(
                 f"request provider {request.provider_kind!r} does not match {self.descriptor.kind!r}"
             )
+        if isinstance(request.max_pages, bool) or not isinstance(request.max_pages, int):
+            raise ValueError("request.max_pages must be an integer")
+        if request.max_pages < 1 or request.max_pages > MAX_PAGES:
+            raise ValueError(f"request.max_pages must be in [1, {MAX_PAGES}]")
         self.max_pages = request.max_pages
         builder = BundleBuilder(request, self.descriptor, self.transport)
         for target in request.repositories:

@@ -15,6 +15,7 @@ from jsonschema.exceptions import SchemaError
 from .model import COLLECTION_KEYS, collection
 from .privacy import iter_privacy_violations
 from .providers.base import ACTIVITY_SOURCES, RESOURCE_SOURCES
+from .providers.catalog import PROVIDER_REGISTRY
 
 CAPABILITY_STATES = {"supported", "unsupported", "unavailable", "incomplete"}
 ASSOCIATION_STATES = {"linked", "unlinked", "ambiguous", "unknown"}
@@ -309,6 +310,12 @@ def _validate_fact_evidence_subject(
     subject_type = evidence.get("subject_type")
     subject_id = evidence.get("subject_id")
     if subject_type is None and subject_id is None:
+        if expected_type is not None or fact_subject_type is not None:
+            _issue(
+                issues,
+                "fact.evidence_subject",
+                f"fact {fact_id} evidence {evidence.get('id')} must bind to a subject",
+            )
         return
     if not isinstance(subject_type, str) or not subject_type:
         _issue(
@@ -357,6 +364,29 @@ def _validate_fact_evidence_subject(
         )
         return
 
+    subject_provider_id = _entity_provider_id(subject_type, subject, indexes)
+    evidence_provider_id = evidence.get("provider_id")
+    if subject_provider_id:
+        if not isinstance(evidence_provider_id, str) or not evidence_provider_id:
+            _issue(
+                issues,
+                "fact.evidence_provenance",
+                f"fact {fact_id} evidence {evidence.get('id')} must provide provider_id",
+            )
+        elif evidence_provider_id != subject_provider_id:
+            _issue(
+                issues,
+                "fact.evidence_provenance",
+                f"fact {fact_id} evidence {evidence.get('id')} provider_id does not match subject",
+            )
+    elif evidence_provider_id is not None:
+        if not isinstance(evidence_provider_id, str) or evidence_provider_id not in indexes.get("providers", {}):
+            _issue(
+                issues,
+                "fact.evidence_provenance",
+                f"fact {fact_id} evidence {evidence.get('id')} references an unknown provider",
+            )
+
     fact_repository_id = fact.get("repository_id")
     subject_repository_id = subject.get("repository_id")
     if isinstance(fact_repository_id, str) and fact_repository_id:
@@ -372,6 +402,180 @@ def _validate_fact_evidence_subject(
                 f"the fact repository {fact_repository_id}",
             )
 
+
+def _provider_id_from_entity_id(
+    collection_key: str,
+    item: dict[str, Any],
+    provider_index: dict[str, dict[str, Any]],
+) -> str | None:
+    entity_id = item.get("id")
+    if not isinstance(entity_id, str) or not entity_id:
+        return None
+    singular = {
+        "repositories": "repo",
+        "work_items": "work_item",
+        "change_requests": "change_request",
+        "ref_changes": "ref_change",
+    }.get(collection_key, collection_key.rstrip("s"))
+    for provider_id, provider in provider_index.items():
+        kind = provider.get("kind")
+        instance = provider.get("instance")
+        if isinstance(kind, str) and isinstance(instance, str):
+            if entity_id.startswith(f"{singular}:{kind}:{instance}:"):
+                return provider_id
+    return None
+
+
+def _entity_provider_id(
+    subject_type: str,
+    item: dict[str, Any],
+    indexes: dict[str, dict[str, dict[str, Any]]],
+) -> str | None:
+    explicit = item.get("provider_id")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    if subject_type == "provider":
+        return item.get("id") if isinstance(item.get("id"), str) else None
+    repository_id = item.get("repository_id")
+    if subject_type == "repository":
+        repository_id = item.get("id")
+    if isinstance(repository_id, str):
+        repository = indexes.get("repositories", {}).get(repository_id)
+        if isinstance(repository, dict):
+            provider_id = repository.get("provider_id")
+            if isinstance(provider_id, str) and provider_id:
+                return provider_id
+    collection_key = SUBJECT_COLLECTIONS.get(subject_type, f"{subject_type}s")
+    return _provider_id_from_entity_id(collection_key, item, indexes.get("providers", {}))
+
+
+def _validate_provenance(
+    indexes: dict[str, dict[str, dict[str, Any]]],
+    issues: list[ValidationIssue],
+) -> None:
+    """Align provider, repository, subject, and coverage provenance."""
+    providers = indexes.get("providers", {})
+    for provider_id, provider in providers.items():
+        kind = provider.get("kind")
+        instance = provider.get("instance")
+        if not isinstance(kind, str) or not kind or not isinstance(instance, str) or not instance:
+            _issue(issues, "provider.provenance", f"provider {provider_id} must declare kind and instance")
+            continue
+        if not PROVIDER_REGISTRY.contains(kind):
+            _issue(issues, "provider.unknown", f"provider {provider_id} has unsupported kind {kind!r}")
+        expected_id = f"provider:{kind}:{instance}"
+        if provider_id != expected_id:
+            _issue(
+                issues,
+                "provider.provenance",
+                f"provider id {provider_id} does not match kind/instance {kind}:{instance}",
+            )
+
+    repositories = indexes.get("repositories", {})
+    for repository_id, repository in repositories.items():
+        explicit_provider_id = repository.get("provider_id")
+        inferred_provider_id = _provider_id_from_entity_id(
+            "repositories",
+            repository,
+            providers,
+        )
+        provider_id = (
+            explicit_provider_id
+            if isinstance(explicit_provider_id, str) and explicit_provider_id
+            else inferred_provider_id
+        )
+        provider = providers.get(provider_id) if isinstance(provider_id, str) else None
+        if not isinstance(provider_id, str) or not provider_id or provider is None:
+            _issue(
+                issues,
+                "repository.provenance",
+                f"repository {repository_id} references an unknown provider",
+            )
+            continue
+        if explicit_provider_id is not None and explicit_provider_id != inferred_provider_id:
+            _issue(
+                issues,
+                "repository.provenance",
+                f"repository {repository_id} provider does not match its canonical id",
+            )
+        kind = provider.get("kind")
+        instance = provider.get("instance")
+        expected_prefix = f"repo:{kind}:{instance}:"
+        if not repository_id.startswith(expected_prefix):
+            _issue(
+                issues,
+                "repository.provenance",
+                f"repository {repository_id} does not match provider {provider_id}",
+            )
+
+    entity_collections = tuple(
+        key for key in COLLECTION_KEYS if key not in {"providers", "repositories", "evidence", "facts"}
+    )
+    for collection_key in entity_collections:
+        singular = {
+            "work_items": "work_item",
+            "change_requests": "change_request",
+            "ref_changes": "ref_change",
+        }.get(collection_key, collection_key.rstrip("s"))
+        for entity_id, item in indexes.get(collection_key, {}).items():
+            explicit_provider_id = item.get("provider_id")
+            repository_id = item.get("repository_id")
+            repository = repositories.get(repository_id) if isinstance(repository_id, str) else None
+            repository_provider_id = repository.get("provider_id") if isinstance(repository, dict) else None
+            if explicit_provider_id is not None and (
+                not isinstance(explicit_provider_id, str) or explicit_provider_id not in providers
+            ):
+                _issue(issues, "entity.provenance", f"{collection_key} {entity_id} references an unknown provider")
+            if (
+                isinstance(explicit_provider_id, str)
+                and isinstance(repository_provider_id, str)
+                and explicit_provider_id != repository_provider_id
+            ):
+                _issue(
+                    issues,
+                    "entity.provenance",
+                    f"{collection_key} {entity_id} provider does not match its repository",
+                )
+            provider_id = _entity_provider_id(
+                singular,
+                item,
+                indexes,
+            )
+            if provider_id is None:
+                continue
+            provider = providers.get(provider_id)
+            if provider is None:
+                _issue(issues, "entity.provenance", f"{collection_key} {entity_id} has unknown provider provenance")
+                continue
+            kind = provider.get("kind")
+            instance = provider.get("instance")
+            if not entity_id.startswith(f"{singular}:{kind}:{instance}:"):
+                _issue(
+                    issues,
+                    "entity.provenance",
+                    f"{collection_key} {entity_id} id does not match provider {provider_id}",
+                )
+
+    for evidence_id, evidence in indexes.get("evidence", {}).items():
+        provider_id = evidence.get("provider_id")
+        subject_type = evidence.get("subject_type")
+        subject_id = evidence.get("subject_id")
+        if provider_id is not None and (
+            not isinstance(provider_id, str) or provider_id not in providers
+        ):
+            _issue(issues, "evidence.provenance", f"evidence {evidence_id} references an unknown provider")
+        if isinstance(subject_type, str) and isinstance(subject_id, str):
+            subject_collection = SUBJECT_COLLECTIONS.get(subject_type)
+            subject = indexes.get(subject_collection or "", {}).get(subject_id)
+            if subject is None:
+                continue
+            subject_provider_id = _entity_provider_id(subject_type, subject, indexes)
+            if subject_provider_id and provider_id != subject_provider_id:
+                _issue(
+                    issues,
+                    "evidence.provenance",
+                    f"evidence {evidence_id} provider does not match its subject",
+                )
 
 def _validate_scope(
     indexes: dict[str, dict[str, dict[str, Any]]],
@@ -418,6 +622,7 @@ def _validate_scope(
 
 def _validate_coverage(
     bundle: dict[str, Any],
+    indexes: dict[str, dict[str, dict[str, Any]]],
     scope_repository_ids: set[str],
     issues: list[ValidationIssue],
     required_sources_contract: Iterable[str],
@@ -481,6 +686,7 @@ def _validate_coverage(
                 f"coverage.group_failures[{position}] has invalid failure_class: {failure.get('failure_class')!r}",
             )
     by_source_repository: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    by_group: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for position, observation in enumerate(observations):
         if not isinstance(observation, dict):
             _issue(issues, "coverage.observation_shape", f"coverage.observations[{position}] must be an object")
@@ -531,6 +737,38 @@ def _validate_coverage(
             )
         if isinstance(repository_id, str) and repository_id:
             by_source_repository.setdefault((source, repository_id), []).append(observation)
+        provider_id = observation.get("provider_id")
+        if isinstance(source, str) and isinstance(repository_id, str) and isinstance(provider_id, str):
+            by_group.setdefault((source, repository_id, provider_id), []).append(observation)
+        if isinstance(provider_id, str) and provider_id not in indexes.get("providers", {}):
+            _issue(
+                issues,
+                "coverage.provider_unknown",
+                f"coverage {source} references unknown provider: {provider_id}",
+            )
+        repository = indexes.get("repositories", {}).get(repository_id) if isinstance(repository_id, str) else None
+        repository_provider_id = repository.get("provider_id") if isinstance(repository, dict) else None
+        if (
+            isinstance(provider_id, str)
+            and isinstance(repository_provider_id, str)
+            and provider_id != repository_provider_id
+        ):
+            _issue(
+                issues,
+                "coverage.provenance",
+                f"coverage {source} provider does not match repository {repository_id}",
+            )
+        provider = indexes.get("providers", {}).get(provider_id) if isinstance(provider_id, str) else None
+        if isinstance(repository_id, str) and isinstance(provider, dict):
+            kind = provider.get("kind")
+            instance = provider.get("instance")
+            expected_prefix = f"repo:{kind}:{instance}:"
+            if not repository_id.startswith(expected_prefix):
+                _issue(
+                    issues,
+                    "coverage.provenance",
+                    f"coverage {source} repository does not match provider {provider_id}",
+                )
     for source in required_sources:
         for repository_id in sorted(scope_repository_ids):
             matches = by_source_repository.get((source, repository_id), [])
@@ -553,6 +791,122 @@ def _validate_coverage(
         _issue(issues, "coverage.fatal_shape", "coverage.fatal must be an array")
     elif fatal:
         _issue(issues, "coverage.fatal", f"coverage contains fatal observations: {len(fatal)}")
+    for position, failure in enumerate(group_failures):
+        if not isinstance(failure, dict):
+            continue
+        provider_kind = failure.get("provider")
+        instance = failure.get("instance")
+        repository_id = failure.get("repository")
+        source = failure.get("source")
+        failure_class = failure.get("failure_class")
+        if isinstance(provider_kind, str) and not PROVIDER_REGISTRY.contains(provider_kind):
+            _issue(
+                issues,
+                "coverage.group_failure_provider",
+                f"coverage.group_failures[{position}] uses unsupported provider: {provider_kind}",
+            )
+        expected_provider_id = (
+            f"provider:{provider_kind}:{instance}"
+            if isinstance(provider_kind, str) and isinstance(instance, str)
+            else None
+        )
+        if expected_provider_id and expected_provider_id not in indexes.get("providers", {}):
+            _issue(
+                issues,
+                "coverage.group_failure_provenance",
+                f"coverage.group_failures[{position}] has no matching provider entity",
+            )
+        if isinstance(repository_id, str) and repository_id not in scope_repository_ids:
+            _issue(
+                issues,
+                "coverage.group_failure_scope",
+                f"coverage.group_failures[{position}] repository is outside the allowlist",
+            )
+        if (
+            isinstance(provider_kind, str)
+            and isinstance(instance, str)
+            and isinstance(repository_id, str)
+            and not repository_id.startswith(f"repo:{provider_kind}:{instance}:")
+        ):
+            _issue(
+                issues,
+                "coverage.group_failure_provenance",
+                f"coverage.group_failures[{position}] repository does not match provider instance",
+            )
+        if isinstance(source, str) and source not in KNOWN_COVERAGE_SOURCES:
+            _issue(
+                issues,
+                "coverage.group_failure_source",
+                f"coverage.group_failures[{position}] uses unknown source: {source}",
+            )
+        matches = (
+            by_group.get((source, repository_id, expected_provider_id), [])
+            if isinstance(source, str)
+            and isinstance(repository_id, str)
+            and expected_provider_id
+            else []
+        )
+        if not matches:
+            _issue(
+                issues,
+                "coverage.group_failure_observation",
+                f"coverage.group_failures[{position}] has no matching observation",
+            )
+        else:
+            for observation in matches:
+                if observation.get("status") == "supported":
+                    _issue(
+                        issues,
+                        "coverage.group_failure_contradiction",
+                        f"coverage.group_failures[{position}] is contradicted by a supported observation",
+                    )
+                diagnostics = observation.get("diagnostics")
+                diagnostic_classes: set[str] = set()
+                def collect_diagnostic_classes(value: Any) -> None:
+                    if isinstance(value, dict):
+                        diagnostic_class = value.get("failure_class")
+                        if isinstance(diagnostic_class, str):
+                            diagnostic_classes.add(diagnostic_class)
+                        diagnostic_classes.update(
+                            item
+                            for item in value.get("failure_classes", [])
+                            if isinstance(item, str)
+                        )
+                        for child in value.values():
+                            collect_diagnostic_classes(child)
+                    elif isinstance(value, list):
+                        for child in value:
+                            collect_diagnostic_classes(child)
+
+                collect_diagnostic_classes(diagnostics)
+                if isinstance(failure_class, str) and failure_class not in diagnostic_classes:
+                    _issue(
+                        issues,
+                        "coverage.group_failure_diagnostics",
+                        f"coverage.group_failures[{position}] is not recorded by its observation",
+                    )
+        if source in required_sources:
+            fatal_match = any(
+                isinstance(item, dict)
+                and item.get("provider") == provider_kind
+                and item.get("instance") == instance
+                and item.get("repository") == repository_id
+                and item.get("source") == source
+                and item.get("failure_class") == failure_class
+                for item in (fatal if isinstance(fatal, list) else [])
+            )
+            if not fatal_match:
+                _issue(
+                    issues,
+                    "coverage.group_failure_fatal",
+                    f"required group failure {position} is missing a matching fatal ledger entry",
+                )
+        if coverage.get("allow_publish") is True:
+            _issue(
+                issues,
+                "coverage.publish_blocked",
+                "coverage.group_failures cannot coexist with allow_publish=true",
+            )
     if coverage.get("allow_publish") is not True:
         _issue(issues, "coverage.publish_blocked", "coverage.allow_publish is not true")
 
@@ -591,6 +945,7 @@ def validate_bundle(
         _issue(issues, "schema.version", "schema_version must be '0.1'")
     indexes = _validate_ids(bundle, issues)
     scope_repository_ids, scope_actor_ids = _validate_run(bundle, issues)
+    _validate_provenance(indexes, issues)
     _validate_scope(indexes, scope_repository_ids, scope_actor_ids, issues)
     _validate_evidence(indexes, issues)
     _validate_privacy(bundle, issues)
@@ -599,7 +954,7 @@ def validate_bundle(
         if required_sources_contract is None
         else tuple(required_sources_contract)
     )
-    _validate_coverage(bundle, scope_repository_ids, issues, contract)
+    _validate_coverage(bundle, indexes, scope_repository_ids, issues, contract)
     run = bundle.get("run")
     window = run.get("window") if isinstance(run, dict) else None
     window_start = _parse_timestamp(window.get("start")) if isinstance(window, dict) else None

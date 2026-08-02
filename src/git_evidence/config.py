@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -7,6 +8,20 @@ from typing import Any, Mapping
 import yaml
 
 from .providers.catalog import PROVIDER_REGISTRY
+from .limits import (
+    MAX_CACHE_ENTRIES,
+    MAX_CACHE_TTL_SECONDS,
+    MAX_PAGES,
+    MAX_REQUESTS,
+    MAX_RETRIES,
+    MAX_RETRY_AFTER_SECONDS,
+    MAX_RETRY_BACKOFF_SECONDS,
+    MAX_RETRY_JITTER_SECONDS,
+    MAX_TIMEOUT_SECONDS,
+    MIN_RETRY_AFTER_SECONDS,
+    MIN_TIMEOUT_SECONDS,
+)
+from .privacy import canonicalize_field_name, is_sensitive_field
 from .render import LANGUAGES, PROFILES
 
 
@@ -40,7 +55,7 @@ INLINE_SECRET_KEYS = frozenset(
 
 
 def _normalized_key(value: Any) -> str:
-    return str(value).strip().lower().replace("-", "_")
+    return canonicalize_field_name(value)
 
 
 def provider_runtime_options(provider_kind: str, provider_config: dict[str, Any]) -> dict[str, Any]:
@@ -48,12 +63,25 @@ def provider_runtime_options(provider_kind: str, provider_config: dict[str, Any]
     if not isinstance(provider_config, dict):
         raise ConfigError(f"providers.{provider_kind} must be an object")
 
-    def number(name: str, default: float, *, minimum: float, integer: bool = False) -> int | float:
+    def number(
+        name: str,
+        default: float,
+        *,
+        minimum: float,
+        maximum: float,
+        integer: bool = False,
+    ) -> int | float:
         value = provider_config.get(name, default)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ConfigError(f"providers.{provider_kind}.{name} must be numeric")
+        if not math.isfinite(float(value)):
+            raise ConfigError(f"providers.{provider_kind}.{name} must be finite")
         if value < minimum:
             raise ConfigError(f"providers.{provider_kind}.{name} must be at least {minimum}")
+        if value > maximum:
+            raise ConfigError(
+                f"providers.{provider_kind}.{name} must be at most {maximum}"
+            )
         if integer and not isinstance(value, int):
             raise ConfigError(f"providers.{provider_kind}.{name} must be an integer")
         return value
@@ -68,11 +96,24 @@ def provider_runtime_options(provider_kind: str, provider_config: dict[str, Any]
     if cache_path is not None and (not isinstance(cache_path, str) or not cache_path.strip()):
         raise ConfigError(f"providers.{provider_kind}.cache.path must be a non-empty string")
     cache_ttl = cache.get("ttl_seconds", 300.0)
-    if isinstance(cache_ttl, bool) or not isinstance(cache_ttl, (int, float)) or cache_ttl <= 0:
-        raise ConfigError(f"providers.{provider_kind}.cache.ttl_seconds must be greater than zero")
+    if isinstance(cache_ttl, bool) or not isinstance(cache_ttl, (int, float)):
+        raise ConfigError(f"providers.{provider_kind}.cache.ttl_seconds must be numeric")
+    if not math.isfinite(float(cache_ttl)):
+        raise ConfigError(f"providers.{provider_kind}.cache.ttl_seconds must be finite")
+    if cache_ttl <= 0 or cache_ttl > MAX_CACHE_TTL_SECONDS:
+        raise ConfigError(
+            f"providers.{provider_kind}.cache.ttl_seconds must be in (0, {MAX_CACHE_TTL_SECONDS}]"
+        )
     cache_max_entries = cache.get("max_entries", 256)
-    if isinstance(cache_max_entries, bool) or not isinstance(cache_max_entries, int) or cache_max_entries < 1:
-        raise ConfigError(f"providers.{provider_kind}.cache.max_entries must be a positive integer")
+    if (
+        isinstance(cache_max_entries, bool)
+        or not isinstance(cache_max_entries, int)
+        or cache_max_entries < 1
+        or cache_max_entries > MAX_CACHE_ENTRIES
+    ):
+        raise ConfigError(
+            f"providers.{provider_kind}.cache.max_entries must be in [1, {MAX_CACHE_ENTRIES}]"
+        )
     if cache_enabled and (
         not cache_path
         or not {"path", "ttl_seconds", "max_entries"}.issubset(cache)
@@ -81,13 +122,24 @@ def provider_runtime_options(provider_kind: str, provider_config: dict[str, Any]
             f"providers.{provider_kind}.cache.path, ttl_seconds, and max_entries are required when cache is enabled"
         )
     return {
-        "timeout_seconds": number("timeout_seconds", 30.0, minimum=0.001),
-        "max_retries": number("max_retries", 2, minimum=0, integer=True),
-        "max_pages": number("max_pages", 100, minimum=1, integer=True),
-        "max_requests": number("max_requests", 1000, minimum=1, integer=True),
-        "retry_backoff_seconds": number("retry_backoff_seconds", 0.5, minimum=0.0),
-        "retry_jitter_seconds": number("retry_jitter_seconds", 0.25, minimum=0.0),
-        "retry_after_max_seconds": number("retry_after_max_seconds", 60.0, minimum=0.001),
+        "timeout_seconds": number(
+            "timeout_seconds", 30.0, minimum=MIN_TIMEOUT_SECONDS, maximum=MAX_TIMEOUT_SECONDS
+        ),
+        "max_retries": number("max_retries", 2, minimum=0, maximum=MAX_RETRIES, integer=True),
+        "max_pages": number("max_pages", 100, minimum=1, maximum=MAX_PAGES, integer=True),
+        "max_requests": number("max_requests", 1000, minimum=1, maximum=MAX_REQUESTS, integer=True),
+        "retry_backoff_seconds": number(
+            "retry_backoff_seconds", 0.5, minimum=0.0, maximum=MAX_RETRY_BACKOFF_SECONDS
+        ),
+        "retry_jitter_seconds": number(
+            "retry_jitter_seconds", 0.25, minimum=0.0, maximum=MAX_RETRY_JITTER_SECONDS
+        ),
+        "retry_after_max_seconds": number(
+            "retry_after_max_seconds",
+            60.0,
+            minimum=MIN_RETRY_AFTER_SECONDS,
+            maximum=MAX_RETRY_AFTER_SECONDS,
+        ),
         "cache_enabled": cache_enabled,
         "cache_path": cache_path,
         "cache_ttl_seconds": cache_ttl,
@@ -162,11 +214,30 @@ def _validate_collection_mapping(raw: Mapping[str, Any]) -> None:
             raise ConfigError("providers entries must be objects keyed by provider kind")
         if not PROVIDER_REGISTRY.contains(provider_kind):
             raise ConfigError(f"unsupported provider: {provider_kind}")
-        for key in provider_config:
-            if _normalized_key(key) in INLINE_SECRET_KEYS:
-                raise ConfigError(
-                    f"providers.{provider_kind}.{key} must not contain credentials; use token_env"
-                )
+        def reject_inline_credentials(value: Any, path: str, *, root: bool = False) -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    normalized = _normalized_key(key)
+                    if normalized == "token_env":
+                        if root and key == "token_env":
+                            continue
+                        if root:
+                            raise ConfigError(
+                                f"{path}.{key} must use the exact top-level token_env reference"
+                            )
+                        raise ConfigError(
+                            f"{path}.{key} must be a top-level environment reference"
+                        )
+                    if is_sensitive_field(key):
+                        raise ConfigError(
+                            f"{path}.{key} must not contain credentials; use token_env"
+                        )
+                    reject_inline_credentials(child, f"{path}.{key}")
+            elif isinstance(value, list):
+                for index, child in enumerate(value):
+                    reject_inline_credentials(child, f"{path}[{index}]")
+
+        reject_inline_credentials(provider_config, f"providers.{provider_kind}", root=True)
         token_env = provider_config.get("token_env")
         if token_env is not None and (not isinstance(token_env, str) or not token_env):
             raise ConfigError(f"providers.{provider_kind}.token_env must be a non-empty string")
@@ -201,9 +272,9 @@ def validate_report_config(config: Mapping[str, Any]) -> dict[str, Any]:
     report = _report_mapping(config)
     profile = report.get("profile", DEFAULT_REPORT_PROFILE)
     language = report.get("language", DEFAULT_REPORT_LANGUAGE)
-    if profile not in PROFILES:
+    if not isinstance(profile, str) or profile not in PROFILES:
         raise ConfigError(f"report.profile must be one of {', '.join(PROFILES)}")
-    if language not in LANGUAGES:
+    if not isinstance(language, str) or language not in LANGUAGES:
         raise ConfigError(f"report.language must be one of {', '.join(LANGUAGES)}")
 
     display_actor_names = report.get("display_actor_names", False)
@@ -224,7 +295,7 @@ def validate_report_config(config: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(privacy, dict):
         raise ConfigError("report.privacy must be an object")
     actor_display = privacy.get("actor_display", DEFAULT_ACTOR_DISPLAY)
-    if actor_display not in {"anonymous", "explicit-labels"}:
+    if not isinstance(actor_display, str) or actor_display not in {"anonymous", "explicit-labels"}:
         raise ConfigError("report.privacy.actor_display must be anonymous or explicit-labels")
     if display_actor_names and "actor_display" in privacy and actor_display == "anonymous":
         raise ConfigError(

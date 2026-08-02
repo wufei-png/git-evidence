@@ -436,7 +436,7 @@ class GitLabProvider(ResourceProvider):
 
     @staticmethod
     def _change_request_in_window(item: dict[str, Any], request: CollectionRequest) -> bool:
-        return in_window_or_malformed(item, request, "created_at", "updated_at", "closed_at", "merged_at")
+        return in_window_or_malformed(item, request, "merged_at", "updated_at", "created_at")
 
     def _normalize_note(
         self,

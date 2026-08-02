@@ -1,7 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Mapping, Protocol
+
+from ..limits import (
+    MAX_PAGES,
+    MAX_REQUESTS,
+    MAX_RETRIES,
+    MAX_RETRY_AFTER_SECONDS,
+    MAX_RETRY_JITTER_SECONDS,
+    MAX_TIMEOUT_SECONDS,
+    MIN_RETRY_AFTER_SECONDS,
+    MIN_TIMEOUT_SECONDS,
+)
 
 CAPABILITY_STATES = ("supported", "unsupported", "unavailable", "incomplete")
 RESOURCE_SOURCES = (
@@ -73,6 +85,43 @@ class CollectionRequest:
     max_requests: int = 1000
     retry_jitter_seconds: float = 0.25
     retry_after_max_seconds: float = 60.0
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, (int, float))
+            or not math.isfinite(float(self.timeout_seconds))
+            or self.timeout_seconds < MIN_TIMEOUT_SECONDS
+            or self.timeout_seconds > MAX_TIMEOUT_SECONDS
+        ):
+            raise ValueError(
+                f"timeout_seconds must be finite and in [{MIN_TIMEOUT_SECONDS}, {MAX_TIMEOUT_SECONDS}]"
+            )
+        for name, value, maximum, minimum in (
+            ("max_retries", self.max_retries, MAX_RETRIES, 0),
+            ("max_pages", self.max_pages, MAX_PAGES, 1),
+            ("max_requests", self.max_requests, MAX_REQUESTS, 1),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum or value > maximum:
+                raise ValueError(f"{name} must be in [{minimum}, {maximum}]")
+        if (
+            isinstance(self.retry_jitter_seconds, bool)
+            or not isinstance(self.retry_jitter_seconds, (int, float))
+            or not math.isfinite(float(self.retry_jitter_seconds))
+            or self.retry_jitter_seconds < 0
+            or self.retry_jitter_seconds > MAX_RETRY_JITTER_SECONDS
+        ):
+            raise ValueError(f"retry_jitter_seconds must be finite and in [0, {MAX_RETRY_JITTER_SECONDS}]")
+        if (
+            isinstance(self.retry_after_max_seconds, bool)
+            or not isinstance(self.retry_after_max_seconds, (int, float))
+            or not math.isfinite(float(self.retry_after_max_seconds))
+            or self.retry_after_max_seconds < MIN_RETRY_AFTER_SECONDS
+            or self.retry_after_max_seconds > MAX_RETRY_AFTER_SECONDS
+        ):
+            raise ValueError(
+                f"retry_after_max_seconds must be finite and in [{MIN_RETRY_AFTER_SECONDS}, {MAX_RETRY_AFTER_SECONDS}]"
+            )
 
     @property
     def repository_ids(self) -> tuple[str, ...]:
