@@ -293,13 +293,28 @@ class GitHubProvider(ResourceProvider):
         )
         candidate_ids: list[str] = []
         complete = result.status == "supported"
+        malformed_candidates = 0
         for item in result.items:
             number = item.get("number")
-            if number is None:
+            if not is_valid_native_id(number):
                 complete = False
+                malformed_candidates += 1
                 continue
             candidate_ids.append(self._id(target, "change_request", number))
-        if not complete and result.status == "supported":
+        if malformed_candidates:
+            result.status = "incomplete"
+            result.note = (
+                f"{result.note}; " if result.note else ""
+            ) + f"commit association response dropped {malformed_candidates} malformed candidate(s)"
+            merge_diagnostics(
+                result.diagnostics,
+                {
+                    "failure_class": "malformed_response",
+                    "dropped_count": malformed_candidates,
+                    "malformed_items": malformed_candidates,
+                },
+            )
+        elif not complete and result.status == "supported":
             result = SourceResult(
                 result.items,
                 "incomplete",

@@ -42,11 +42,26 @@ but any failed required source keeps `allow_publish: false`. The CLI reserves
 status 3 for this partial group-failure result, status 2 for preflight config
 failure, and status 1 for ordinary validation/publication failure.
 
+Coverage observations are provenance-qualified: every observation declares a
+registered `provider_id` and an allowlisted `repository_id`, and the
+provider/instance/repository tuple must agree with the provider registry.
+Required-source matching uses `(provider_id, repository_id, source)`; an
+observation with missing, unknown, or mismatched provenance cannot satisfy the
+required coverage contract.
+
 The cache is enabled only when `enabled: true` and explicit `path`,
 `ttl_seconds`, and `max_entries` are present. Its key contains provider,
 instance, request path, parameters, and a digest of token scope. Entries store
 only a redacted URL, status, safe JSON body, and allowlisted pagination/
-rate-limit headers. Cache files and temporary files are mode `0600`; missing
-headers in an old entry, unreadable, expired, unredacted, or
-credential-bearing entries behave as misses so replay cannot claim complete
-pagination.
+rate-limit headers. Only non-boolean 2xx statuses are cacheable. Pagination
+and rate-limit header values are format-checked and passed through the shared
+credential detector; invalid or sensitive values reject the entry. Cache
+files and temporary files are mode `0600`; missing headers in an old entry,
+unreadable, expired, unredacted, non-2xx, or credential-bearing entries behave
+as misses so replay cannot claim complete pagination.
+
+The normalizer keeps valid siblings when a source repeats a canonical ID, but
+records the collision as `incomplete` with `malformed_response` diagnostics
+and blocks publication for required resource sources. Direct library calls to
+`collect_config` run the same collection validator as the CLI before any
+provider factory is invoked.

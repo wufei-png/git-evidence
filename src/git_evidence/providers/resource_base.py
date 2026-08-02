@@ -269,6 +269,7 @@ class BundleBuilder:
         self._actor_ids: dict[str, str] = {}
         self._commit_ids_by_sha: dict[tuple[str, str], set[str]] = {}
         self._change_request_ids_by_sha: dict[tuple[str, str], set[str]] = {}
+        self._duplicate_counts: dict[tuple[str, str], int] = {}
 
     @staticmethod
     def _failure_classes(diagnostics: dict[str, Any]) -> set[str]:
@@ -342,9 +343,21 @@ class BundleBuilder:
             self.bundle["coverage"]["fatal"].append(
                 f"{target.canonical_id}:{source}:{result.status}:{result.note}"
             )
+        self._apply_duplicate_coverage(source, target.canonical_id)
 
-    def add_repository(self, record: dict[str, Any]) -> None:
-        self._add_entity("repositories", sanitize_public_payload(record))
+    def add_repository(
+        self,
+        record: dict[str, Any],
+        *,
+        target: RepositoryTarget | None = None,
+    ) -> None:
+        repository = target.canonical_id if target is not None else record.get("id")
+        self._add_entity(
+            "repositories",
+            sanitize_public_payload(record),
+            source="repositories",
+            repository_id=repository if isinstance(repository, str) else None,
+        )
 
     def add_records(
         self,
@@ -370,6 +383,9 @@ class BundleBuilder:
             occurred_at = record.get("occurred_at")
             entity_id = record.get("id")
             if not isinstance(entity_id, str) or not entity_id:
+                continue
+            if entity_id in self._seen.setdefault(category, set()):
+                self._record_duplicate(category, target.canonical_id)
                 continue
             actor_id = self._actor_id(actor)
             if self.request.actor_ids and actor is not None and actor_id not in self.request.actor_ids:
@@ -414,7 +430,13 @@ class BundleBuilder:
             if actor_id:
                 record["actor_id"] = actor_id
             record = sanitize_public_payload(record)
-            self._add_entity(category, record)
+            if not self._add_entity(
+                category,
+                record,
+                source=category,
+                repository_id=target.canonical_id,
+            ):
+                continue
             evidence_id = f"evidence:{category}:{entity_id}"
             evidence = {
                 "id": evidence_id,
@@ -507,15 +529,67 @@ class BundleBuilder:
             )
         return actor_id
 
-    def _add_entity(self, category: str, record: dict[str, Any]) -> None:
+    def _record_duplicate(self, source: str, repository_id: str | None) -> None:
+        if not isinstance(repository_id, str) or not repository_id:
+            return
+        key = (source, repository_id)
+        self._duplicate_counts[key] = self._duplicate_counts.get(key, 0) + 1
+        self._apply_duplicate_coverage(source, repository_id)
+
+    def _apply_duplicate_coverage(self, source: str, repository_id: str) -> None:
+        duplicate_count = self._duplicate_counts.get((source, repository_id), 0)
+        if not duplicate_count:
+            return
+        diagnostic = {
+            "failure_class": "malformed_response",
+            "duplicate_count": duplicate_count,
+            "dropped_count": duplicate_count,
+            "malformed_items": duplicate_count,
+        }
+        for observation in self.bundle["coverage"]["observations"]:
+            if (
+                observation.get("source") != source
+                or observation.get("provider_id") != self.provider_id
+                or observation.get("repository_id") != repository_id
+            ):
+                continue
+            observation["status"] = "incomplete"
+            observation["note"] = (
+                f"{observation.get('note')}; " if observation.get("note") else ""
+            ) + f"{source} response contained {duplicate_count} duplicate record(s)"
+            observation_diagnostics = observation.setdefault("diagnostics", {})
+            if isinstance(observation_diagnostics, dict):
+                merge_diagnostics(observation_diagnostics, diagnostic)
+            self.bundle["providers"][0]["capabilities"][source] = "incomplete"
+        if source in RESOURCE_SOURCES:
+            self.bundle["coverage"]["allow_publish"] = False
+            fatal = f"{repository_id}:{source}:incomplete:duplicate records dropped"
+            if fatal not in self.bundle["coverage"]["fatal"]:
+                self.bundle["coverage"]["fatal"].append(fatal)
+
+    def _add_entity(
+        self,
+        category: str,
+        record: dict[str, Any],
+        *,
+        source: str | None = None,
+        repository_id: str | None = None,
+    ) -> bool:
         record = sanitize_public_payload(record)
         entity_id = record.get("id")
         if not isinstance(entity_id, str) or not entity_id:
-            return
+            return False
         if entity_id in self._seen.setdefault(category, set()):
-            return
+            duplicate_source = source or (category if category in RESOURCE_SOURCES else None)
+            duplicate_repository = repository_id or record.get("repository_id")
+            if duplicate_repository is None and category == "repositories":
+                duplicate_repository = entity_id
+            if duplicate_source is not None:
+                self._record_duplicate(duplicate_source, duplicate_repository)
+            return False
         self._seen[category].add(entity_id)
         self.bundle[category].append(record)
+        return True
 
     def finish(self) -> dict[str, Any]:
         self.bundle["collection"]["metrics"] = transport_metrics(self.transport)
@@ -570,7 +644,7 @@ class ResourceProvider:
                 builder.add_coverage(source, target, result)
                 if source == "repositories":
                     for item in result.items:
-                        builder.add_repository(item)
+                        builder.add_repository(item, target=target)
                 elif source == "work_items":
                     builder.add_records("work_items", result.items, target=target, fact_kind="work_item_observed", default_section="project")
                 elif source == "change_requests":

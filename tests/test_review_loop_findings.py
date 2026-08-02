@@ -21,11 +21,19 @@ from git_evidence.privacy import (
     sanitize_public_payload,
 )
 from git_evidence.providers.github import GitHubProvider
+from git_evidence.providers.gitlab import GitLabProvider
 from git_evidence.providers.resource_base import in_window_or_malformed, parse_timestamp
-from git_evidence.providers.transport import ApiResponse, LocalResponseCache, UrllibTransport
+from git_evidence.providers.transport import (
+    ApiError,
+    ApiResponse,
+    LocalResponseCache,
+    MappingTransport,
+    UrllibTransport,
+    paginate,
+)
 from git_evidence.validation import validate_bundle
 
-from test_contract import WINDOW_END, WINDOW_START, github_transport, request_for
+from test_contract import WINDOW_END, WINDOW_START, gitlab_transport, github_transport, request_for
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +55,19 @@ class ReviewLoopFindingTests(unittest.TestCase):
         self.assertIn("coverage.group_failure_contradiction", codes)
         self.assertIn("coverage.group_failure_fatal", codes)
         self.assertIn("coverage.publish_blocked", codes)
+
+    def test_coverage_observation_requires_registered_provider_provenance(self) -> None:
+        bundle = load_bundle(FIXTURE)
+        bundle["coverage"]["observations"][0].pop("provider_id")
+        codes = {issue.code for issue in validate_bundle(bundle)}
+        self.assertIn("coverage.provider_required", codes)
+        self.assertIn("coverage.required_missing", codes)
+
+        bundle = load_bundle(FIXTURE)
+        bundle["coverage"]["observations"][0]["provider_id"] = "provider:gitlab:gitlab.com"
+        codes = {issue.code for issue in validate_bundle(bundle)}
+        self.assertIn("coverage.provider_unknown", codes)
+        self.assertIn("coverage.required_missing", codes)
 
     def test_fact_evidence_subject_and_provider_provenance_are_required(self) -> None:
         bundle = load_bundle(FIXTURE)
@@ -137,6 +158,51 @@ class ReviewLoopFindingTests(unittest.TestCase):
                 token=None,
             )
             self.assertFalse(unsafe_path.exists())
+            unsafe_cache.put(
+                "status-error",
+                ApiResponse("https://example.test/items", 500, {}, []),
+                token=None,
+            )
+            self.assertIsNone(unsafe_cache.get("status-error"))
+            unsafe_cache.put(
+                "bool-status",
+                ApiResponse("https://example.test/items", True, {}, []),
+                token=None,
+            )
+            self.assertIsNone(unsafe_cache.get("bool-status"))
+            unsafe_cache.put(
+                "header-secret",
+                ApiResponse("https://example.test/items", 200, {"X-Next-Page": "secret"}, []),
+                token="secret",
+            )
+            self.assertFalse(unsafe_path.exists())
+            unsafe_cache.put(
+                "header-invalid",
+                ApiResponse("https://example.test/items", 200, {"X-RateLimit-Remaining": "Bearer secret"}, []),
+                token=None,
+            )
+            self.assertFalse(unsafe_path.exists())
+
+            status_entry = Path(directory) / "status-entry.json"
+            status_cache = LocalResponseCache(status_entry, ttl_seconds=300, max_entries=10)
+            status_cache.put(
+                "valid",
+                ApiResponse("https://example.test/items", 200, {}, []),
+                token=None,
+            )
+            payload = json.loads(status_entry.read_text(encoding="utf-8"))
+            payload["entries"]["valid"]["response"]["status_code"] = 500
+            status_entry.write_text(json.dumps(payload), encoding="utf-8")
+            os.chmod(status_entry, 0o600)
+            self.assertIsNone(status_cache.get("valid"))
+
+            with self.assertRaises(ApiError):
+                paginate(
+                    MappingTransport(
+                        {"/items": ApiResponse("https://example.test/items", 500, {}, [])}
+                    ),
+                    "/items",
+                )
             unsafe_cache.put(
                 "url-secret",
                 ApiResponse("https://example.test/items?X-API-Key=secret", 200, {}, []),
@@ -241,6 +307,113 @@ class ReviewLoopFindingTests(unittest.TestCase):
         self.assertEqual(caught.exception.failure_class, "rate_limited")
         self.assertEqual(caught.exception.failure_classes, ("rate_limited", "budget_exhausted"))
         self.assertTrue(transport.metrics()["budget_exhausted"])
+
+    def test_retry_aggregation_keeps_primary_when_later_response_is_malformed(self) -> None:
+        error = HTTPError(
+            "https://example.test/items",
+            429,
+            "rate limited",
+            {"Retry-After": "0"},
+            BytesIO(b"rate limited"),
+        )
+
+        class InvalidJsonResponse:
+            status = 200
+            headers: dict[str, str] = {}
+
+            def __enter__(self) -> "InvalidJsonResponse":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b"not-json"
+
+        transport = UrllibTransport(
+            "https://example.test",
+            max_requests=3,
+            max_retries=1,
+            retry_backoff=0,
+            retry_jitter=0,
+            sleep_fn=lambda _: None,
+        )
+        with patch(
+            "git_evidence.providers.transport.urlopen",
+            side_effect=[error, InvalidJsonResponse()],
+        ):
+            with self.assertRaises(ApiError) as caught:
+                transport.get("/items")
+        self.assertEqual(caught.exception.failure_class, "rate_limited")
+        self.assertEqual(
+            caught.exception.failure_classes,
+            ("rate_limited", "malformed_response"),
+        )
+        self.assertEqual(caught.exception.attempts, 2)
+
+    def test_commit_association_rejects_bad_candidates_and_keeps_valid_siblings(self) -> None:
+        github = github_transport()
+        github.responses["/repos/example/project/commits/abc123/pulls"][0].body.extend(
+            [{"number": {"not": "a number"}}, {"number": 7}]
+        )
+        github_provider = GitHubProvider(github)
+        target = request_for("github", "github.com").repositories[0]
+        candidates, result = github_provider._commit_change_request_candidates(target, "abc123")
+        self.assertEqual(candidates[-1], "change_request:github:github.com:example/project:7")
+        self.assertEqual(result.status, "incomplete")
+        self.assertEqual(result.diagnostics["failure_class"], "malformed_response")
+        self.assertEqual(result.diagnostics["dropped_count"], 1)
+
+        gitlab = gitlab_transport()
+        gitlab.responses[
+            "/projects/example%2Fproject/repository/commits/abc123/merge_requests"
+        ][0].body.extend([{"iid": {"not": "an iid"}}, {"iid": 8}])
+        gitlab_provider = GitLabProvider(gitlab)
+        target = request_for("gitlab", "gitlab.com").repositories[0]
+        candidates, result = gitlab_provider._commit_change_request_candidates(target, "abc123")
+        self.assertEqual(candidates[-1], "change_request:gitlab:gitlab.com:example/project:8")
+        self.assertEqual(result.status, "incomplete")
+        self.assertEqual(result.diagnostics["failure_class"], "malformed_response")
+        self.assertEqual(result.diagnostics["dropped_count"], 1)
+
+    def test_same_group_duplicate_records_mark_source_incomplete(self) -> None:
+        transport = github_transport()
+        issues = transport.responses["/repos/example/project/issues"][0].body
+        issues.append(deepcopy(issues[0]))
+        bundle = GitHubProvider(transport).collect(request_for("github", "github.com"))
+        work_item_observation = next(
+            item for item in bundle["coverage"]["observations"] if item["source"] == "work_items"
+        )
+        self.assertEqual(work_item_observation["status"], "incomplete")
+        self.assertEqual(work_item_observation["diagnostics"]["failure_class"], "malformed_response")
+        self.assertEqual(work_item_observation["diagnostics"]["duplicate_count"], 1)
+        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertEqual(
+            len(bundle["work_items"]),
+            len({item["id"] for item in bundle["work_items"]}),
+        )
+
+    def test_collect_config_validates_direct_library_entry(self) -> None:
+        config = {
+            "window": {"start": WINDOW_END, "end": WINDOW_START, "timezone": "UTC"},
+            "scope": {
+                "repositories": [
+                    {"provider": "github", "instance": "github.com", "owner": "example", "name": "project"}
+                ],
+                "actors": [],
+            },
+            "providers": {"github": {}},
+        }
+        called = False
+
+        def factory(*args: object) -> object:
+            nonlocal called
+            called = True
+            return object()
+
+        with self.assertRaises(ConfigError):
+            collect_config(config, provider_factory=factory)
+        self.assertFalse(called)
 
     def test_naive_provider_timestamps_are_not_accepted(self) -> None:
         self.assertIsNone(parse_timestamp("2026-07-28T08:00:00"))

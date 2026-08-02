@@ -240,7 +240,7 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["source", "status"],
+            "required": ["source", "provider_id", "repository_id", "status"],
             "properties": {
               "source": {"type": "string", "minLength": 1},
               "provider_id": {"type": "string", "minLength": 1},

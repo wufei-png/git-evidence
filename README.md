@@ -106,9 +106,9 @@ a complete push/ref claim.
 
 The P2 contract slice includes the provider registry, collection/report config
 split, fail-closed privacy publication gate, provenance-linked coverage
-failures, private cache replay, and bounded transport budgets. No provider is
-advertised as production-complete: this checkout's offline fixtures and
-renderer tests do not constitute a live-provider canary, and no current live
-canary is claimed.
+failures, private cache replay, strict cache status/header handling, duplicate
+record diagnostics, and bounded transport budgets. No provider is advertised
+as production-complete: this checkout's offline fixtures and renderer tests do
+not constitute a live-provider canary, and no current live canary is claimed.
 A provider becomes supported only when its capability declaration, contract
 fixtures, coverage behavior, live replay gates, and report replay tests pass.

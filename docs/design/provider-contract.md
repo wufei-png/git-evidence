@@ -41,6 +41,10 @@ the report must not claim complete push/ref coverage.
 
 - A page is complete only when the provider has followed its documented next
   page/cursor signal.
+- A cached or replayed response is data only when its status is a non-boolean
+  2xx value. Cached pagination and rate-limit headers are allowlisted, format
+  checked, and credential-checked before replay; unsafe headers cause a cache
+  miss.
 - A successful HTTP response with only the first page is incomplete, not
   empty.
 - A `401`/`403`, exhausted retry, malformed response, or missing required
@@ -60,6 +64,10 @@ the report must not claim complete push/ref coverage.
   capability metadata; they do not change canonical entity meaning.
 - Native fields without a safe common mapping remain provider-specific rather
   than being guessed into a common field.
+- Every coverage observation is keyed by registered provider, allowlisted
+  repository, and source. Repeated canonical IDs are not silently accepted:
+  valid siblings remain, while the source becomes `incomplete` with
+  `malformed_response` diagnostics and the publication gate remains closed.
 
 ## Three provider targets
 

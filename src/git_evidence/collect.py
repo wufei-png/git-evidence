@@ -7,7 +7,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Callable
 
-from .config import provider_runtime_options
+from .config import provider_runtime_options, validate_collection_config
 from .model import COLLECTION_KEYS
 from .privacy import PrivacyError, sanitize_public_payload
 from .providers import CollectionRequest, PROVIDER_REGISTRY, RepositoryTarget
@@ -416,6 +416,7 @@ def collect_config(
     provider_factory: ProviderFactory | None = None,
 ) -> dict[str, Any]:
     """Collect all explicitly allowlisted repositories into one canonical bundle."""
+    config = validate_collection_config(config)
     window = config.get("window") or {}
     window_start = _timestamp_text(window.get("start"), "window.start")
     window_end = _timestamp_text(window.get("end"), "window.end")

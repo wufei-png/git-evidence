@@ -685,7 +685,6 @@ def _validate_coverage(
                 "coverage.group_failure_class",
                 f"coverage.group_failures[{position}] has invalid failure_class: {failure.get('failure_class')!r}",
             )
-    by_source_repository: dict[tuple[str, str], list[dict[str, Any]]] = {}
     by_group: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for position, observation in enumerate(observations):
         if not isinstance(observation, dict):
@@ -727,6 +726,12 @@ def _validate_coverage(
                         f"coverage {source} has invalid failure_classes: {failure_classes!r}",
                     )
         repository_id = observation.get("repository_id")
+        if not isinstance(repository_id, str) or not repository_id.strip():
+            _issue(
+                issues,
+                "coverage.repository_required",
+                f"coverage {source} must declare a repository_id",
+            )
         if repository_id is not None and (
             not isinstance(repository_id, str) or repository_id not in scope_repository_ids
         ):
@@ -735,17 +740,27 @@ def _validate_coverage(
                 "coverage.repository_outside",
                 f"coverage {source} references repository outside the allowlist: {repository_id}",
             )
-        if isinstance(repository_id, str) and repository_id:
-            by_source_repository.setdefault((source, repository_id), []).append(observation)
         provider_id = observation.get("provider_id")
-        if isinstance(source, str) and isinstance(repository_id, str) and isinstance(provider_id, str):
-            by_group.setdefault((source, repository_id, provider_id), []).append(observation)
-        if isinstance(provider_id, str) and provider_id not in indexes.get("providers", {}):
+        if not isinstance(provider_id, str) or not provider_id.strip():
+            _issue(
+                issues,
+                "coverage.provider_required",
+                f"coverage {source} must declare a provider_id",
+            )
+        elif provider_id not in indexes.get("providers", {}):
             _issue(
                 issues,
                 "coverage.provider_unknown",
                 f"coverage {source} references unknown provider: {provider_id}",
             )
+        if (
+            isinstance(source, str)
+            and isinstance(repository_id, str)
+            and repository_id
+            and isinstance(provider_id, str)
+            and provider_id in indexes.get("providers", {})
+        ):
+            by_group.setdefault((source, repository_id, provider_id), []).append(observation)
         repository = indexes.get("repositories", {}).get(repository_id) if isinstance(repository_id, str) else None
         repository_provider_id = repository.get("provider_id") if isinstance(repository, dict) else None
         if (
@@ -771,7 +786,13 @@ def _validate_coverage(
                 )
     for source in required_sources:
         for repository_id in sorted(scope_repository_ids):
-            matches = by_source_repository.get((source, repository_id), [])
+            repository = indexes.get("repositories", {}).get(repository_id)
+            expected_provider_id = (
+                _entity_provider_id("repository", repository, indexes)
+                if isinstance(repository, dict)
+                else None
+            )
+            matches = by_group.get((source, repository_id, expected_provider_id), [])
             if not matches:
                 _issue(
                     issues,

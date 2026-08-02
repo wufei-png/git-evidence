@@ -66,6 +66,10 @@ Rules:
   `load_collection_config` and ignores invalid report settings; `render` uses
   `load_report_config` and ignores collection settings. `load_config` remains
   the strict legacy single-file compatibility loader.
+- The public `collect_config` library entry point also invokes the complete
+  collection validator before grouping repositories or invoking a provider
+  factory. This keeps timezone-aware/reversed-window, provider, and bounded
+  runtime checks identical between library and CLI collection.
 - `report.privacy.actor_display` defaults to `anonymous`; `explicit-labels`
   displays only labels supplied in `report.actor_labels`. `auth_redaction` is
   mandatory and source URLs remain allowed evidence after auth query/userinfo
@@ -89,7 +93,10 @@ Rules:
   and `max_entries` are explicitly supplied. Cache keys include provider,
   instance, path, parameters, and a token-scope digest. Only redacted URL,
   status, safe JSON body data, and allowlisted `Link`/next-page/rate-limit
-  headers may be stored; authorization headers and tokens are never written.
+  headers may be stored; only non-boolean 2xx statuses and validated,
+  credential-free header values are accepted. Authorization headers and
+  tokens are never written. Invalid or sensitive pagination headers make the
+  entry a cache miss.
   Cache files and temporary files are mode `0600`; expired, unreadable,
   unredacted, unsafe, or old entries without headers are cache misses. A cache
   hit follows the same normalizer and coverage gate and never upgrades
@@ -132,4 +139,7 @@ failures still block publication after retries are exhausted. Every normalized
 resource and activity/ref source rejects missing native identity, repository
 identity, or required timestamp fields item-by-item; valid siblings are kept,
 while the source is marked `incomplete` with `malformed_response` and a
-`dropped_count`.
+`dropped_count`. The same source-level status applies to duplicate canonical
+IDs: the first valid record and other valid siblings remain, but the collision
+is recorded and required publication is blocked. Coverage matching includes
+the registered provider identity as well as repository and source.

@@ -55,6 +55,22 @@ CACHE_HEADER_NAMES = frozenset(
 CACHE_HEADER_NAMES = CACHE_HEADER_NAMES | frozenset(
     {"x_rate_limit_limit", "x_rate_limit_remaining", "x_rate_limit_reset"}
 )
+_NEXT_PAGE_HEADER_NAMES = frozenset({"x_next_page", "x_next_page_number"})
+_NUMERIC_RATE_HEADER_NAMES = frozenset(
+    {
+        "x_ratelimit_limit",
+        "x_ratelimit_remaining",
+        "x_ratelimit_reset",
+        "x_rate_limit_limit",
+        "x_rate_limit_remaining",
+        "x_rate_limit_reset",
+    }
+)
+_LINK_HEADER_PATTERN = re.compile(
+    r"\s*<[^<>]+>\s*;\s*rel\s*=\s*(?:\"[^\"]+\"|'[^']+'|[^,\s]+)"
+    r"(?:\s*;\s*[^,]+)*(?:\s*,\s*<[^<>]+>\s*;\s*rel\s*=\s*"
+    r"(?:\"[^\"]+\"|'[^']+'|[^,\s]+)(?:\s*;\s*[^,]+)*)*\s*"
+)
 
 TRANSPORT_METRIC_KEYS = (
     "request_count",
@@ -77,6 +93,20 @@ def empty_transport_metrics(*, cache_enabled: bool = False) -> dict[str, Any]:
         "cache_misses": 0,
         "cache_enabled": cache_enabled,
     }
+
+
+def _is_success_status(status_code: Any) -> bool:
+    return (
+        isinstance(status_code, int)
+        and not isinstance(status_code, bool)
+        and 200 <= status_code < 300
+    )
+
+
+def _status_failure_class(status_code: Any) -> str:
+    if isinstance(status_code, int) and not isinstance(status_code, bool):
+        return failure_class_for_status(status_code)
+    return "http_error"
 
 
 @dataclass
@@ -204,20 +234,52 @@ class LocalResponseCache:
         return {"entries": raw["entries"]}
 
     @staticmethod
-    def _safe_headers(headers: Mapping[str, Any] | None) -> dict[str, str]:
+    def _header_value_has_sensitive_material(value: str, token: str | None) -> bool:
+        if LocalResponseCache._contains_sensitive_material(value, token):
+            return True
+        return has_auth_material(value)
+
+    @classmethod
+    def _safe_headers(
+        cls,
+        headers: Mapping[str, Any] | None,
+        *,
+        token: str | None = None,
+    ) -> dict[str, str] | None:
         if not headers:
             return {}
+        if not isinstance(headers, Mapping):
+            return None
         safe: dict[str, str] = {}
         for key, value in headers.items():
             normalized = canonicalize_field_name(key)
-            if normalized not in CACHE_HEADER_NAMES or not isinstance(value, str):
+            if normalized not in CACHE_HEADER_NAMES:
                 continue
+            if not isinstance(value, str) or cls._header_value_has_sensitive_material(value, token):
+                return None
             if normalized == "link":
-                # A Link header may carry a URL. Do not cache it if redaction
-                # would be required; losing pagination is safer than leaking.
+                if _LINK_HEADER_PATTERN.fullmatch(value) is None:
+                    return None
                 urls = re.findall(r"<([^>]+)>", value)
                 if any(has_auth_material(url) and not is_redacted_public_url(url) for url in urls):
-                    continue
+                    return None
+            elif normalized in _NEXT_PAGE_HEADER_NAMES:
+                if re.fullmatch(r"[1-9][0-9]*", value.strip()) is None:
+                    return None
+            elif normalized in _NUMERIC_RATE_HEADER_NAMES:
+                if re.fullmatch(r"[0-9]+", value.strip()) is None:
+                    return None
+            elif normalized == "retry_after":
+                try:
+                    retry_after = float(value)
+                except (TypeError, ValueError):
+                    try:
+                        parsedate_to_datetime(value)
+                    except (TypeError, ValueError, OverflowError):
+                        return None
+                else:
+                    if not math.isfinite(retry_after) or retry_after < 0:
+                        return None
             safe[str(key).lower()] = value
         return safe
 
@@ -236,11 +298,12 @@ class LocalResponseCache:
         except (KeyError, TypeError, ValueError):
             # A pre-header cache entry cannot prove pagination completeness.
             return None
-        if not isinstance(headers, dict) or headers != self._safe_headers(headers):
+        safe_headers = self._safe_headers(headers, token=token)
+        if safe_headers is None or not isinstance(headers, dict) or headers != safe_headers:
             return None
         if self.clock() - stored_at >= self.ttl_seconds:
             return None
-        if not isinstance(url, str) or not isinstance(status_code, int):
+        if not isinstance(url, str) or not _is_success_status(status_code):
             return None
         if (has_auth_material(url) and not is_redacted_public_url(url)) or self._contains_sensitive_material(body, token):
             return None
@@ -248,9 +311,13 @@ class LocalResponseCache:
 
     def put(self, key: str, response: ApiResponse, *, token: str | None) -> None:
         if (
-            (has_auth_material(response.url) and not is_redacted_public_url(response.url))
+            not _is_success_status(response.status_code)
+            or (has_auth_material(response.url) and not is_redacted_public_url(response.url))
             or self._contains_sensitive_material(response.body, token)
         ):
+            return
+        safe_headers = self._safe_headers(response.headers, token=token)
+        if safe_headers is None:
             return
         try:
             json.dumps(response.body, ensure_ascii=True)
@@ -263,7 +330,7 @@ class LocalResponseCache:
             "response": {
                 "url": response.url,
                 "status_code": response.status_code,
-                "headers": self._safe_headers(response.headers),
+                "headers": safe_headers,
                 "body": response.body,
             },
         }
@@ -390,6 +457,28 @@ def failure_class_for_status(status_code: int) -> str:
     if 400 <= status_code <= 499:
         return "request_rejected"
     return "http_error"
+
+
+def _failure_class_for_error(error: ApiError) -> str:
+    if error.failure_class:
+        return error.failure_class
+    if isinstance(error, ResponseShapeError):
+        return "malformed_response"
+    if error.status_code is not None:
+        return failure_class_for_status(error.status_code)
+    return "transport_error"
+
+
+def _merge_api_errors(primary: ApiError, current: ApiError, *, attempts: int) -> None:
+    """Keep the first remote cause while retaining later safe failure details."""
+    primary.attempts = max(primary.attempts, current.attempts, attempts)
+    primary.retryable = primary.retryable or current.retryable
+    if primary.retry_after is None:
+        primary.retry_after = current.retry_after
+    primary.rate_limit.update(current.rate_limit)
+    primary.add_failure_class(_failure_class_for_error(current))
+    for failure_class in current.failure_classes:
+        primary.add_failure_class(failure_class)
 
 
 @dataclass(frozen=True)
@@ -633,8 +722,8 @@ class UrllibTransport:
                         self._cache.put(cache_key, result, token=self.token)
                     return result
             except ApiError as exc:
-                if primary_error is not None and exc.failure_class == "budget_exhausted":
-                    primary_error.add_failure_class("budget_exhausted")
+                if primary_error is not None:
+                    _merge_api_errors(primary_error, exc, attempts=attempt)
                     raise primary_error from exc
                 raise
             except HTTPError as exc:
@@ -656,12 +745,12 @@ class UrllibTransport:
                     if primary_error is None:
                         primary_error = error
                     else:
-                        primary_error.add_failure_class(error.failure_class)
+                        _merge_api_errors(primary_error, error, attempts=attempt)
                     self.coordinator.record_retry()
                     self.sleep_fn(self._retry_delay(attempt, retry_after))
                     continue
                 if primary_error is not None:
-                    primary_error.add_failure_class(error.failure_class)
+                    _merge_api_errors(primary_error, error, attempts=attempt)
                     raise primary_error from exc
                 raise error from exc
             except URLError as exc:
@@ -676,12 +765,12 @@ class UrllibTransport:
                     if primary_error is None:
                         primary_error = error
                     else:
-                        primary_error.add_failure_class(error.failure_class)
+                        _merge_api_errors(primary_error, error, attempts=attempt)
                     self.coordinator.record_retry()
                     self.sleep_fn(self._retry_delay(attempt))
                     continue
                 if primary_error is not None:
-                    primary_error.add_failure_class(error.failure_class)
+                    _merge_api_errors(primary_error, error, attempts=attempt)
                     raise primary_error from exc
                 raise error from exc
             except (TimeoutError, OSError) as exc:
@@ -696,12 +785,12 @@ class UrllibTransport:
                     if primary_error is None:
                         primary_error = error
                     else:
-                        primary_error.add_failure_class(error.failure_class)
+                        _merge_api_errors(primary_error, error, attempts=attempt)
                     self.coordinator.record_retry()
                     self.sleep_fn(self._retry_delay(attempt))
                     continue
                 if primary_error is not None:
-                    primary_error.add_failure_class(error.failure_class)
+                    _merge_api_errors(primary_error, error, attempts=attempt)
                     raise primary_error from exc
                 raise error from exc
 
@@ -744,6 +833,17 @@ def paginate(
         record_page = getattr(transport, "record_page", None)
         if callable(record_page):
             record_page()
+        if not _is_success_status(response.status_code):
+            status_code = (
+                response.status_code
+                if isinstance(response.status_code, int) and not isinstance(response.status_code, bool)
+                else None
+            )
+            raise ApiError(
+                f"unexpected HTTP status from {response.url}: {response.status_code}",
+                status_code,
+                failure_class=_status_failure_class(response.status_code),
+            )
         rate_limit = rate_limit_headers(response.headers)
         if rate_limit:
             diagnostics["rate_limit"] = rate_limit
