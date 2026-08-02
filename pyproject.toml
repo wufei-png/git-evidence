@@ -9,10 +9,13 @@ description = "Git Evidence: evidence-first engineering activity reports across 
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
-dependencies = ["PyYAML>=6.0"]
+dependencies = ["PyYAML>=6.0", "jsonschema>=4.18"]
 
 [project.scripts]
 git-evidence = "git_evidence.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+git_evidence = ["schemas/*.json"]

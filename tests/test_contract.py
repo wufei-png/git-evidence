@@ -156,6 +156,50 @@ class ContractTests(unittest.TestCase):
         bundle = load_bundle(FIXTURE)
         self.assertEqual(validate_bundle(bundle), [])
 
+    def test_run_id_must_be_a_non_empty_string(self) -> None:
+        bundle = load_bundle(FIXTURE)
+        bundle["run"].pop("run_id")
+        codes = {issue.code for issue in validate_bundle(bundle)}
+        self.assertIn("schema.required", codes)
+        self.assertIn("run.run_id", codes)
+
+    def test_occurred_at_uses_half_open_run_window(self) -> None:
+        bundle = load_bundle(FIXTURE)
+        bundle["facts"][0]["occurred_at"] = WINDOW_START
+        self.assertEqual(validate_bundle(bundle), [])
+
+        bundle["facts"][0]["occurred_at"] = WINDOW_END
+        codes = {issue.code for issue in validate_bundle(bundle)}
+        self.assertIn("entity.timestamp_window", codes)
+        with self.assertRaises(ValueError):
+            render_bundle(bundle)
+
+    def test_fact_evidence_subject_must_match_fact_kind_and_repository(self) -> None:
+        bundle = load_bundle(FIXTURE)
+        bundle["facts"][0]["evidence_ids"] = ["evidence:commit:a"]
+        codes = {issue.code for issue in validate_bundle(bundle)}
+        self.assertIn("fact.evidence_subject", codes)
+
+    def test_required_sources_cannot_be_reduced_below_resource_contract(self) -> None:
+        bundle = load_bundle(FIXTURE)
+        bundle["coverage"]["required_sources"] = ["repositories"]
+        codes = {issue.code for issue in validate_bundle(bundle)}
+        self.assertIn("coverage.required_source_contract", codes)
+        with self.assertRaises(ValueError):
+            render_bundle(bundle)
+
+    def test_schema_shape_and_format_errors_are_fatal(self) -> None:
+        bundle = load_bundle(FIXTURE)
+        bundle["facts"] = {}
+        codes = {issue.code for issue in validate_bundle(bundle)}
+        self.assertIn("schema.type", codes)
+        self.assertIn("collection.shape", codes)
+
+        bundle = load_bundle(FIXTURE)
+        bundle["run"]["window"]["start"] = "2026-07-27"
+        codes = {issue.code for issue in validate_bundle(bundle)}
+        self.assertIn("schema.format", codes)
+
     def test_missing_fact_evidence_is_fatal(self) -> None:
         bundle = load_bundle(FIXTURE)
         bundle["facts"][0]["evidence_ids"] = []
@@ -339,6 +383,32 @@ class ContractTests(unittest.TestCase):
         finally:
             temporary.unlink(missing_ok=True)
         self.assertIn("Alice", output.getvalue())
+
+    def test_collect_cli_writes_invalid_diagnostic_bundle_before_failure(self) -> None:
+        bundle = load_bundle(FIXTURE)
+        bundle["coverage"]["required_sources"] = ["repositories"]
+        output_path = ROOT / "tests" / ".tmp-invalid-collect-bundle.json"
+        output_path.unlink(missing_ok=True)
+        stderr = StringIO()
+        try:
+            with patch("git_evidence.cli.load_config", return_value={}):
+                with patch("git_evidence.cli.collect_config", return_value=bundle):
+                    with patch("sys.stderr", stderr):
+                        result = cli_main(
+                            [
+                                "collect",
+                                "--config",
+                                "ignored-config.yml",
+                                "--output",
+                                str(output_path),
+                            ]
+                        )
+            self.assertEqual(result, 1)
+            self.assertTrue(output_path.exists())
+            self.assertIn("coverage.required_source_contract", stderr.getvalue())
+            self.assertEqual(validate_bundle(load_bundle(output_path))[0].code, "coverage.required_source_contract")
+        finally:
+            output_path.unlink(missing_ok=True)
 
     def test_provider_catalog_exposes_three_contracts(self) -> None:
         self.assertEqual([item.kind for item in provider_catalog()], ["gitee", "github", "gitlab"])

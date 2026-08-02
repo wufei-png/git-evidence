@@ -8,7 +8,7 @@ from pathlib import Path
 from .collect import CollectionError, collect_config
 from .config import ConfigError, load_config
 from .model import BundleLoadError, load_bundle
-from .providers import provider_catalog
+from .providers import RESOURCE_SOURCES, provider_catalog
 from .render import LANGUAGES, PROFILES, RenderError, render_bundle
 from .validation import format_issues, validate_bundle
 
@@ -68,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
             args.output.write_text(serialized, encoding="utf-8")
         else:
             print(serialized, end="")
-        issues = validate_bundle(bundle)
+        issues = validate_bundle(bundle, required_sources_contract=RESOURCE_SOURCES)
         if issues:
             print(format_issues(issues), file=sys.stderr)
             return 1
