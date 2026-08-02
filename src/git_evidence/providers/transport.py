@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
+from pathlib import Path
+import random
 import re
 import ssl
 import time
@@ -18,6 +22,221 @@ RATE_LIMIT_HEADERS = (
     "x-ratelimit-reset",
     "retry-after",
 )
+
+TRANSPORT_METRIC_KEYS = (
+    "request_count",
+    "page_count",
+    "retry_count",
+    "budget_exhausted",
+    "cache_hits",
+    "cache_misses",
+    "cache_enabled",
+)
+
+
+def empty_transport_metrics(*, cache_enabled: bool = False) -> dict[str, Any]:
+    return {
+        "request_count": 0,
+        "page_count": 0,
+        "retry_count": 0,
+        "budget_exhausted": False,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_enabled": cache_enabled,
+    }
+
+
+@dataclass
+class RequestMetrics:
+    request_count: int = 0
+    page_count: int = 0
+    retry_count: int = 0
+    budget_exhausted: bool = False
+    cache_hits: int = 0
+    cache_misses: int = 0
+    cache_enabled: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "request_count": self.request_count,
+            "page_count": self.page_count,
+            "retry_count": self.retry_count,
+            "budget_exhausted": self.budget_exhausted,
+            "cache_hits": self.cache_hits,
+            "cache_misses": self.cache_misses,
+            "cache_enabled": self.cache_enabled,
+        }
+
+
+class RequestCoordinator:
+    """Bound one provider/instance group without changing GET semantics."""
+
+    def __init__(
+        self,
+        *,
+        max_requests: int | None = 1000,
+        cache_enabled: bool = False,
+    ) -> None:
+        if max_requests is not None and max_requests < 1:
+            raise ValueError("max_requests must be at least 1")
+        self.max_requests = max_requests
+        self.metrics = RequestMetrics(cache_enabled=cache_enabled)
+
+    def reserve_request(self) -> None:
+        if self.max_requests is not None and self.metrics.request_count >= self.max_requests:
+            self.metrics.budget_exhausted = True
+            raise ApiError(
+                "request budget exhausted",
+                attempts=1,
+                retryable=False,
+                failure_class="budget_exhausted",
+            )
+        self.metrics.request_count += 1
+
+    def record_page(self) -> None:
+        self.metrics.page_count += 1
+
+    def record_retry(self) -> None:
+        self.metrics.retry_count += 1
+
+    def snapshot(self) -> dict[str, Any]:
+        return self.metrics.as_dict()
+
+
+class LocalResponseCache:
+    """Small JSON cache that stores only redacted URLs, status, and JSON bodies."""
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        ttl_seconds: float,
+        max_entries: int,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        if ttl_seconds <= 0:
+            raise ValueError("cache ttl_seconds must be greater than zero")
+        if max_entries < 1:
+            raise ValueError("cache max_entries must be at least 1")
+        self.path = Path(path).expanduser()
+        self.ttl_seconds = ttl_seconds
+        self.max_entries = max_entries
+        self.clock = clock
+
+    @staticmethod
+    def _contains_sensitive_material(value: Any, token: str | None) -> bool:
+        sensitive_names = {
+            "authorization",
+            "proxy-authorization",
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "cookie",
+            "set-cookie",
+            "headers",
+        }
+        if isinstance(value, dict):
+            for key, child in value.items():
+                normalized = str(key).lower().replace("-", "_")
+                if normalized in sensitive_names or normalized.endswith("_token") or normalized == "token":
+                    return True
+                if LocalResponseCache._contains_sensitive_material(child, token):
+                    return True
+            return False
+        if isinstance(value, (list, tuple)):
+            return any(LocalResponseCache._contains_sensitive_material(item, token) for item in value)
+        if token and isinstance(value, str) and token in value:
+            return True
+        return False
+
+    def _read(self) -> dict[str, Any]:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            return {"entries": {}}
+        if not isinstance(raw, dict) or not isinstance(raw.get("entries"), dict):
+            return {"entries": {}}
+        return {"entries": raw["entries"]}
+
+    def get(self, key: str) -> ApiResponse | None:
+        payload = self._read()
+        entry = payload["entries"].get(key)
+        if not isinstance(entry, dict):
+            return None
+        try:
+            stored_at = float(entry["stored_at"])
+            response = entry["response"]
+            url = response["url"]
+            status_code = response["status_code"]
+            body = response["body"]
+        except (KeyError, TypeError, ValueError):
+            return None
+        if self.clock() - stored_at >= self.ttl_seconds:
+            return None
+        if not isinstance(url, str) or not isinstance(status_code, int):
+            return None
+        return ApiResponse(url, status_code, {}, body)
+
+    def put(self, key: str, response: ApiResponse, *, token: str | None) -> None:
+        if self._contains_sensitive_material(response.body, token):
+            return
+        try:
+            json.dumps(response.body, ensure_ascii=True)
+        except (TypeError, ValueError):
+            return
+        payload = self._read()
+        entries = payload["entries"]
+        entries[key] = {
+            "stored_at": self.clock(),
+            "response": {
+                "url": response.url,
+                "status_code": response.status_code,
+                "body": response.body,
+            },
+        }
+        now = self.clock()
+        live_entries = {
+            item_key: item
+            for item_key, item in entries.items()
+            if isinstance(item, dict)
+            and isinstance(item.get("stored_at"), (int, float))
+            and now - float(item["stored_at"]) < self.ttl_seconds
+        }
+        ordered = sorted(
+            live_entries.items(),
+            key=lambda item: float(item[1]["stored_at"]),
+            reverse=True,
+        )[: self.max_entries]
+        payload = {"version": 1, "entries": dict(ordered)}
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_name(self.path.name + ".tmp")
+            temporary.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+            os.replace(temporary, self.path)
+        except (OSError, TypeError, ValueError):
+            return
+
+
+def transport_metrics(transport: Any) -> dict[str, Any]:
+    getter = getattr(transport, "metrics", None)
+    if not callable(getter):
+        return empty_transport_metrics()
+    try:
+        value = getter()
+    except Exception:
+        return empty_transport_metrics()
+    if not isinstance(value, dict):
+        return empty_transport_metrics()
+    result = empty_transport_metrics(cache_enabled=bool(value.get("cache_enabled", False)))
+    for key in TRANSPORT_METRIC_KEYS:
+        if key == "cache_enabled":
+            continue
+        if key == "budget_exhausted":
+            result[key] = bool(value.get(key, False))
+        else:
+            candidate = value.get(key, 0)
+            result[key] = candidate if isinstance(candidate, int) and candidate >= 0 else 0
+    return result
 
 
 def rate_limit_headers(headers: Mapping[str, Any] | None) -> dict[str, str]:
@@ -99,7 +318,27 @@ class UrllibTransport:
         max_retries: int = 2,
         retry_backoff: float = 0.5,
         sleep_fn: Callable[[float], None] = time.sleep,
+        provider_kind: str = "",
+        instance: str = "",
+        max_requests: int | None = 1000,
+        retry_jitter: float = 0.25,
+        retry_after_max: float = 60.0,
+        cache_enabled: bool = False,
+        cache_path: str | None = None,
+        cache_ttl_seconds: float = 300.0,
+        cache_max_entries: int = 256,
+        random_fn: Callable[[float, float], float] = random.uniform,
     ) -> None:
+        if timeout <= 0:
+            raise ValueError("timeout must be greater than zero")
+        if max_retries < 0:
+            raise ValueError("max_retries must not be negative")
+        if retry_backoff < 0 or retry_jitter < 0:
+            raise ValueError("retry delays must not be negative")
+        if retry_after_max <= 0:
+            raise ValueError("retry_after_max must be greater than zero")
+        if cache_enabled and not cache_path:
+            raise ValueError("cache_path is required when cache_enabled is true")
         self.base_url = base_url.rstrip("/") + "/"
         self.token = token
         self.token_header = token_header
@@ -109,7 +348,25 @@ class UrllibTransport:
         self.timeout = timeout
         self.max_retries = max(0, max_retries)
         self.retry_backoff = max(0.0, retry_backoff)
+        self.retry_jitter = max(0.0, retry_jitter)
+        self.retry_after_max = retry_after_max
         self.sleep_fn = sleep_fn
+        self.provider_kind = provider_kind
+        self.instance = instance
+        self.coordinator = RequestCoordinator(
+            max_requests=max_requests,
+            cache_enabled=cache_enabled,
+        )
+        self._cache = (
+            LocalResponseCache(
+                cache_path or "",
+                ttl_seconds=cache_ttl_seconds,
+                max_entries=cache_max_entries,
+            )
+            if cache_enabled
+            else None
+        )
+        self.random_fn = random_fn
 
     def _url(self, path: str, params: Mapping[str, Any] | None) -> str:
         url = path if path.startswith(("http://", "https://")) else urljoin(self.base_url, path.lstrip("/"))
@@ -152,6 +409,33 @@ class UrllibTransport:
             )
         return text
 
+    def _cache_key(self, path: str, params: Mapping[str, Any] | None) -> str:
+        scope_digest = hashlib.sha256((self.token or "anonymous").encode("utf-8")).hexdigest()
+        identity = {
+            "provider": self.provider_kind,
+            "instance": self.instance,
+            "path": path,
+            "params": params or {},
+            "token_scope_digest": scope_digest,
+        }
+        return hashlib.sha256(
+            json.dumps(identity, ensure_ascii=True, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+
+    def metrics(self) -> dict[str, Any]:
+        return self.coordinator.snapshot()
+
+    def record_page(self) -> None:
+        self.coordinator.record_page()
+
+    def _retry_delay(self, attempt: int, retry_after: float | None = None) -> float:
+        base = retry_after if retry_after is not None else self.retry_backoff * (2 ** (attempt - 1))
+        bounded = min(max(0.0, base), self.retry_after_max)
+        if self.retry_jitter <= 0:
+            return bounded
+        jitter = max(0.0, self.random_fn(0.0, self.retry_jitter))
+        return min(self.retry_after_max, bounded + jitter)
+
     @staticmethod
     def _retry_after(headers: Mapping[str, Any]) -> float | None:
         value = headers.get("Retry-After") or headers.get("retry-after")
@@ -177,6 +461,13 @@ class UrllibTransport:
 
     def get(self, path: str, params: Mapping[str, Any] | None = None) -> ApiResponse:
         url = self._url(path, params)
+        cache_key = self._cache_key(path, params) if self._cache is not None else None
+        if self._cache is not None and cache_key is not None:
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                self.coordinator.metrics.cache_hits += 1
+                return cached
+            self.coordinator.metrics.cache_misses += 1
         headers = {
             "Accept": "application/json",
             "User-Agent": "git-evidence/0.1",
@@ -188,10 +479,19 @@ class UrllibTransport:
         retryable_statuses = {429, 500, 502, 503, 504}
         for attempt in range(1, self.max_retries + 2):
             try:
+                self.coordinator.reserve_request()
                 with urlopen(request, timeout=self.timeout, context=context) as response:
                     raw = response.read()
                     response_headers = {key.lower(): value for key, value in response.headers.items()}
-                    return ApiResponse(self._redact_url(url), response.status, response_headers, self._decode_body(raw))
+                    result = ApiResponse(
+                        self._redact_url(url),
+                        response.status,
+                        response_headers,
+                        self._decode_body(raw),
+                    )
+                    if self._cache is not None and cache_key is not None:
+                        self._cache.put(cache_key, result, token=self.token)
+                    return result
             except HTTPError as exc:
                 raw = exc.read()
                 detail = raw.decode("utf-8", errors="replace")[:300]
@@ -199,8 +499,8 @@ class UrllibTransport:
                 retry_after = self._retry_after(exc.headers or {})
                 can_retry = exc.code in retryable_statuses and attempt <= self.max_retries
                 if can_retry:
-                    delay = retry_after if retry_after is not None else self.retry_backoff * (2 ** (attempt - 1))
-                    self.sleep_fn(min(delay, 60.0))
+                    self.coordinator.record_retry()
+                    self.sleep_fn(self._retry_delay(attempt, retry_after))
                     continue
                 raise ApiError(
                     f"GET {self._redact_url(url)} failed with HTTP {exc.code}: {detail}",
@@ -214,7 +514,8 @@ class UrllibTransport:
             except URLError as exc:
                 can_retry = attempt <= self.max_retries
                 if can_retry:
-                    self.sleep_fn(min(self.retry_backoff * (2 ** (attempt - 1)), 60.0))
+                    self.coordinator.record_retry()
+                    self.sleep_fn(self._retry_delay(attempt))
                     continue
                 raise ApiError(
                     f"GET {self._redact_url(url)} failed: {self._redact_text(getattr(exc, 'reason', exc))}",
@@ -225,7 +526,8 @@ class UrllibTransport:
             except (TimeoutError, OSError) as exc:
                 can_retry = attempt <= self.max_retries
                 if can_retry:
-                    self.sleep_fn(min(self.retry_backoff * (2 ** (attempt - 1)), 60.0))
+                    self.coordinator.record_retry()
+                    self.sleep_fn(self._retry_delay(attempt))
                     continue
                 raise ApiError(
                     f"GET {self._redact_url(url)} failed: {self._redact_text(exc)}",
@@ -264,6 +566,9 @@ def paginate(
     diagnostics: dict[str, Any] = {}
     for page_number in range(1, max_pages + 1):
         response = transport.get(current_path, current_params)
+        record_page = getattr(transport, "record_page", None)
+        if callable(record_page):
+            record_page()
         rate_limit = rate_limit_headers(response.headers)
         if rate_limit:
             diagnostics["rate_limit"] = rate_limit
@@ -294,6 +599,7 @@ def paginate(
             return PageResult(items, page_number, True, diagnostics or None)
         current_path = path
         current_params = {**base_params, "page": page_number + 1}
+    diagnostics["budget_exhausted"] = True
     return PageResult(items, max_pages, False, diagnostics or None)
 
 
@@ -306,9 +612,17 @@ class MappingTransport:
             for key, value in responses.items()
         }
         self.calls: list[tuple[str, Mapping[str, Any] | None]] = []
+        self._metrics = RequestMetrics()
+
+    def metrics(self) -> dict[str, Any]:
+        return self._metrics.as_dict()
+
+    def record_page(self) -> None:
+        self._metrics.page_count += 1
 
     def get(self, path: str, params: Mapping[str, Any] | None = None) -> ApiResponse:
         self.calls.append((path, params))
+        self._metrics.request_count += 1
         queue = self.responses.get(path)
         if not queue:
             raise ApiError(f"no recorded response for {path}", failure_class="fixture_missing")

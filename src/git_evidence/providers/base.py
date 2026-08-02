@@ -67,6 +67,12 @@ class CollectionRequest:
     timezone: str
     include_activity_api: bool = False
     actor_ids: tuple[str, ...] = ()
+    timeout_seconds: float = 30.0
+    max_retries: int = 2
+    max_pages: int = 100
+    max_requests: int = 1000
+    retry_jitter_seconds: float = 0.25
+    retry_after_max_seconds: float = 60.0
 
     @property
     def repository_ids(self) -> tuple[str, ...]:

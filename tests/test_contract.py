@@ -149,8 +149,6 @@ def gitee_transport() -> MappingTransport:
             f"{root}/releases": response("", fixture["releases"]),
         }
     )
-
-
 class ContractTests(unittest.TestCase):
     def test_public_fixture_is_publishable(self) -> None:
         bundle = load_bundle(FIXTURE)
@@ -626,6 +624,55 @@ class ContractTests(unittest.TestCase):
             ],
         )
         self.assertEqual(bundle["run"]["scope"]["actors"], ["actor:github:github.com:999"])
+
+    def test_collect_config_contains_malformed_bundle_failure_with_successful_sibling(self) -> None:
+        transports = {"github": github_transport()}
+
+        class MalformedProvider:
+            def collect(self, request: CollectionRequest) -> dict[str, object]:
+                del request
+                return {"repositories": None}
+
+        def factory(kind: str, instance: str, options: dict[str, object], token: str | None) -> object:
+            del options, token
+            if kind == "github":
+                return GitHubProvider(transports[kind], instance=instance)
+            return MalformedProvider()
+
+        config = {
+            "window": {"start": WINDOW_START, "end": WINDOW_END, "timezone": "UTC"},
+            "scope": {
+                "repositories": [
+                    {"provider": "github", "instance": "github.com", "owner": "example", "name": "project"},
+                    {"provider": "gitlab", "instance": "gitlab.com", "owner": "example", "name": "project"},
+                ],
+                "actors": [],
+            },
+            "providers": {"github": {}, "gitlab": {}},
+        }
+
+        bundle = collect_config(config, provider_factory=factory)
+        self.assertEqual(
+            [item["id"] for item in bundle["repositories"]],
+            ["repo:github:github.com:example/project"],
+        )
+        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertEqual(
+            {failure["failure_class"] for failure in bundle["coverage"]["group_failures"]},
+            {"malformed_response"},
+        )
+        self.assertTrue(any(issue.code == "coverage.publish_blocked" for issue in validate_bundle(bundle)))
+
+        stdout = StringIO()
+        stderr = StringIO()
+        with patch("git_evidence.cli.load_config", return_value={}), patch(
+            "git_evidence.cli.collect_config", return_value=bundle
+        ), patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+            result = cli_main(["collect", "--config", "ignored-config.yml"])
+        self.assertEqual(result, 3)
+        self.assertIn("coverage.publish_blocked", stderr.getvalue())
+        self.assertIn("one or more provider groups failed", stderr.getvalue())
+        self.assertEqual(json.loads(stdout.getvalue())["coverage"]["allow_publish"], False)
 
     def test_pagination_does_not_call_a_full_page_complete(self) -> None:
         transport = MappingTransport({"/items": response("", [{"id": index} for index in range(100)])})

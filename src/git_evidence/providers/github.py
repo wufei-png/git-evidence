@@ -11,8 +11,12 @@ from .resource_base import (
     actor_from,
     api_error_diagnostics,
     first_timestamp,
+    in_window_or_malformed,
     in_window,
+    is_valid_native_id,
     merge_diagnostics,
+    native_id,
+    parse_timestamp,
 )
 from .transport import ApiError, JsonTransport, PageResult, ResponseShapeError, UrllibTransport, paginate
 
@@ -29,6 +33,17 @@ class GitHubProvider(ResourceProvider):
         instance: str = "github.com",
         token: str | None = None,
         verify_tls: bool = True,
+        timeout_seconds: float = 30.0,
+        max_retries: int = 2,
+        max_pages: int = 100,
+        max_requests: int = 1000,
+        retry_backoff_seconds: float = 0.5,
+        retry_jitter_seconds: float = 0.25,
+        retry_after_max_seconds: float = 60.0,
+        cache_enabled: bool = False,
+        cache_path: str | None = None,
+        cache_ttl_seconds: float = 300.0,
+        cache_max_entries: int = 256,
     ) -> None:
         if instance == "github.com":
             api_base = "https://api.github.com"
@@ -37,7 +52,28 @@ class GitHubProvider(ResourceProvider):
             if not host.startswith(("http://", "https://")):
                 host = f"https://{host}"
             api_base = f"{host}/api/v3"
-        super().__init__(transport or UrllibTransport(api_base, token, verify_tls=verify_tls), instance)
+        super().__init__(
+            transport
+            or UrllibTransport(
+                api_base,
+                token,
+                verify_tls=verify_tls,
+                timeout=timeout_seconds,
+                max_retries=max_retries,
+                retry_backoff=retry_backoff_seconds,
+                provider_kind="github",
+                instance=instance,
+                max_requests=max_requests,
+                retry_jitter=retry_jitter_seconds,
+                retry_after_max=retry_after_max_seconds,
+                cache_enabled=cache_enabled,
+                cache_path=cache_path,
+                cache_ttl_seconds=cache_ttl_seconds,
+                cache_max_entries=cache_max_entries,
+            ),
+            instance,
+            max_pages=max_pages,
+        )
 
     @staticmethod
     def _repo_path(target: RepositoryTarget) -> str:
@@ -45,10 +81,12 @@ class GitHubProvider(ResourceProvider):
 
     @staticmethod
     def _id(target: RepositoryTarget, kind: str, native_id: Any) -> str:
+        if not is_valid_native_id(native_id):
+            raise ResponseShapeError(f"{kind} response omitted a stable native id")
         return f"{kind}:github:{target.instance}:{target.owner}/{target.name}:{native_id}"
 
     def _page(self, path: str, params: dict[str, Any]) -> PageResult:
-        return paginate(self.transport, path, params, per_page=100)
+        return paginate(self.transport, path, params, per_page=100, max_pages=self.max_pages)
 
     def _collect_repository(
         self, target: RepositoryTarget, request: CollectionRequest
@@ -68,8 +106,8 @@ class GitHubProvider(ResourceProvider):
         repository = {
             "id": target.canonical_id,
             "provider_id": f"provider:github:{target.instance}",
-            "full_name": raw.get("full_name") or f"{target.owner}/{target.name}",
-            "name": raw.get("name") or target.name,
+            "full_name": raw.get("full_name"),
+            "name": raw.get("name"),
             "web_url": raw.get("html_url") or f"{instance_web_base(target.instance)}/{target.owner}/{target.name}",
         }
 
@@ -80,11 +118,14 @@ class GitHubProvider(ResourceProvider):
                 {"state": "all", "since": request.window_start},
             ),
         )
-        work_items.items = [
-            self._normalize_issue(target, item)
-            for item in work_items.items
-            if "pull_request" not in item and in_window(item.get("updated_at"), request)
-        ]
+        work_items = self._normalize_items(
+            work_items,
+            "work_items",
+            lambda item: self._normalize_issue(target, item),
+            filter_item=lambda item: not isinstance(item, dict)
+            or ("pull_request" not in item
+            and in_window_or_malformed(item, request, "updated_at", "created_at")),
+        )
 
         change_requests = self._safe_page(
             "change_requests",
@@ -93,11 +134,12 @@ class GitHubProvider(ResourceProvider):
                 {"state": "all", "sort": "updated", "direction": "desc"},
             ),
         )
-        change_requests.items = [
-            self._normalize_pull(target, item)
-            for item in change_requests.items
-            if self._change_request_in_window(item, request)
-        ]
+        change_requests = self._normalize_items(
+            change_requests,
+            "change_requests",
+            lambda item: self._normalize_pull(target, item),
+            filter_item=lambda item: self._change_request_in_window(item, request),
+        )
 
         interactions = self._collect_interactions(target, work_items.items, change_requests.items, request)
         commits = self._safe_page(
@@ -107,24 +149,23 @@ class GitHubProvider(ResourceProvider):
                 {"since": request.window_start, "until": request.window_end},
             ),
         )
-        commits.items = [
-            item for item in commits.items if self._commit_in_window(item, request)
-        ]
         commits = self._normalize_items(
             commits,
             "commits",
             lambda item: self._normalize_commit(target, item),
+            filter_item=lambda item: self._commit_in_window(item, request),
         )
 
         releases = self._safe_page(
             "releases",
             lambda: self._page(f"{self._repo_path(target)}/releases", {}),
         )
-        releases.items = [
-            self._normalize_release(target, item)
-            for item in releases.items
-            if in_window(first_timestamp(item, "published_at", "created_at"), request)
-        ]
+        releases = self._normalize_items(
+            releases,
+            "releases",
+            lambda item: self._normalize_release(target, item),
+            filter_item=lambda item: in_window_or_malformed(item, request, "published_at", "created_at"),
+        )
         return RepositorySnapshot(
             repository,
             {
@@ -143,11 +184,13 @@ class GitHubProvider(ResourceProvider):
             "activities",
             lambda: self._page(f"{self._repo_path(target)}/events", {}),
         )
-        events = [
-            event
-            for event in result.items
-            if in_window(first_timestamp(event, "created_at"), request)
-        ]
+        result = self._normalize_items(
+            result,
+            "activities",
+            lambda event: dict(event),
+            filter_item=lambda event: in_window_or_malformed(event, request, "created_at"),
+        )
+        events = result.items
         ref_changes: list[dict[str, Any]] = []
         lossy = False
         association_cache: dict[str, tuple[list[str], SourceResult]] = {}
@@ -191,12 +234,11 @@ class GitHubProvider(ResourceProvider):
             else:
                 association_complete = False
             event_id = event.get("id") or payload.get("push_id")
-            if event_id is None:
+            if not is_valid_native_id(event_id):
                 lossy = True
-                continue
             ref_changes.append(
                 {
-                    "id": self._id(target, "ref_change", event_id),
+                    "id": self._id(target, "ref_change", event_id) if is_valid_native_id(event_id) else "",
                     "kind": "push",
                     "repository_id": target.canonical_id,
                     "ref": payload.get("ref"),
@@ -206,6 +248,7 @@ class GitHubProvider(ResourceProvider):
                     "_change_request_ids": list(dict.fromkeys(change_request_ids)),
                     "_association_attempted": bool(commit_shas),
                     "_association_complete": association_complete,
+                    "_native_id": event_id,
                     "_actor": actor_from(event, "actor"),
                     "_summary": f"Observed push on {payload.get('ref') or 'unknown ref'}",
                     "_section": "change",
@@ -278,6 +321,7 @@ class GitHubProvider(ResourceProvider):
             "state": item.get("state"),
             "occurred_at": first_timestamp(item, "updated_at", "created_at"),
             "web_url": item.get("html_url"),
+            "_native_id": number,
             "_actor": actor_from(item, "user"),
             "_summary": item.get("title") or f"Issue #{number}",
             "_section": "project",
@@ -302,6 +346,7 @@ class GitHubProvider(ResourceProvider):
             "occurred_at": first_timestamp(item, "merged_at", "updated_at", "created_at"),
             "web_url": item.get("html_url"),
             "_association_shas": association_shas,
+            "_native_id": number,
             "_actor": actor_from(item, "user"),
             "_summary": item.get("title") or f"Pull request #{number}",
             "_section": "release" if merged_at else "change",
@@ -319,6 +364,7 @@ class GitHubProvider(ResourceProvider):
             "occurred_at": first_timestamp(item, "created_at", "submitted_at", "updated_at"),
             "body_collected": False,
             "web_url": item.get("html_url") or item.get("pull_request_url"),
+            "_native_id": comment_id,
             "_actor": actor_from(item, "user", "author"),
             "_summary": f"Observed {kind.replace('_', ' ')}",
             "_section": "project",
@@ -344,30 +390,42 @@ class GitHubProvider(ResourceProvider):
                     f"{self._repo_path(target)}/issues/{number}/comments", {}
                 ),
             )
+            result = self._normalize_items(
+                result,
+                "interactions",
+                lambda comment, number=number: self._normalize_comment(
+                    target, comment, number, "issue_comment"
+                ),
+                filter_item=lambda comment: in_window_or_malformed(
+                    comment, request, "created_at", "updated_at"
+                ),
+            )
             merge_diagnostics(diagnostics, result.diagnostics)
             if result.status != "supported":
                 complete = False
                 notes.append(result.note)
-            records.extend(
-                self._normalize_comment(target, comment, number, "issue_comment")
-                for comment in result.items
-                if in_window(first_timestamp(comment, "created_at", "updated_at"), request)
-            )
+            records.extend(result.items)
             if number in pull_numbers:
                 for endpoint, kind, timestamp_fields in (
                     (f"{self._repo_path(target)}/pulls/{number}/reviews", "review", ("submitted_at", "updated_at")),
                     (f"{self._repo_path(target)}/pulls/{number}/comments", "review_comment", ("created_at", "updated_at")),
                 ):
                     result = self._safe_page("interactions", lambda endpoint=endpoint: self._page(endpoint, {}))
+                    result = self._normalize_items(
+                        result,
+                        "interactions",
+                        lambda comment, number=number, kind=kind: self._normalize_comment(
+                            target, comment, number, kind
+                        ),
+                        filter_item=lambda comment, timestamp_fields=timestamp_fields: in_window_or_malformed(
+                            comment, request, *timestamp_fields
+                        ),
+                    )
                     merge_diagnostics(diagnostics, result.diagnostics)
                     if result.status != "supported":
                         complete = False
                         notes.append(result.note)
-                    records.extend(
-                        self._normalize_comment(target, comment, number, kind)
-                        for comment in result.items
-                        if in_window(first_timestamp(comment, *timestamp_fields), request)
-                    )
+                    records.extend(result.items)
         return SourceResult(
             records,
             "supported" if complete else "incomplete",
@@ -377,18 +435,22 @@ class GitHubProvider(ResourceProvider):
 
     @staticmethod
     def _change_request_in_window(item: dict[str, Any], request: CollectionRequest) -> bool:
-        return any(
-            in_window(item.get(field), request)
-            for field in ("created_at", "updated_at", "closed_at", "merged_at")
-        )
+        return in_window_or_malformed(item, request, "created_at", "updated_at", "closed_at", "merged_at")
 
     @staticmethod
     def _commit_in_window(item: dict[str, Any], request: CollectionRequest) -> bool:
+        if not isinstance(item, dict):
+            return True
         commit = item.get("commit") or {}
-        return any(
-            in_window(first_timestamp(commit.get(field) or {}, "date"), request)
+        values = [
+            first_timestamp(commit.get(field) or {}, "date")
             for field in ("committer", "author")
             if isinstance(commit.get(field), dict)
+        ]
+        if not values:
+            return True
+        return in_window_or_malformed({"timestamp": values[0]}, request, "timestamp") or any(
+            in_window(value, request) for value in values if parse_timestamp(value) is not None
         )
 
     def _normalize_commit(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
@@ -409,6 +471,7 @@ class GitHubProvider(ResourceProvider):
             "occurred_at": first_timestamp(committer, "date") or first_timestamp(author, "date"),
             "title": title,
             "web_url": item.get("html_url"),
+            "_native_id": sha,
             "_actor": actor_from(item, "author", "committer"),
             "_summary": title or f"Commit {sha}",
             "_section": "change",
@@ -423,6 +486,7 @@ class GitHubProvider(ResourceProvider):
             "name": item.get("name") or item.get("tag_name") or "",
             "occurred_at": first_timestamp(item, "published_at", "created_at"),
             "web_url": item.get("html_url"),
+            "_native_id": release_id,
             "_summary": item.get("name") or item.get("tag_name") or "Release",
             "_section": "release",
         }

@@ -13,8 +13,11 @@ from .resource_base import (
     actor_from,
     api_error_diagnostics,
     first_timestamp,
+    in_window_or_malformed,
     in_window,
+    is_valid_native_id,
     merge_diagnostics,
+    native_id,
     parse_timestamp,
 )
 from .transport import ApiError, JsonTransport, PageResult, ResponseShapeError, UrllibTransport, paginate
@@ -32,6 +35,17 @@ class GitLabProvider(ResourceProvider):
         instance: str = "gitlab.com",
         token: str | None = None,
         verify_tls: bool = True,
+        timeout_seconds: float = 30.0,
+        max_retries: int = 2,
+        max_pages: int = 100,
+        max_requests: int = 1000,
+        retry_backoff_seconds: float = 0.5,
+        retry_jitter_seconds: float = 0.25,
+        retry_after_max_seconds: float = 60.0,
+        cache_enabled: bool = False,
+        cache_path: str | None = None,
+        cache_ttl_seconds: float = 300.0,
+        cache_max_entries: int = 256,
     ) -> None:
         base = instance if instance.startswith("http") else f"https://{instance}"
         super().__init__(
@@ -42,8 +56,21 @@ class GitLabProvider(ResourceProvider):
                 token_header="PRIVATE-TOKEN",
                 token_prefix="",
                 verify_tls=verify_tls,
+                timeout=timeout_seconds,
+                max_retries=max_retries,
+                retry_backoff=retry_backoff_seconds,
+                provider_kind="gitlab",
+                instance=instance,
+                max_requests=max_requests,
+                retry_jitter=retry_jitter_seconds,
+                retry_after_max=retry_after_max_seconds,
+                cache_enabled=cache_enabled,
+                cache_path=cache_path,
+                cache_ttl_seconds=cache_ttl_seconds,
+                cache_max_entries=cache_max_entries,
             ),
             instance,
+            max_pages=max_pages,
         )
 
     @staticmethod
@@ -52,10 +79,12 @@ class GitLabProvider(ResourceProvider):
 
     @staticmethod
     def _id(target: RepositoryTarget, kind: str, native_id: Any) -> str:
+        if not is_valid_native_id(native_id):
+            raise ResponseShapeError(f"{kind} response omitted a stable native id")
         return f"{kind}:gitlab:{target.instance}:{target.owner}/{target.name}:{native_id}"
 
     def _page(self, path: str, params: dict[str, Any]) -> PageResult:
-        return paginate(self.transport, path, params, per_page=100)
+        return paginate(self.transport, path, params, per_page=100, max_pages=self.max_pages)
 
     def _collect_repository(
         self, target: RepositoryTarget, request: CollectionRequest
@@ -76,8 +105,8 @@ class GitLabProvider(ResourceProvider):
         repository = {
             "id": target.canonical_id,
             "provider_id": f"provider:gitlab:{target.instance}",
-            "full_name": raw.get("path_with_namespace") or f"{target.owner}/{target.name}",
-            "name": raw.get("name") or target.name,
+            "full_name": raw.get("path_with_namespace"),
+            "name": raw.get("name"),
             "web_url": raw.get("web_url") or f"{instance_web_base(target.instance)}/{target.owner}/{target.name}",
         }
         issue_result = self._safe_page(
@@ -93,11 +122,12 @@ class GitLabProvider(ResourceProvider):
                 },
             ),
         )
-        issue_result.items = [
-            self._normalize_issue(target, item)
-            for item in issue_result.items
-            if in_window(item.get("updated_at"), request) or in_window(item.get("created_at"), request)
-        ]
+        issue_result = self._normalize_items(
+            issue_result,
+            "work_items",
+            lambda item: self._normalize_issue(target, item),
+            filter_item=lambda item: in_window_or_malformed(item, request, "updated_at", "created_at"),
+        )
 
         mr_result = self._safe_page(
             "change_requests",
@@ -112,11 +142,12 @@ class GitLabProvider(ResourceProvider):
                 },
             ),
         )
-        mr_result.items = [
-            self._normalize_merge_request(target, item)
-            for item in mr_result.items
-            if self._change_request_in_window(item, request)
-        ]
+        mr_result = self._normalize_items(
+            mr_result,
+            "change_requests",
+            lambda item: self._normalize_merge_request(target, item),
+            filter_item=lambda item: self._change_request_in_window(item, request),
+        )
 
         interactions = self._collect_interactions(target, issue_result.items, mr_result.items, request)
         commit_result = self._safe_page(
@@ -130,26 +161,23 @@ class GitLabProvider(ResourceProvider):
                 },
             ),
         )
-        commit_result.items = [
-            item
-            for item in commit_result.items
-            if in_window(first_timestamp(item, "committed_date", "created_at"), request)
-        ]
         commit_result = self._normalize_items(
             commit_result,
             "commits",
             lambda item: self._normalize_commit(target, item),
+            filter_item=lambda item: in_window_or_malformed(item, request, "committed_date", "created_at"),
         )
 
         release_result = self._safe_page(
             "releases",
             lambda: self._page(f"{project_path}/releases", {}),
         )
-        release_result.items = [
-            self._normalize_release(target, item)
-            for item in release_result.items
-            if in_window(first_timestamp(item, "released_at", "created_at"), request)
-        ]
+        release_result = self._normalize_items(
+            release_result,
+            "releases",
+            lambda item: self._normalize_release(target, item),
+            filter_item=lambda item: in_window_or_malformed(item, request, "released_at", "created_at"),
+        )
         return RepositorySnapshot(
             repository,
             {
@@ -176,11 +204,13 @@ class GitLabProvider(ResourceProvider):
                 },
             ),
         )
-        events = [
-            event
-            for event in result.items
-            if in_window(first_timestamp(event, "created_at"), request)
-        ]
+        result = self._normalize_items(
+            result,
+            "activities",
+            lambda event: dict(event),
+            filter_item=lambda event: in_window_or_malformed(event, request, "created_at"),
+        )
+        events = result.items
         ref_changes: list[dict[str, Any]] = []
         lossy = False
         association_cache: dict[str, tuple[list[str], SourceResult]] = {}
@@ -229,13 +259,12 @@ class GitLabProvider(ResourceProvider):
             else:
                 association_complete = False
             event_id = event.get("id")
-            if event_id is None:
+            if not is_valid_native_id(event_id):
                 lossy = True
-                continue
             commit_to = push_data.get("commit_to")
             ref_changes.append(
                 {
-                    "id": self._id(target, "ref_change", event_id),
+                    "id": self._id(target, "ref_change", event_id) if is_valid_native_id(event_id) else "",
                     "kind": "push",
                     "repository_id": target.canonical_id,
                     "ref": ref,
@@ -249,6 +278,7 @@ class GitLabProvider(ResourceProvider):
                     "_change_request_ids": list(dict.fromkeys(change_request_ids)),
                     "_association_attempted": bool(commit_shas),
                     "_association_complete": association_complete,
+                    "_native_id": event_id,
                     "_actor": actor_from(event, "author"),
                     "_summary": f"Observed push on {ref or 'unknown ref'}",
                     "_section": "change",
@@ -329,6 +359,7 @@ class GitLabProvider(ResourceProvider):
             "state": item.get("state"),
             "occurred_at": first_timestamp(item, "updated_at", "created_at"),
             "web_url": item.get("web_url"),
+            "_native_id": iid,
             "_actor": actor_from(item, "author"),
             "_summary": item.get("title") or f"Issue #{iid}",
             "_section": "project",
@@ -354,6 +385,7 @@ class GitLabProvider(ResourceProvider):
             "occurred_at": first_timestamp(item, "merged_at", "updated_at", "created_at"),
             "web_url": item.get("web_url"),
             "_association_shas": association_shas,
+            "_native_id": iid,
             "_actor": actor_from(item, "author"),
             "_summary": item.get("title") or f"Merge request !{iid}",
             "_section": "release" if merged_at else "change",
@@ -380,29 +412,21 @@ class GitLabProvider(ResourceProvider):
                 "interactions",
                 lambda path=path: self._page(path, {"sort": "asc", "order_by": "created_at"}),
             )
+            result = self._normalize_items(
+                result,
+                "interactions",
+                lambda note, number=number, subject=item: self._normalize_note(
+                    target, note, number, subject
+                ),
+                filter_item=lambda note: in_window_or_malformed(
+                    note, request, "created_at", "updated_at"
+                ),
+            )
             merge_diagnostics(diagnostics, result.diagnostics)
             if result.status != "supported":
                 complete = False
                 notes.append(result.note)
-            for note in result.items:
-                occurred_at = first_timestamp(note, "created_at", "updated_at")
-                if not in_window(occurred_at, request):
-                    continue
-                records.append(
-                    {
-                        "id": self._id(target, "interaction", note.get("id")),
-                        "kind": "system_note" if note.get("system") else "comment",
-                        "repository_id": target.canonical_id,
-                        "subject_number": number,
-                        "occurred_at": occurred_at,
-                        "body_collected": False,
-                        "system": bool(note.get("system")),
-                        "web_url": note.get("noteable_url") or item.get("web_url"),
-                        "_actor": actor_from(note, "author"),
-                        "_summary": "Observed system note" if note.get("system") else "Observed comment",
-                        "_section": "project",
-                    }
-                )
+            records.extend(result.items)
         return SourceResult(
             records,
             "supported" if complete else "incomplete",
@@ -412,10 +436,30 @@ class GitLabProvider(ResourceProvider):
 
     @staticmethod
     def _change_request_in_window(item: dict[str, Any], request: CollectionRequest) -> bool:
-        return any(
-            in_window(item.get(field), request)
-            for field in ("created_at", "updated_at", "closed_at", "merged_at")
-        )
+        return in_window_or_malformed(item, request, "created_at", "updated_at", "closed_at", "merged_at")
+
+    def _normalize_note(
+        self,
+        target: RepositoryTarget,
+        note: dict[str, Any],
+        number: Any,
+        subject: dict[str, Any],
+    ) -> dict[str, Any]:
+        note_id = note.get("id")
+        return {
+            "id": self._id(target, "interaction", note_id),
+            "kind": "system_note" if note.get("system") else "comment",
+            "repository_id": target.canonical_id,
+            "subject_number": number,
+            "occurred_at": first_timestamp(note, "created_at", "updated_at"),
+            "body_collected": False,
+            "system": bool(note.get("system")),
+            "web_url": note.get("noteable_url") or subject.get("web_url"),
+            "_native_id": note_id,
+            "_actor": actor_from(note, "author"),
+            "_summary": "Observed system note" if note.get("system") else "Observed comment",
+            "_section": "project",
+        }
 
     def _normalize_commit(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
         sha = item.get("id")
@@ -436,13 +480,14 @@ class GitLabProvider(ResourceProvider):
             "occurred_at": first_timestamp(item, "committed_date", "created_at"),
             "title": title,
             "web_url": item.get("web_url"),
+            "_native_id": sha,
             "_actor": actor,
             "_summary": title or f"Commit {sha}",
             "_section": "change",
         }
 
     def _normalize_release(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
-        tag = item.get("tag_name") or item.get("name")
+        tag = item.get("tag_name")
         return {
             "id": self._id(target, "release", tag),
             "repository_id": target.canonical_id,
@@ -450,6 +495,7 @@ class GitLabProvider(ResourceProvider):
             "name": item.get("name") or tag or "",
             "occurred_at": first_timestamp(item, "released_at", "created_at"),
             "web_url": item.get("_links", {}).get("self") if isinstance(item.get("_links"), dict) else None,
+            "_native_id": tag,
             "_summary": item.get("name") or tag or "Release",
             "_section": "release",
         }

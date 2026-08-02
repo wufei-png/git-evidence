@@ -69,6 +69,12 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(serialized, end="")
         issues = validate_bundle(bundle, required_sources_contract=RESOURCE_SOURCES)
+        group_failures = (bundle.get("coverage") or {}).get("group_failures") or []
+        if group_failures:
+            if issues:
+                print(format_issues(issues), file=sys.stderr)
+            print("COLLECTION: one or more provider groups failed", file=sys.stderr)
+            return 3
         if issues:
             print(format_issues(issues), file=sys.stderr)
             return 1

@@ -33,6 +33,7 @@
     "releases": {"type": "array", "items": {"$ref": "#/$defs/entity"}},
     "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
     "facts": {"type": "array", "items": {"$ref": "#/$defs/fact"}},
+    "collection": {"$ref": "#/$defs/collection"},
     "coverage": {"$ref": "#/$defs/coverage"}
   },
   "$defs": {
@@ -130,7 +131,11 @@
             "network_error",
             "transport_error",
             "fixture_missing",
-            "http_error"
+            "http_error",
+            "provider_not_ready",
+            "unexpected_error",
+            "unexpected_normalizer_error",
+            "budget_exhausted"
           ]
         },
         "failure_classes": {
@@ -146,8 +151,12 @@
               "malformed_response",
               "network_error",
               "transport_error",
-              "fixture_missing",
-              "http_error"
+            "fixture_missing",
+            "http_error",
+            "provider_not_ready",
+            "unexpected_error",
+            "unexpected_normalizer_error",
+            "budget_exhausted"
             ]
           }
         },
@@ -164,6 +173,31 @@
             "retry-after": {"type": "string"}
           },
           "additionalProperties": false
+        }
+      },
+      "additionalProperties": true
+    },
+    "collection": {
+      "type": "object",
+      "properties": {
+        "provider": {"type": "string", "minLength": 1},
+        "instance": {"type": "string", "minLength": 1},
+        "group_status": {"enum": ["completed", "failed"]},
+        "failure_class": {"type": "string", "minLength": 1},
+        "groups": {"type": "array", "items": {"type": "object"}},
+        "limits": {"type": "object"},
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "request_count": {"type": "integer", "minimum": 0},
+            "page_count": {"type": "integer", "minimum": 0},
+            "retry_count": {"type": "integer", "minimum": 0},
+            "budget_exhausted": {"type": "boolean"},
+            "cache_hits": {"type": "integer", "minimum": 0},
+            "cache_misses": {"type": "integer", "minimum": 0},
+            "cache_enabled": {"type": "boolean"}
+          },
+          "additionalProperties": true
         }
       },
       "additionalProperties": true
@@ -205,6 +239,21 @@
           }
         },
         "fatal": {"type": "array"},
+        "group_failures": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["provider", "instance", "repository", "source", "failure_class"],
+            "properties": {
+              "provider": {"type": "string", "minLength": 1},
+              "instance": {"type": "string", "minLength": 1},
+              "repository": {"type": "string", "minLength": 1},
+              "source": {"type": "string", "minLength": 1},
+              "failure_class": {"type": "string", "minLength": 1}
+            },
+            "additionalProperties": true
+          }
+        },
         "allow_publish": {"type": "boolean"}
       },
       "additionalProperties": true

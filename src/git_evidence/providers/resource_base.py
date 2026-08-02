@@ -18,6 +18,7 @@ from .transport import (
     PageResult,
     ResponseShapeError,
     failure_class_for_status,
+    transport_metrics,
 )
 
 
@@ -33,6 +34,45 @@ class SourceResult:
 class RepositorySnapshot:
     repository: dict[str, Any] | None = None
     sources: dict[str, SourceResult] = field(default_factory=dict)
+
+
+class StrictNormalizationError(ResponseShapeError):
+    """A native item cannot be represented without inventing identity or time."""
+
+
+def is_valid_native_id(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return False
+    text = str(value).strip()
+    return bool(text) and text.lower() not in {"none", "null"}
+
+
+def native_id(item: dict[str, Any], *fields: str) -> Any:
+    for field in fields:
+        value = item.get(field)
+        if is_valid_native_id(value):
+            return value
+    raise StrictNormalizationError(
+        "provider response omitted a stable native identifier: " + ", ".join(fields)
+    )
+
+
+def in_window_or_malformed(item: Any, request: CollectionRequest, *fields: str) -> bool:
+    """Keep unknown-time records for strict diagnostics; filter known out-of-window items."""
+    if not isinstance(item, dict):
+        return True
+    values = [item.get(field) for field in fields]
+    parsed_values = []
+    for value in values:
+        if value is None:
+            continue
+        parsed = parse_timestamp(value)
+        if parsed is None:
+            return True
+        parsed_values.append(parsed)
+    if not parsed_values:
+        return True
+    return any(in_window(value, request) for value in values if value is not None)
 
 
 def parse_timestamp(value: Any) -> datetime | None:
@@ -135,10 +175,37 @@ def merge_diagnostics(target: dict[str, Any], incoming: dict[str, Any]) -> None:
         target["failure_classes"] = sorted(failure_classes)
 
 
+def _append_normalization_diagnostics(
+    result: SourceResult,
+    source: str,
+    dropped: int,
+    failure_classes: set[str],
+) -> None:
+    if not dropped:
+        return
+    result.status = "incomplete"
+    note = f"{source} response dropped {dropped} malformed item(s)"
+    result.note = f"{result.note}; {note}" if result.note else note
+    diagnostics = {
+        "failure_class": next(iter(failure_classes)) if len(failure_classes) == 1 else None,
+        "failure_classes": sorted(failure_classes) if len(failure_classes) > 1 else None,
+        "dropped_count": dropped,
+        "malformed_items": dropped,
+    }
+    diagnostics = {key: value for key, value in diagnostics.items() if value is not None}
+    merge_diagnostics(result.diagnostics, diagnostics)
+
+
 class BundleBuilder:
-    def __init__(self, request: CollectionRequest, descriptor: ProviderDescriptor) -> None:
+    def __init__(
+        self,
+        request: CollectionRequest,
+        descriptor: ProviderDescriptor,
+        transport: JsonTransport,
+    ) -> None:
         self.request = request
         self.descriptor = descriptor
+        self.transport = transport
         self.provider_id = f"provider:{descriptor.kind}:{request.instance}"
         self.bundle: dict[str, Any] = {
             "schema_version": "0.1",
@@ -167,6 +234,20 @@ class BundleBuilder:
             "releases": [],
             "evidence": [],
             "facts": [],
+            "collection": {
+                "provider": descriptor.kind,
+                "instance": request.instance,
+                "group_status": "completed",
+                "limits": {
+                    "timeout_seconds": request.timeout_seconds,
+                    "max_retries": request.max_retries,
+                    "max_pages": request.max_pages,
+                    "max_requests": request.max_requests,
+                    "retry_jitter_seconds": request.retry_jitter_seconds,
+                    "retry_after_max_seconds": request.retry_after_max_seconds,
+                },
+                "metrics": transport_metrics(transport),
+            },
             "coverage": {
                 "required_sources": list(RESOURCE_SOURCES),
                 "observations": [],
@@ -188,8 +269,12 @@ class BundleBuilder:
         }
         if result.note:
             observation["note"] = result.note
-        if result.diagnostics:
-            observation["diagnostics"] = result.diagnostics
+        diagnostics = dict(result.diagnostics)
+        metrics = transport_metrics(self.transport)
+        if metrics["retry_count"] or metrics["budget_exhausted"] or metrics["cache_hits"] or metrics["cache_misses"]:
+            diagnostics.setdefault("metrics", metrics)
+        if diagnostics:
+            observation["diagnostics"] = diagnostics
         self.bundle["coverage"]["observations"].append(observation)
         self.bundle["providers"][0]["capabilities"][source] = result.status
         if source in RESOURCE_SOURCES and result.status != "supported":
@@ -221,6 +306,7 @@ class BundleBuilder:
             explicit_change_request_ids = self._unique_strings(record.pop("_change_request_ids", []))
             association_attempted = bool(record.pop("_association_attempted", False))
             association_complete = bool(record.pop("_association_complete", False))
+            record.pop("_native_id", None)
             occurred_at = record.get("occurred_at")
             entity_id = record.get("id")
             if not isinstance(entity_id, str) or not entity_id:
@@ -370,15 +456,17 @@ class BundleBuilder:
         self.bundle[category].append(record)
 
     def finish(self) -> dict[str, Any]:
+        self.bundle["collection"]["metrics"] = transport_metrics(self.transport)
         return self.bundle
 
 
 class ResourceProvider:
     descriptor: ProviderDescriptor
 
-    def __init__(self, transport: JsonTransport, instance: str) -> None:
+    def __init__(self, transport: JsonTransport, instance: str, *, max_pages: int = 100) -> None:
         self.transport = transport
         self.instance = instance
+        self.max_pages = max_pages
 
     def probe(self) -> dict[str, Any]:
         """Describe the adapter without turning implementation status into coverage."""
@@ -392,11 +480,10 @@ class ResourceProvider:
             raise ValueError(
                 f"request provider {request.provider_kind!r} does not match {self.descriptor.kind!r}"
             )
-        builder = BundleBuilder(request, self.descriptor)
+        self.max_pages = request.max_pages
+        builder = BundleBuilder(request, self.descriptor, self.transport)
         for target in request.repositories:
             snapshot = self._collect_repository(target, request)
-            if snapshot.repository:
-                builder.add_repository(snapshot.repository)
             for source in RESOURCE_SOURCES:
                 if source == "repositories" and source not in snapshot.sources:
                     result = SourceResult(
@@ -409,8 +496,12 @@ class ResourceProvider:
                         source,
                         SourceResult([], "unavailable", "provider did not return this resource source"),
                     )
+                result = self._strict_source_result(result, source, target, request)
                 builder.add_coverage(source, target, result)
-                if source == "work_items":
+                if source == "repositories":
+                    for item in result.items:
+                        builder.add_repository(item)
+                elif source == "work_items":
                     builder.add_records("work_items", result.items, target=target, fact_kind="work_item_observed", default_section="project")
                 elif source == "change_requests":
                     builder.add_records("change_requests", result.items, target=target, fact_kind="change_request_observed", default_section="change")
@@ -432,6 +523,7 @@ class ResourceProvider:
                     source,
                     SourceResult([], "unsupported", "provider did not return this activity source"),
                 )
+                result = self._strict_source_result(result, source, target, request)
                 builder.add_coverage(source, target, result)
                 if source == "ref_changes":
                     builder.add_records(
@@ -444,29 +536,108 @@ class ResourceProvider:
                     )
         return builder.finish()
 
+    def _strict_source_result(
+        self,
+        result: SourceResult,
+        source: str,
+        target: RepositoryTarget,
+        request: CollectionRequest,
+    ) -> SourceResult:
+        """Reject identity/repository/time gaps while retaining valid siblings."""
+        if not isinstance(result.items, list):
+            result.items = []
+            _append_normalization_diagnostics(result, source, 1, {"malformed_response"})
+            return result
+        valid: list[dict[str, Any]] = []
+        dropped = 0
+        failure_classes: set[str] = set()
+        for item in result.items:
+            try:
+                if source == "activities":
+                    self._validate_activity_item(item, request)
+                else:
+                    self._validate_canonical_item(item, source, target, request)
+                valid.append(item)
+            except Exception as exc:
+                dropped += 1
+                failure_classes.add(
+                    "malformed_response"
+                    if isinstance(exc, (StrictNormalizationError, ResponseShapeError, AttributeError, KeyError, TypeError, ValueError))
+                    else "unexpected_normalizer_error"
+                )
+        result.items = valid
+        _append_normalization_diagnostics(result, source, dropped, failure_classes)
+        return result
+
+    @staticmethod
+    def _validate_activity_item(item: Any, request: CollectionRequest) -> None:
+        if not isinstance(item, dict):
+            raise StrictNormalizationError("activity item must be an object")
+        event_id = native_id(item, "id", "event_id", "push_id")
+        del event_id
+        occurred_at = first_timestamp(item, "created_at", "occurred_at", "updated_at")
+        if parse_timestamp(occurred_at) is None or not in_window(occurred_at, request):
+            raise StrictNormalizationError("activity item has an invalid or out-of-window timestamp")
+
+    @staticmethod
+    def _validate_canonical_item(
+        item: Any,
+        source: str,
+        target: RepositoryTarget,
+        request: CollectionRequest,
+    ) -> None:
+        if not isinstance(item, dict):
+            raise StrictNormalizationError(f"{source} item must be an object")
+        entity_id = item.get("id")
+        if not isinstance(entity_id, str) or not entity_id.strip() or "None" in entity_id:
+            raise StrictNormalizationError(f"{source} item has no stable canonical id")
+        if source == "repositories":
+            if entity_id != target.canonical_id:
+                raise StrictNormalizationError("repository identity does not match the allowlist")
+            if not isinstance(item.get("provider_id"), str) or not item["provider_id"]:
+                raise StrictNormalizationError("repository item has no provider identity")
+            for field in ("full_name", "name"):
+                if not isinstance(item.get(field), str) or not item[field].strip():
+                    raise StrictNormalizationError(f"repository item has no {field}")
+            return
+        if item.get("repository_id") != target.canonical_id:
+            raise StrictNormalizationError(f"{source} item has the wrong repository identity")
+        if not is_valid_native_id(item.get("_native_id")):
+            raise StrictNormalizationError(f"{source} item has no stable native id")
+        occurred_at = item.get("occurred_at")
+        if parse_timestamp(occurred_at) is None or not in_window(occurred_at, request):
+            raise StrictNormalizationError(f"{source} item has an invalid or out-of-window occurred_at")
+        if source in {"work_items", "change_requests", "interactions"} and not is_valid_native_id(
+            item.get("number") if source != "interactions" else item.get("subject_number")
+        ):
+            raise StrictNormalizationError(f"{source} item has no stable subject number")
+
     def _normalize_items(
         self,
         result: SourceResult,
         source: str,
         normalizer: Callable[[dict[str, Any]], dict[str, Any]],
+        *,
+        filter_item: Callable[[Any], bool] | None = None,
     ) -> SourceResult:
         """Normalize valid records while turning malformed items into diagnostics."""
         normalized: list[dict[str, Any]] = []
-        malformed_count = 0
+        dropped = 0
+        failure_classes: set[str] = set()
         for item in result.items:
             try:
+                if filter_item is not None and not filter_item(item):
+                    continue
                 normalized.append(normalizer(item))
-            except (AttributeError, IndexError, KeyError, TypeError, ValueError, ResponseShapeError):
-                malformed_count += 1
+            except Exception as exc:
+                dropped += 1
+                failure_classes.add(
+                    "malformed_response"
+                    if isinstance(exc, (ResponseShapeError, AttributeError, IndexError, KeyError, TypeError, ValueError))
+                    else "unexpected_normalizer_error"
+                )
         result.items = normalized
-        if malformed_count:
-            result.status = "incomplete"
-            note = f"{source} response contained {malformed_count} malformed item(s)"
-            result.note = f"{result.note}; {note}" if result.note else note
-            merge_diagnostics(
-                result.diagnostics,
-                {"failure_class": "malformed_response", "malformed_items": malformed_count},
-            )
+        _append_normalization_diagnostics(result, source, dropped, failure_classes)
         return result
 
     def _safe_page(
@@ -477,12 +648,18 @@ class ResourceProvider:
         try:
             result = fetch()
         except ApiError as exc:
-            return SourceResult([], "incomplete", str(exc), api_error_diagnostics(exc))
+            diagnostics = api_error_diagnostics(exc)
+            diagnostics["metrics"] = transport_metrics(self.transport)
+            return SourceResult([], "incomplete", "provider request failed", diagnostics)
+        diagnostics = dict(result.diagnostics or {})
+        metrics = transport_metrics(self.transport)
+        if metrics["retry_count"] or metrics["budget_exhausted"] or metrics["cache_hits"] or metrics["cache_misses"]:
+            diagnostics.setdefault("metrics", metrics)
         return SourceResult(
             result.items,
             "supported" if result.complete else "incomplete",
             f"{result.pages} page(s)" if result.complete else f"{source} pagination reached the configured page limit",
-            result.diagnostics or {},
+            diagnostics,
         )
 
     def _collect_repository(

@@ -28,6 +28,10 @@ FAILURE_CLASSES = {
     "transport_error",
     "fixture_missing",
     "http_error",
+    "provider_not_ready",
+    "unexpected_error",
+    "unexpected_normalizer_error",
+    "budget_exhausted",
 }
 KNOWN_COVERAGE_SOURCES = frozenset((*RESOURCE_SOURCES, *ACTIVITY_SOURCES))
 SUBJECT_COLLECTIONS = {
@@ -453,6 +457,27 @@ def _validate_coverage(
     if not isinstance(observations, list):
         _issue(issues, "coverage.observations", "coverage.observations must be an array")
         observations = []
+    group_failures = coverage.get("group_failures", [])
+    if not isinstance(group_failures, list):
+        _issue(issues, "coverage.group_failures_shape", "coverage.group_failures must be an array")
+        group_failures = []
+    for position, failure in enumerate(group_failures):
+        if not isinstance(failure, dict):
+            _issue(issues, "coverage.group_failure_shape", f"coverage.group_failures[{position}] must be an object")
+            continue
+        for field in ("provider", "instance", "repository", "source", "failure_class"):
+            if not isinstance(failure.get(field), str) or not failure[field]:
+                _issue(
+                    issues,
+                    "coverage.group_failure_field",
+                    f"coverage.group_failures[{position}].{field} must be a non-empty string",
+                )
+        if failure.get("failure_class") not in FAILURE_CLASSES:
+            _issue(
+                issues,
+                "coverage.group_failure_class",
+                f"coverage.group_failures[{position}] has invalid failure_class: {failure.get('failure_class')!r}",
+            )
     by_source_repository: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for position, observation in enumerate(observations):
         if not isinstance(observation, dict):
