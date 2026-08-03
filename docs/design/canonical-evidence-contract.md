@@ -41,6 +41,7 @@ allowlist/coverage invariants that JSON Schema alone cannot express.
     "required_sources": ["repositories", "work_items", "change_requests", "commits", "releases"],
     "observations": [],
     "fatal": [],
+    "warnings": [],
     "allow_publish": true
   }
 }
@@ -65,8 +66,16 @@ allowlist/coverage invariants that JSON Schema alone cannot express.
   is invalid.
 - Every required source has a coverage observation for every in-scope
   provider/repository combination.
-- `allow_publish` is false when a required source is fatal, incomplete, or
-  missing, or when an evidence reference cannot be resolved.
+- `allow_publish` is true only when every core resource source is complete and
+  verifiable. A core permission failure, unverifiable resource, or inconsistent
+  commit SHA closes the gate; missing evidence references also remain fatal.
+- Activity/ref sources are optional supplements. Their `unsupported`,
+  `unavailable`, or `incomplete` observations do not close the core gate, but
+  each such observation must have a machine-readable entry in
+  `coverage.warnings` with matching source, provider, repository, and status.
+- `coverage.warnings` uses `code: optional_coverage_warning` and may carry a
+  safe operational `failure_class` or `failure_classes`; renderers must show
+  these warnings rather than silently omitting the coverage limitation.
 - `change_association` is one of `linked`, `unlinked`, `ambiguous`, or
   `unknown`.
 - `capability_state` is one of `supported`, `unsupported`, `unavailable`, or
@@ -96,6 +105,9 @@ allowlist/coverage invariants that JSON Schema alone cannot express.
 - A ref/change association is `linked` only when the available native SHA
   evidence resolves to one change request; multiple candidates are
   `ambiguous`, and any unresolved SHA keeps the result `unknown`.
+- A canonical commit must preserve the same SHA in its native identity,
+  canonical ID, and `sha` field. A mismatch is a malformed core resource and
+  blocks publication.
 
 ## Minimum entity vocabulary
 

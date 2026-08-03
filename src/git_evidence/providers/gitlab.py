@@ -25,6 +25,7 @@ from .resource_base import (
     merge_diagnostics,
     native_id,
     parse_timestamp,
+    validate_repository_identity,
 )
 from .transport import (
     ApiError,
@@ -114,7 +115,8 @@ class GitLabProvider(ResourceProvider):
                     redact_url=getattr(self.transport, "_redact_url", None),
                 )
             if not isinstance(response.body, dict):
-                raise ApiError(f"expected project object from {response.url}")
+                raise ResponseShapeError(f"expected project object from {response.url}")
+            validate_repository_identity(response.body, target, identity_field="path_with_namespace")
         except ApiError as exc:
             failed = {
                 source: SourceResult([], "incomplete", str(exc), api_error_diagnostics(exc))
@@ -147,6 +149,7 @@ class GitLabProvider(ResourceProvider):
             issue_result,
             "work_items",
             lambda item: self._normalize_issue(target, item),
+            target=target,
             filter_item=lambda item: in_window_or_malformed(item, request, "updated_at", "created_at"),
         )
 
@@ -167,6 +170,7 @@ class GitLabProvider(ResourceProvider):
             mr_result,
             "change_requests",
             lambda item: self._normalize_merge_request(target, item),
+            target=target,
             filter_item=lambda item: self._change_request_in_window(item, request),
         )
 
@@ -186,6 +190,7 @@ class GitLabProvider(ResourceProvider):
             commit_result,
             "commits",
             lambda item: self._normalize_commit(target, item),
+            target=target,
             filter_item=lambda item: in_window_or_malformed(item, request, "committed_date", "created_at"),
         )
 
@@ -197,6 +202,7 @@ class GitLabProvider(ResourceProvider):
             release_result,
             "releases",
             lambda item: self._normalize_release(target, item),
+            target=target,
             filter_item=lambda item: in_window_or_malformed(item, request, "released_at", "created_at"),
         )
         return RepositorySnapshot(
@@ -229,6 +235,7 @@ class GitLabProvider(ResourceProvider):
             result,
             "activities",
             lambda event: dict(event),
+            target=target,
             filter_item=lambda event: in_window_or_malformed(event, request, "created_at"),
         )
         events = result.items
@@ -454,6 +461,7 @@ class GitLabProvider(ResourceProvider):
                 lambda note, number=number, subject=item: self._normalize_note(
                     target, note, number, subject
                 ),
+                target=target,
                 filter_item=lambda note: in_window_or_malformed(
                     note, request, "created_at", "updated_at"
                 ),

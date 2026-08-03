@@ -24,6 +24,7 @@ LABELS = {
         "actors": "Actor summary",
         "other": "Other verified activity",
         "coverage": "Data coverage",
+        "coverage_warnings": "Coverage warnings",
         "evidence": "evidence",
         "anonymous": "anonymous actor",
         "actor_warning": "Actor view is informational only; it is not a productivity or performance score.",
@@ -38,6 +39,7 @@ LABELS = {
         "actors": "人员视图",
         "other": "其他已验证活动",
         "coverage": "数据覆盖",
+        "coverage_warnings": "覆盖警告",
         "evidence": "证据",
         "anonymous": "匿名成员",
         "actor_warning": "人员视图仅用于信息回顾，不代表生产力或绩效评分。",
@@ -142,6 +144,28 @@ def _render_coverage(bundle: dict[str, Any], language: str) -> list[str]:
         lines.append(f"- {source}: **{status}**" + (f" — {note}" if note else ""))
     if not (coverage.get("observations") or []):
         lines.append("- No coverage observations.")
+    warnings = coverage.get("warnings") or []
+    if warnings:
+        lines.extend(["", f"### {labels['coverage_warnings']}", ""])
+        for warning in warnings:
+            if not isinstance(warning, dict):
+                continue
+            source = _escape_text(warning.get("source") or "unknown")
+            status = _escape_text(warning.get("status") or "unknown")
+            provider_id = _escape_text(warning.get("provider_id") or "unknown-provider")
+            repository_id = _escape_text(warning.get("repository_id") or "unknown-repository")
+            code = _escape_text(warning.get("code") or "coverage_warning")
+            message = _escape_text(warning.get("message") or "optional source is not complete")
+            failure_class = warning.get("failure_class")
+            if not failure_class and isinstance(warning.get("failure_classes"), list):
+                failure_class = ", ".join(
+                    str(value) for value in warning["failure_classes"] if isinstance(value, str)
+                )
+            failure = f"; failure={_escape_text(failure_class)}" if failure_class else ""
+            lines.append(
+                f"- **{code}** — {source}: **{status}** — "
+                f"provider={provider_id}; repository={repository_id} — {message}{failure}"
+            )
     return lines
 
 

@@ -22,11 +22,13 @@ from .resource_base import (
     is_valid_native_id,
     merge_diagnostics,
     native_id,
+    validate_repository_identity,
 )
 from .transport import (
     ApiError,
     JsonTransport,
     PageResult,
+    ResponseShapeError,
     UrllibTransport,
     is_success_status,
     paginate,
@@ -109,7 +111,8 @@ class GiteeProvider(ResourceProvider):
                     redact_url=getattr(self.transport, "_redact_url", None),
                 )
             if not isinstance(response.body, dict):
-                raise ApiError(f"expected repository object from {response.url}")
+                raise ResponseShapeError(f"expected repository object from {response.url}")
+            validate_repository_identity(response.body, target, identity_field="full_name")
         except ApiError as exc:
             failed = {
                 source: SourceResult([], "incomplete", str(exc), api_error_diagnostics(exc))
@@ -136,6 +139,7 @@ class GiteeProvider(ResourceProvider):
             issue_result,
             "work_items",
             lambda item: self._normalize_issue(target, item),
+            target=target,
             filter_item=lambda item: in_window_or_malformed(item, request, "updated_at", "created_at"),
         )
         pull_result = self._safe_page(
@@ -153,6 +157,7 @@ class GiteeProvider(ResourceProvider):
             pull_result,
             "change_requests",
             lambda item: self._normalize_pull(target, item),
+            target=target,
             filter_item=lambda item: self._change_request_in_window(item, request),
         )
         interactions = self._collect_interactions(target, issue_result.items, pull_result.items, request)
@@ -167,6 +172,7 @@ class GiteeProvider(ResourceProvider):
             commit_result,
             "commits",
             lambda item: self._normalize_commit(target, item),
+            target=target,
             filter_item=lambda item: in_window_or_malformed(
                 {"timestamp": self._commit_timestamp(item)} if isinstance(item, dict) else item,
                 request,
@@ -181,6 +187,7 @@ class GiteeProvider(ResourceProvider):
             release_result,
             "releases",
             lambda item: self._normalize_release(target, item),
+            target=target,
             filter_item=lambda item: in_window_or_malformed(item, request, "published_at", "created_at"),
         )
         return RepositorySnapshot(
@@ -279,6 +286,7 @@ class GiteeProvider(ResourceProvider):
                 lambda comment, number=number, subject=item: self._normalize_comment(
                     target, comment, number, subject
                 ),
+                target=target,
                 filter_item=lambda comment: in_window_or_malformed(
                     comment, request, "created_at", "updated_at"
                 ),

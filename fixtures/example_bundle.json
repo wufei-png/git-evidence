@@ -223,6 +223,16 @@
       {"source": "ref_changes", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "unavailable", "note": "activity API not enabled; ref completeness is not claimed"}
     ],
     "fatal": [],
+    "warnings": [
+      {
+        "code": "optional_coverage_warning",
+        "source": "ref_changes",
+        "provider_id": "provider:github:github.com",
+        "repository_id": "repo:github:github.com:example/project",
+        "status": "unavailable",
+        "message": "activity API not enabled; ref completeness is not claimed"
+      }
+    ],
     "allow_publish": true
   }
 }

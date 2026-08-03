@@ -35,7 +35,10 @@ These operations can improve push/ref attribution and candidate discovery, but
 they are not required to collect resource-backed Issues, change requests,
 interactions, commits, or releases. If they are disabled or unavailable, the
 provider must emit `unavailable`, `unsupported`, or `incomplete` coverage and
-the report must not claim complete push/ref coverage.
+the report must not claim complete push/ref coverage. Each non-supported
+activity/ref observation must also emit a matching `coverage.warnings[]`
+entry; this warning does not close the publication gate when the core resource
+sources are complete.
 
 ## Pagination and failure rules
 

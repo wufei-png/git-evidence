@@ -67,7 +67,12 @@ def main(argv: list[str] | None = None) -> int:
             print(serialized, end="")
         issues = validate_bundle(bundle, required_sources_contract=RESOURCE_SOURCES)
         group_failures = (bundle.get("coverage") or {}).get("group_failures") or []
-        if group_failures:
+        blocking_group_failures = [
+            failure
+            for failure in group_failures
+            if isinstance(failure, dict) and failure.get("source") in RESOURCE_SOURCES
+        ]
+        if blocking_group_failures:
             if issues:
                 print(format_issues(issues), file=sys.stderr)
             print("COLLECTION: one or more provider groups failed", file=sys.stderr)
@@ -75,7 +80,11 @@ def main(argv: list[str] | None = None) -> int:
         if issues:
             print(format_issues(issues), file=sys.stderr)
             return 1
-        print("COLLECTION: publishable", file=sys.stderr)
+        warnings = (bundle.get("coverage") or {}).get("warnings") or []
+        if warnings:
+            print("COLLECTION: publishable with coverage warnings", file=sys.stderr)
+        else:
+            print("COLLECTION: publishable", file=sys.stderr)
         return 0
     try:
         bundle = load_bundle(args.bundle)

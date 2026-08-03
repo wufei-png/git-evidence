@@ -110,15 +110,19 @@ the runtime reads that environment variable and never accepts a token on the
 command line. A missing environment variable is treated as a collection
 configuration error rather than silently lowering authorization.
 
-A provider-group `ProviderNotReady`, API, transport, budget, privacy, or
-unexpected collection failure is recorded in `coverage.group_failures` with
+A provider-group `ProviderNotReady`, API, transport, budget, malformed, typed,
+or unexpected collection failure is recorded in `coverage.group_failures` with
 provider, instance, repository, source, and `failure_class`, and is linked to
 the matching observation (and to a structured fatal entry for required
-sources). Other groups remain in the bundle for diagnosis, but any group
-failure forces `allow_publish: false`. Configuration and missing-token errors
-are preflight failures and return CLI status 2; a bundle with one or more
-failed provider groups returns status 3; ordinary schema or semantic
-publication failures return status 1.
+sources). Other groups remain in the bundle for diagnosis. A core resource
+group failure forces `allow_publish: false`; ordinary optional activity/ref
+malformed, typed, transport, or capability failures remain publishable with a
+structured coverage warning. An optional `privacy_violation` is the security
+exception: it requires a fatal ledger entry and keeps `allow_publish: false`.
+Configuration and missing-token errors are preflight failures and return CLI
+status 2; a bundle with one or more failed core provider groups returns status
+3, while an optional-only non-privacy failure returns status 0 with coverage
+warnings; ordinary schema or semantic publication failures return status 1.
 
 `git-evidence render --config config.yml bundle.json` applies the report
 profile, language, actor display flag, and explicit `actor_labels` map without

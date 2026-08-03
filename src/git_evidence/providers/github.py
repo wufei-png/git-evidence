@@ -21,6 +21,7 @@ from .resource_base import (
     is_valid_native_id,
     merge_diagnostics,
     native_id,
+    validate_repository_identity,
 )
 from .transport import (
     ApiError,
@@ -113,7 +114,8 @@ class GitHubProvider(ResourceProvider):
                     redact_url=getattr(self.transport, "_redact_url", None),
                 )
             if not isinstance(response.body, dict):
-                raise ApiError(f"expected repository object from {response.url}")
+                raise ResponseShapeError(f"expected repository object from {response.url}")
+            validate_repository_identity(response.body, target, identity_field="full_name")
         except ApiError as exc:
             failed = {
                 source: SourceResult([], "incomplete", str(exc), api_error_diagnostics(exc))
@@ -141,6 +143,7 @@ class GitHubProvider(ResourceProvider):
             work_items,
             "work_items",
             lambda item: self._normalize_issue(target, item),
+            target=target,
             filter_item=lambda item: not isinstance(item, dict)
             or ("pull_request" not in item
             and in_window_or_malformed(item, request, "updated_at", "created_at")),
@@ -157,6 +160,7 @@ class GitHubProvider(ResourceProvider):
             change_requests,
             "change_requests",
             lambda item: self._normalize_pull(target, item),
+            target=target,
             filter_item=lambda item: self._change_request_in_window(item, request),
         )
 
@@ -172,6 +176,7 @@ class GitHubProvider(ResourceProvider):
             commits,
             "commits",
             lambda item: self._normalize_commit(target, item),
+            target=target,
             filter_item=lambda item: self._commit_in_window(item, request),
         )
 
@@ -183,6 +188,7 @@ class GitHubProvider(ResourceProvider):
             releases,
             "releases",
             lambda item: self._normalize_release(target, item),
+            target=target,
             filter_item=lambda item: in_window_or_malformed(item, request, "published_at", "created_at"),
         )
         return RepositorySnapshot(
@@ -207,6 +213,7 @@ class GitHubProvider(ResourceProvider):
             result,
             "activities",
             lambda event: dict(event),
+            target=target,
             filter_item=lambda event: in_window_or_malformed(event, request, "created_at"),
         )
         events = result.items
@@ -430,6 +437,7 @@ class GitHubProvider(ResourceProvider):
                 lambda comment, number=number: self._normalize_comment(
                     target, comment, number, "issue_comment"
                 ),
+                target=target,
                 filter_item=lambda comment: in_window_or_malformed(
                     comment, request, "created_at", "submitted_at", "updated_at"
                 ),
@@ -459,6 +467,7 @@ class GitHubProvider(ResourceProvider):
                         lambda comment, number=number, kind=kind: self._normalize_comment(
                             target, comment, number, kind
                         ),
+                        target=target,
                         filter_item=lambda comment, timestamp_fields=timestamp_fields: in_window_or_malformed(
                             comment, request, *timestamp_fields
                         ),

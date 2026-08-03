@@ -6,8 +6,14 @@ date: 2026-08-02
 # Bounded collection and opt-in cache
 
 Each provider/instance collection group is isolated: successful groups remain
-available as diagnostics while a failed group contributes explicit coverage
-failure and prevents publication. Requests use bounded retries and budgets.
+available as diagnostics while a failed core resource group contributes
+explicit coverage failure and prevents publication. Ordinary failed optional
+activity/ref collection—including malformed responses, typed provider errors,
+and transport/capability failures—contributes `coverage.group_failures` and a
+visible `coverage.warnings` entry, but does not close an otherwise complete
+core gate. An optional `privacy_violation` remains fail-closed, with a fatal
+ledger entry and `allow_publish: false`. Requests use bounded retries and
+budgets.
 Response caching is disabled by default and may be enabled explicitly with a
 bounded local cache; cache hits never upgrade capability or publication state,
 and authentication headers/tokens are never persisted.
@@ -38,8 +44,10 @@ Collection configuration and token presence are preflight checks. Once
 collection starts, a failed `(provider, instance)` group produces structured
 coverage observations and `coverage.group_failures` for every affected
 repository/source. Successful groups remain in the merged diagnostic bundle,
-but any failed required source keeps `allow_publish: false`. The CLI reserves
-status 3 for this partial group-failure result, status 2 for preflight config
+but any failed core resource source keeps `allow_publish: false`; ordinary
+optional activity/ref failures remain publishable with warnings, while
+optional privacy violations remain fail-closed. The CLI reserves
+status 3 for a partial core-group failure, status 2 for preflight config
 failure, and status 1 for ordinary validation/publication failure.
 
 Coverage observations are provenance-qualified: every observation declares a

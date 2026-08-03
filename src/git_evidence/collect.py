@@ -11,10 +11,15 @@ from .config import provider_runtime_options, validate_collection_config
 from .model import COLLECTION_KEYS
 from .privacy import PrivacyError, sanitize_public_payload
 from .providers import CollectionRequest, PROVIDER_REGISTRY, RepositoryTarget
-from .providers.base import ACTIVITY_SOURCES, ProviderNotReady, RESOURCE_SOURCES
-from .providers.resource_base import StrictNormalizationError, api_error_diagnostics
-from .providers.transport import ApiError, ResponseShapeError, empty_transport_metrics
-from .validation import validate_bundle
+from .providers.base import (
+    ACTIVITY_SOURCES,
+    RESOURCE_SOURCES,
+    append_optional_coverage_warning,
+    merge_optional_coverage_warning,
+)
+from .providers.resource_base import exception_diagnostics, merge_diagnostics
+from .providers.transport import ResponseShapeError, empty_transport_metrics
+from .validation import has_blocking_core_coverage, validate_bundle
 
 
 class CollectionError(ValueError):
@@ -42,19 +47,8 @@ def _timestamp_text(value: Any, field: str) -> str:
 
 
 def _group_failure_diagnostics(error: Exception) -> tuple[str, dict[str, Any]]:
-    if isinstance(error, ProviderNotReady):
-        return "provider_not_ready", {"failure_class": "provider_not_ready"}
-    if isinstance(error, PrivacyError):
-        return "privacy_violation", {"failure_class": "privacy_violation"}
-    if isinstance(error, (StrictNormalizationError, ResponseShapeError)):
-        diagnostics = api_error_diagnostics(error)
-        return diagnostics.get("failure_class", "malformed_response"), diagnostics
-    if isinstance(error, ApiError):
-        return error.failure_class or "transport_error", api_error_diagnostics(error)
-    return "unexpected_error", {
-        "failure_class": "unexpected_error",
-        "exception_type": type(error).__name__,
-    }
+    diagnostics = exception_diagnostics(error)
+    return diagnostics.get("failure_class", "unexpected_error"), diagnostics
 
 
 def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
@@ -218,6 +212,7 @@ def _failed_group_bundle(
             "observations": observations,
             "fatal": fatal,
             "group_failures": group_failures,
+            "warnings": [],
             "allow_publish": False,
         },
     }
@@ -244,6 +239,58 @@ def _bundle_group_identity(bundle: dict[str, Any]) -> tuple[str, str, list[str]]
     return "unknown", "unknown", []
 
 
+def _provider_ids_by_repository(
+    bundle: dict[str, Any], repository_ids: list[str]
+) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for item in bundle.get("repositories", []):
+        if not isinstance(item, dict):
+            continue
+        repository_id = item.get("id")
+        provider_id = item.get("provider_id")
+        if isinstance(repository_id, str) and isinstance(provider_id, str):
+            mapping[repository_id] = provider_id
+    providers = bundle.get("providers", [])
+    for repository_id in repository_ids:
+        if repository_id in mapping:
+            continue
+        for provider in providers:
+            if not isinstance(provider, dict):
+                continue
+            provider_id = provider.get("id")
+            kind = provider.get("kind")
+            instance = provider.get("instance")
+            if (
+                isinstance(provider_id, str)
+                and isinstance(kind, str)
+                and isinstance(instance, str)
+                and repository_id.startswith(f"repo:{kind}:{instance}:")
+            ):
+                mapping[repository_id] = provider_id
+                break
+    return mapping
+
+
+def _provider_bundle_has_complete_core_coverage(bundle: dict[str, Any]) -> bool:
+    """Require every allowlisted repository to prove every core source."""
+    coverage = bundle.get("coverage")
+    if not isinstance(coverage, dict):
+        return False
+    required_sources = coverage.get("required_sources")
+    if not isinstance(required_sources, list) or any(
+        source not in required_sources for source in RESOURCE_SOURCES
+    ):
+        return False
+    _, _, repositories = _bundle_group_identity(bundle)
+    if not repositories:
+        return False
+    return not has_blocking_core_coverage(
+        coverage,
+        repository_ids=repositories,
+        provider_ids_by_repository=_provider_ids_by_repository(bundle, repositories),
+    )
+
+
 def _record_merge_failure(
     merged: dict[str, Any],
     bundle: dict[str, Any],
@@ -255,7 +302,7 @@ def _record_merge_failure(
     repository = item.get("repository_id") if isinstance(item, dict) else None
     if not isinstance(repository, str) or not repository:
         repository = scoped_repositories[0] if scoped_repositories else "unknown-repository"
-    source = source_category if source_category in RESOURCE_SOURCES else "repositories"
+    source = source_category if source_category in (*RESOURCE_SOURCES, *ACTIVITY_SOURCES) else "repositories"
     provider_id = f"provider:{provider}:{instance}"
     failure = {
         "provider": provider,
@@ -275,26 +322,30 @@ def _record_merge_failure(
         and item.get("repository_id") == repository
     ]
     if not observations:
-        merged["coverage"]["observations"].append(
-            {
-                "source": source,
-                "provider_id": provider_id,
-                "repository_id": repository,
-                "status": "incomplete",
-                "diagnostics": {"failure_class": "malformed_response", "group_failure": True, "reason": reason},
-            }
-        )
+        observation = {
+            "source": source,
+            "provider_id": provider_id,
+            "repository_id": repository,
+            "status": "incomplete",
+            "diagnostics": {"failure_class": "malformed_response", "group_failure": True, "reason": reason},
+        }
+        merged["coverage"]["observations"].append(observation)
+        append_optional_coverage_warning(merged["coverage"], observation)
     else:
         for observation in observations:
             observation["status"] = "incomplete"
+            observation["note"] = (
+                f"{observation.get('note')}; " if observation.get("note") else ""
+            ) + reason
             diagnostics = observation.setdefault("diagnostics", {})
             if isinstance(diagnostics, dict):
-                diagnostics.update(
-                    {"failure_class": "malformed_response", "group_failure": True, "reason": reason}
+                merge_diagnostics(
+                    diagnostics,
+                    {"failure_class": "malformed_response", "group_failure": True, "reason": reason},
                 )
+            append_optional_coverage_warning(merged["coverage"], observation)
     if source in RESOURCE_SOURCES:
         merged["coverage"]["fatal"].append(failure)
-    merged["coverage"]["allow_publish"] = False
 
 
 def _merge_bundles(
@@ -348,6 +399,7 @@ def _merge_bundles(
             "observations": [],
             "fatal": [],
             "group_failures": [],
+            "warnings": [],
             "allow_publish": True,
         },
     }
@@ -365,13 +417,18 @@ def _merge_bundles(
         "facts",
     )
     seen: dict[str, set[str]] = {key: set() for key in collection_keys}
+    provider_gate_blocked = False
     for bundle in bundles:
         coverage = bundle.get("coverage") or {}
+        if not _provider_bundle_has_complete_core_coverage(bundle):
+            provider_gate_blocked = True
         merged["coverage"]["observations"].extend(coverage.get("observations") or [])
         merged["coverage"]["fatal"].extend(coverage.get("fatal") or [])
         merged["coverage"]["group_failures"].extend(coverage.get("group_failures") or [])
-        if coverage.get("allow_publish") is not True:
-            merged["coverage"]["allow_publish"] = False
+        if isinstance(coverage.get("warnings"), list):
+            for item in coverage["warnings"]:
+                if isinstance(item, dict):
+                    merge_optional_coverage_warning(merged["coverage"], item)
         for key in collection_keys:
             for item in bundle.get(key, []):
                 entity_id = item.get("id") if isinstance(item, dict) else None
@@ -407,6 +464,17 @@ def _merge_bundles(
                 aggregate["cache_enabled"] = bool(
                     aggregate["cache_enabled"] or incoming_metrics.get("cache_enabled", False)
                 )
+    for observation in merged["coverage"]["observations"]:
+        if isinstance(observation, dict):
+            append_optional_coverage_warning(merged["coverage"], observation)
+    merged["coverage"]["allow_publish"] = not (
+        provider_gate_blocked
+        or has_blocking_core_coverage(
+            merged["coverage"],
+            repository_ids=repository_ids,
+            provider_ids_by_repository=_provider_ids_by_repository(merged, repository_ids),
+        )
+    )
     return merged
 
 

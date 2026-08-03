@@ -3,16 +3,22 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
+from urllib.parse import unquote, urlsplit
 
 from ..limits import MAX_PAGES
-from ..privacy import sanitize_public_payload
+from ..privacy import PrivacyError, sanitize_public_payload
 from .base import (
     ACTIVITY_SOURCES,
+    CAPABILITY_STATES,
+    OPERATIONAL_FAILURE_CLASSES,
     RESOURCE_SOURCES,
     CollectionRequest,
     ProviderDescriptor,
     ProviderNotReady,
     RepositoryTarget,
+    append_optional_coverage_warning,
+    instance_web_base,
+    is_verifiable_sha,
     validate_instance,
 )
 from .transport import (
@@ -48,6 +54,23 @@ def is_valid_native_id(value: Any) -> bool:
         return False
     text = str(value).strip()
     return bool(text) and text.lower() not in {"none", "null"}
+
+
+def validate_repository_identity(
+    raw: Any,
+    target: RepositoryTarget,
+    *,
+    identity_field: str,
+) -> None:
+    """Reject a repository root response that is not the requested target."""
+    if not isinstance(raw, dict):
+        raise ResponseShapeError("repository response must be an object")
+    expected_full_name = f"{target.owner}/{target.name}"
+    if raw.get(identity_field) != expected_full_name or raw.get("name") != target.name:
+        raise ResponseShapeError("repository response identity does not match the requested target")
+    for value in _direct_identity_url_values(raw):
+        if not isinstance(value, str) or not repository_url_matches_target(value, target):
+            raise ResponseShapeError("repository response URL does not match the requested target")
 
 
 def native_id(item: dict[str, Any], *fields: str) -> Any:
@@ -153,6 +176,271 @@ def api_error_diagnostics(error: ApiError) -> dict[str, Any]:
     return diagnostics
 
 
+def exception_diagnostics(error: Exception) -> dict[str, Any]:
+    """Map typed provider failures to the public failure-class contract."""
+    if isinstance(error, ApiError):
+        return api_error_diagnostics(error)
+    if isinstance(error, ProviderNotReady):
+        return {"failure_class": "provider_not_ready"}
+    if isinstance(error, PrivacyError):
+        return {"failure_class": "privacy_violation"}
+    return {
+        "failure_class": "unexpected_error",
+        "exception_type": type(error).__name__,
+    }
+
+
+def optional_activity_failure_sources(error: Exception) -> dict[str, SourceResult]:
+    """Convert an optional activity exception without discarding core resources."""
+    diagnostics = exception_diagnostics(error)
+    return {
+        source: SourceResult(
+            [],
+            "incomplete",
+            "optional activity/ref collection failed; coverage warning emitted",
+            dict(diagnostics),
+        )
+        for source in ACTIVITY_SOURCES
+    }
+
+
+def _identity_containers(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, dict):
+        return []
+    containers: list[dict[str, Any]] = []
+    pending = [value]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        containers.append(current)
+        for field in (
+            "repository",
+            "project",
+            "repo",
+            "source_project",
+            "target_project",
+            "base",
+            "head",
+            "_links",
+            "references",
+        ):
+            nested = current.get(field)
+            if isinstance(nested, dict):
+                pending.append(nested)
+    return containers
+
+
+def _url_segments(path: str) -> list[str]:
+    return [unquote(segment) for segment in path.split("/") if segment]
+
+
+def _path_has_prefix(path_segments: list[str], prefix: list[str]) -> bool:
+    if not prefix or len(path_segments) < len(prefix):
+        return False
+    if path_segments[: len(prefix) - 1] != prefix[:-1]:
+        return False
+    repository_segment = prefix[-1]
+    accepted_repository_segments = {repository_segment}
+    if not repository_segment.endswith(".git"):
+        accepted_repository_segments.add(f"{repository_segment}.git")
+    return path_segments[len(prefix) - 1] in accepted_repository_segments
+
+
+def _effective_port(scheme: str, port: int | None) -> int | None:
+    if port is not None:
+        return port
+    return {"http": 80, "https": 443}.get(scheme)
+
+
+def _authority_matches(parsed: Any, *, scheme: str, hostname: str, port: int | None) -> bool:
+    return (
+        parsed.scheme == scheme
+        and isinstance(parsed.hostname, str)
+        and parsed.hostname.lower() == hostname.lower()
+        and _effective_port(parsed.scheme, parsed.port) == _effective_port(scheme, port)
+    )
+
+
+def repository_url_matches_target(value: str, target: RepositoryTarget) -> bool:
+    """Check a provider web/API URL against the exact repository target."""
+    try:
+        parsed = urlsplit(value)
+        base = urlsplit(instance_web_base(target.instance))
+    except (TypeError, ValueError):
+        return False
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return False
+    if not base.hostname:
+        return False
+    path_segments = _url_segments(parsed.path)
+    repository_segments = [segment for segment in f"{target.owner}/{target.name}".split("/") if segment]
+    if not repository_segments:
+        return False
+    base_segments = _url_segments(base.path)
+    web_prefix = [*base_segments, *repository_segments]
+    authorities = [(base.scheme, base.hostname, base.port, web_prefix)]
+
+    api_base_segments = [*base_segments, "api"]
+    if target.provider_kind == "github":
+        api_base_segments.append("v3")
+        api_prefix = [*api_base_segments, "repos", *repository_segments]
+        if target.instance == "github.com":
+            authorities.append(("https", "api.github.com", None, ["repos", *repository_segments]))
+    elif target.provider_kind == "gitlab":
+        api_base_segments.append("v4")
+        encoded_repository = "/".join(repository_segments)
+        api_prefixes = [
+            [*api_base_segments, "projects", encoded_repository],
+            [*api_base_segments, "projects", *repository_segments],
+        ]
+        authorities.extend((base.scheme, base.hostname, base.port, prefix) for prefix in api_prefixes)
+        api_prefix = None
+    elif target.provider_kind == "gitee":
+        api_base_segments.append("v5")
+        api_prefix = [*api_base_segments, "repos", *repository_segments]
+    else:
+        api_prefix = None
+
+    if api_prefix is not None:
+        authorities.append((base.scheme, base.hostname, base.port, api_prefix))
+    try:
+        return any(
+            _authority_matches(parsed, scheme=scheme, hostname=hostname, port=port)
+            and _path_has_prefix(path_segments, prefix)
+            for scheme, hostname, port, prefix in authorities
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+# Keep the old private name available to callers that used the previous helper.
+_repository_url_matches_target = repository_url_matches_target
+
+
+_IDENTITY_URL_FIELDS = (
+    "html_url",
+    "web_url",
+    "repository_url",
+    "repo_url",
+    "project_url",
+    "api_url",
+    "url",
+    "noteable_url",
+    "self",
+)
+
+
+def _identity_url_values(value: Any) -> list[Any]:
+    values: list[Any] = []
+    for container in _identity_containers(value):
+        for field in _IDENTITY_URL_FIELDS:
+            if field in container and container[field] is not None:
+                values.extend(_url_candidate_values(container[field]))
+    return values
+
+
+def _direct_identity_url_values(value: Any) -> list[Any]:
+    """Collect root URL fields without treating nested provider self links as repository URLs."""
+    if not isinstance(value, dict):
+        return []
+    return [
+        candidate
+        for field in _IDENTITY_URL_FIELDS
+        if field != "self" and value.get(field) is not None
+        for candidate in _url_candidate_values(value[field])
+    ]
+
+
+def _url_candidate_values(candidate: Any) -> list[Any]:
+    if not isinstance(candidate, dict):
+        return [candidate]
+    extracted = [
+        candidate[key]
+        for key in ("href", "url")
+        if isinstance(candidate.get(key), str)
+    ]
+    return extracted or [candidate]
+
+
+def validate_native_item_repository_identity(
+    raw: Any,
+    normalized: Any,
+    target: RepositoryTarget,
+    *,
+    provider_kind: str,
+) -> None:
+    """Reject native records whose embedded repository points elsewhere."""
+    expected_full_name = f"{target.owner}/{target.name}"
+    identity_field = "path_with_namespace" if provider_kind == "gitlab" else "full_name"
+    containers = _identity_containers(raw)
+    for container in containers:
+        for field in (identity_field, "full_name", "path_with_namespace"):
+            if field not in container or container[field] is None:
+                continue
+            identity = container[field]
+            if not isinstance(identity, str) or identity.strip() != expected_full_name:
+                raise StrictNormalizationError("native item repository identity does not match the requested target")
+
+        if provider_kind == "gitlab" and container is not raw:
+            path = container.get("path")
+            if path is not None and (
+                "path_with_namespace" in container
+                or "project_id" in container
+                or "namespace" in container
+            ) and (not isinstance(path, str) or path.strip() != target.name):
+                raise StrictNormalizationError("native item project path does not match the requested target")
+
+    for container in containers:
+        for relation in ("repository", "project", "repo", "source_project", "target_project"):
+            nested = container.get(relation)
+            if not isinstance(nested, dict) or "name" not in nested or nested["name"] is None:
+                continue
+            nested_name = nested["name"]
+            if not isinstance(nested_name, str) or nested_name.strip() not in {
+                expected_full_name,
+                target.name,
+            }:
+                raise StrictNormalizationError("native item repository name does not match the requested target")
+
+    for container in containers:
+        owner = container.get("owner")
+        owner_name = (
+            next(
+                (
+                    owner.get(field)
+                    for field in ("login", "name", "username")
+                    if isinstance(owner.get(field), str) and owner.get(field)
+                ),
+                None,
+            )
+            if isinstance(owner, dict)
+            else owner
+        )
+        name = container.get("name")
+        if owner_name is None or name is None:
+            continue
+        if owner_name != target.owner or name != target.name:
+            raise StrictNormalizationError("native item owner/name does not match the requested target")
+
+    urls = _identity_url_values(raw)
+    if isinstance(normalized, dict) and "web_url" in normalized:
+        urls.append(normalized.get("web_url"))
+    for value in urls:
+        if value is None:
+            continue
+        if not isinstance(value, str) or not repository_url_matches_target(value, target):
+            raise StrictNormalizationError("native item URL does not match the requested target")
+
+
 def merge_diagnostics(target: dict[str, Any], incoming: dict[str, Any]) -> None:
     """Merge child-request diagnostics without losing distinct failure causes."""
     if not incoming:
@@ -247,6 +535,39 @@ def _append_normalization_diagnostics(
     merge_diagnostics(result.diagnostics, diagnostics)
 
 
+def coerce_optional_source_result(source: str, value: Any) -> SourceResult:
+    """Keep malformed optional provider return values inside the warning boundary."""
+    if not isinstance(value, SourceResult):
+        return SourceResult(
+            [],
+            "incomplete",
+            f"{source} optional source returned an invalid SourceResult",
+            {"failure_class": "malformed_response", "returned_type": type(value).__name__},
+        )
+    if value.status not in CAPABILITY_STATES:
+        return SourceResult(
+            [],
+            "incomplete",
+            f"{source} optional source returned an invalid capability status",
+            {"failure_class": "malformed_response", "returned_status": value.status},
+        )
+    if not isinstance(value.diagnostics, dict):
+        return SourceResult(
+            [],
+            "incomplete",
+            f"{source} optional source returned invalid diagnostics",
+            {"failure_class": "malformed_response", "diagnostics_type": type(value.diagnostics).__name__},
+        )
+    if not isinstance(value.note, str):
+        return SourceResult(
+            [],
+            "incomplete",
+            f"{source} optional source returned an invalid note",
+            {"failure_class": "malformed_response", "note_type": type(value.note).__name__},
+        )
+    return value
+
+
 class BundleBuilder:
     def __init__(
         self,
@@ -309,6 +630,7 @@ class BundleBuilder:
                 "observations": [],
                 "fatal": [],
                 "group_failures": [],
+                "warnings": [],
                 "allow_publish": True,
             },
         }
@@ -339,6 +661,18 @@ class BundleBuilder:
         return values
 
     def add_coverage(self, source: str, target: RepositoryTarget, result: SourceResult) -> None:
+        diagnostics = dict(result.diagnostics)
+        metrics = transport_metrics(self.transport)
+        if metrics["retry_count"] or metrics["budget_exhausted"] or metrics["cache_hits"] or metrics["cache_misses"]:
+            diagnostics.setdefault("metrics", metrics)
+        failure_classes = self._failure_classes(diagnostics)
+        group_failure_classes = failure_classes & OPERATIONAL_FAILURE_CLASSES
+        if source in RESOURCE_SOURCES and result.status == "supported" and group_failure_classes:
+            result.status = "incomplete"
+            classes = ", ".join(sorted(group_failure_classes))
+            result.note = (
+                f"{result.note}; " if result.note else ""
+            ) + f"core source reported operational failure: {classes}"
         observation = {
             "source": source,
             "provider_id": self.provider_id,
@@ -347,30 +681,11 @@ class BundleBuilder:
         }
         if result.note:
             observation["note"] = result.note
-        diagnostics = dict(result.diagnostics)
-        metrics = transport_metrics(self.transport)
-        if metrics["retry_count"] or metrics["budget_exhausted"] or metrics["cache_hits"] or metrics["cache_misses"]:
-            diagnostics.setdefault("metrics", metrics)
         if diagnostics:
             observation["diagnostics"] = diagnostics
         self.bundle["coverage"]["observations"].append(observation)
+        append_optional_coverage_warning(self.bundle["coverage"], observation)
         self.bundle["providers"][0]["capabilities"][source] = result.status
-        failure_classes = self._failure_classes(diagnostics)
-        group_failure_classes = failure_classes & {
-            "permission_denied",
-            "rate_limited",
-            "service_error",
-            "not_found",
-            "request_rejected",
-            "network_error",
-            "transport_error",
-            "fixture_missing",
-            "http_error",
-            "provider_not_ready",
-            "unexpected_error",
-            "budget_exhausted",
-            "privacy_violation",
-        }
         if result.status != "supported" and group_failure_classes:
             observation.setdefault("diagnostics", {})["group_failure"] = True
             for failure_class in sorted(group_failure_classes):
@@ -384,13 +699,78 @@ class BundleBuilder:
                 self.bundle["coverage"]["group_failures"].append(failure)
                 if source in RESOURCE_SOURCES:
                     self.bundle["coverage"]["fatal"].append(failure)
-            self.bundle["coverage"]["allow_publish"] = False
+            if source in RESOURCE_SOURCES:
+                self.bundle["coverage"]["allow_publish"] = False
         elif source in RESOURCE_SOURCES and result.status != "supported":
             self.bundle["coverage"]["allow_publish"] = False
             self.bundle["coverage"]["fatal"].append(
                 f"{target.canonical_id}:{source}:{result.status}:{result.note}"
             )
         self._apply_duplicate_coverage(source, target.canonical_id)
+
+    def record_optional_failure(
+        self,
+        source: str,
+        target: RepositoryTarget,
+        error: Exception,
+        *,
+        fail_closed: bool = False,
+    ) -> None:
+        """Enrich an optional observation after a boundary failure."""
+        diagnostics = exception_diagnostics(error)
+        diagnostics["group_failure"] = True
+        matches = [
+            observation
+            for observation in self.bundle["coverage"]["observations"]
+            if observation.get("source") == source
+            and observation.get("provider_id") == self.provider_id
+            and observation.get("repository_id") == target.canonical_id
+        ]
+        if not matches:
+            self.add_coverage(
+                source,
+                target,
+                SourceResult(
+                    [],
+                    "incomplete",
+                    f"{source} optional collection failed; coverage warning emitted",
+                    dict(diagnostics),
+                ),
+            )
+            matches = [
+                observation
+                for observation in self.bundle["coverage"]["observations"]
+                if observation.get("source") == source
+                and observation.get("provider_id") == self.provider_id
+                and observation.get("repository_id") == target.canonical_id
+            ]
+        for observation in matches:
+            observation["status"] = "incomplete"
+            observation["note"] = (
+                f"{observation.get('note')}; " if observation.get("note") else ""
+            ) + "optional source boundary failure"
+            observation_diagnostics = observation.setdefault("diagnostics", {})
+            if isinstance(observation_diagnostics, dict):
+                merge_diagnostics(observation_diagnostics, diagnostics)
+            self.bundle["providers"][0]["capabilities"][source] = "incomplete"
+            append_optional_coverage_warning(self.bundle["coverage"], observation)
+        failure = {
+            "provider": self.descriptor.kind,
+            "instance": self.request.instance,
+            "repository": target.canonical_id,
+            "source": source,
+            "failure_class": diagnostics.get("failure_class", "unexpected_error"),
+        }
+        if not any(
+            isinstance(existing, dict)
+            and all(existing.get(field) == failure[field] for field in failure)
+            for existing in self.bundle["coverage"]["group_failures"]
+        ):
+            self.bundle["coverage"]["group_failures"].append(failure)
+        if fail_closed:
+            if failure not in self.bundle["coverage"]["fatal"]:
+                self.bundle["coverage"]["fatal"].append(failure)
+            self.bundle["coverage"]["allow_publish"] = False
 
     def add_repository(
         self,
@@ -608,6 +988,7 @@ class BundleBuilder:
             if isinstance(observation_diagnostics, dict):
                 merge_diagnostics(observation_diagnostics, diagnostic)
             self.bundle["providers"][0]["capabilities"][source] = "incomplete"
+            append_optional_coverage_warning(self.bundle["coverage"], observation)
         if source in RESOURCE_SOURCES:
             self.bundle["coverage"]["allow_publish"] = False
             fatal = f"{repository_id}:{source}:incomplete:duplicate records dropped"
@@ -640,6 +1021,9 @@ class BundleBuilder:
 
     def finish(self) -> dict[str, Any]:
         self.bundle["collection"]["metrics"] = transport_metrics(self.transport)
+        for observation in self.bundle["coverage"]["observations"]:
+            if isinstance(observation, dict):
+                append_optional_coverage_warning(self.bundle["coverage"], observation)
         return self.bundle
 
 
@@ -714,27 +1098,63 @@ class ResourceProvider:
                 elif source == "releases":
                     builder.add_records("releases", result.items, target=target, fact_kind="release_observed", default_section="release")
             if request.include_activity_api:
-                activity_sources = self._collect_activity(target, request)
+                activity_boundary_error: Exception | None = None
+                try:
+                    activity_sources = self._collect_activity(target, request)
+                    if not isinstance(activity_sources, dict):
+                        raise ResponseShapeError("provider returned invalid optional activity sources")
+                except Exception as exc:  # noqa: BLE001 - optional boundary must preserve the core snapshot
+                    activity_boundary_error = exc
+                    activity_sources = optional_activity_failure_sources(exc)
             else:
+                activity_boundary_error = None
                 activity_sources = {
                     source: SourceResult([], "unavailable", "activity API disabled; push/ref completeness is not claimed")
                     for source in ACTIVITY_SOURCES
                 }
             for source in ACTIVITY_SOURCES:
-                result = activity_sources.get(
-                    source,
-                    SourceResult([], "unsupported", "provider did not return this activity source"),
-                )
-                result = self._strict_source_result(result, source, target, request)
-                builder.add_coverage(source, target, result)
-                if source == "ref_changes":
-                    builder.add_records(
-                        "ref_changes",
-                        result.items,
-                        target=target,
-                        fact_kind="ref_change_observed",
-                        default_section="change",
-                        evidence_source="activity_api",
+                try:
+                    result = coerce_optional_source_result(
+                        source,
+                        activity_sources.get(
+                            source,
+                            SourceResult([], "unsupported", "provider did not return this activity source"),
+                        ),
+                    )
+                    result = self._strict_source_result(result, source, target, request)
+                    builder.add_coverage(source, target, result)
+                    if source == "ref_changes":
+                        builder.add_records(
+                            "ref_changes",
+                            result.items,
+                            target=target,
+                            fact_kind="ref_change_observed",
+                            default_section="change",
+                            evidence_source="activity_api",
+                        )
+                    if (
+                        "privacy_violation" in builder._failure_classes(result.diagnostics)
+                        and not isinstance(activity_boundary_error, PrivacyError)
+                    ):
+                        builder.record_optional_failure(
+                            source,
+                            target,
+                            PrivacyError("optional source reported a privacy violation"),
+                            fail_closed=True,
+                        )
+                except Exception as exc:  # noqa: BLE001 - optional per-source boundary
+                    builder.record_optional_failure(
+                        source,
+                        target,
+                        exc,
+                        fail_closed=isinstance(exc, PrivacyError),
+                    )
+                if isinstance(activity_boundary_error, PrivacyError):
+                    builder.record_optional_failure(
+                        source,
+                        target,
+                        activity_boundary_error,
+                        fail_closed=True,
                     )
         return builder.finish()
 
@@ -806,6 +1226,15 @@ class ResourceProvider:
             raise StrictNormalizationError(f"{source} item has the wrong repository identity")
         if not is_valid_native_id(item.get("_native_id")):
             raise StrictNormalizationError(f"{source} item has no stable native id")
+        if source == "commits":
+            sha = item.get("sha")
+            native_sha = item.get("_native_id")
+            if (
+                not is_verifiable_sha(sha)
+                or native_sha != sha
+                or not entity_id.endswith(f":{sha}")
+            ):
+                raise StrictNormalizationError("commit SHA does not match its canonical/native identity")
         occurred_at = item.get("occurred_at")
         if parse_timestamp(occurred_at) is None or not in_window(occurred_at, request):
             raise StrictNormalizationError(f"{source} item has an invalid or out-of-window occurred_at")
@@ -820,6 +1249,7 @@ class ResourceProvider:
         source: str,
         normalizer: Callable[[dict[str, Any]], dict[str, Any]],
         *,
+        target: RepositoryTarget | None = None,
         filter_item: Callable[[Any], bool] | None = None,
     ) -> SourceResult:
         """Normalize valid records while turning malformed items into diagnostics."""
@@ -830,7 +1260,15 @@ class ResourceProvider:
             try:
                 if filter_item is not None and not filter_item(item):
                     continue
-                normalized.append(normalizer(item))
+                normalized_item = normalizer(item)
+                if target is not None:
+                    validate_native_item_repository_identity(
+                        item,
+                        normalized_item,
+                        target,
+                        provider_kind=self.descriptor.kind,
+                    )
+                normalized.append(normalized_item)
             except Exception as exc:
                 dropped += 1
                 failure_classes.add(

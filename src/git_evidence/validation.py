@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from importlib.resources import files
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -14,8 +14,16 @@ from jsonschema.exceptions import SchemaError
 
 from .model import COLLECTION_KEYS, collection
 from .privacy import iter_privacy_violations
-from .providers.base import ACTIVITY_SOURCES, RESOURCE_SOURCES
+from .providers.base import (
+    ACTIVITY_SOURCES,
+    OPTIONAL_COVERAGE_WARNING_CODE,
+    OPERATIONAL_FAILURE_CLASSES,
+    RESOURCE_SOURCES,
+    RepositoryTarget,
+    is_verifiable_sha,
+)
 from .providers.catalog import PROVIDER_REGISTRY
+from .providers.resource_base import repository_url_matches_target
 
 CAPABILITY_STATES = {"supported", "unsupported", "unavailable", "incomplete"}
 ASSOCIATION_STATES = {"linked", "unlinked", "ambiguous", "unknown"}
@@ -53,6 +61,115 @@ SCHEMA_RESOURCE = "schemas/evidence-bundle-0.1.schema.json"
 RFC3339_DATE_TIME = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
 )
+
+
+def _diagnostic_failure_classes(value: Any) -> set[str]:
+    classes: set[str] = set()
+    if isinstance(value, dict):
+        failure_class = value.get("failure_class")
+        if isinstance(failure_class, str) and failure_class:
+            classes.add(failure_class)
+        failure_classes = value.get("failure_classes")
+        if isinstance(failure_classes, (list, tuple, set)):
+            classes.update(item for item in failure_classes if isinstance(item, str) and item)
+        for child in value.values():
+            classes.update(_diagnostic_failure_classes(child))
+    elif isinstance(value, (list, tuple, set)):
+        for child in value:
+            classes.update(_diagnostic_failure_classes(child))
+    return classes
+
+
+def _required_core_coverage_missing(
+    coverage: dict[str, Any],
+    *,
+    repository_ids: Iterable[str] | None = None,
+    provider_ids_by_repository: Mapping[str, str] | None = None,
+) -> bool:
+    required_sources = coverage.get("required_sources")
+    if not isinstance(required_sources, list) or any(
+        source not in required_sources for source in RESOURCE_SOURCES
+    ):
+        return True
+    observations = coverage.get("observations")
+    if not isinstance(observations, list):
+        return True
+    if repository_ids is None:
+        return any(
+            not any(
+                isinstance(observation, dict)
+                and observation.get("source") == source
+                for observation in observations
+            )
+            for source in RESOURCE_SOURCES
+        )
+    for repository_id in repository_ids:
+        expected_provider_id = (
+            provider_ids_by_repository.get(repository_id)
+            if provider_ids_by_repository is not None
+            else None
+        )
+        for source in RESOURCE_SOURCES:
+            if not any(
+                isinstance(observation, dict)
+                and observation.get("source") == source
+                and observation.get("repository_id") == repository_id
+                and (
+                    expected_provider_id is None
+                    or observation.get("provider_id") == expected_provider_id
+                )
+                and observation.get("status") == "supported"
+                for observation in observations
+            ):
+                return True
+    return False
+
+
+def has_blocking_core_coverage(
+    coverage: Any,
+    *,
+    repository_ids: Iterable[str] | None = None,
+    provider_ids_by_repository: Mapping[str, str] | None = None,
+) -> bool:
+    """Return whether required core coverage is missing or failed closed."""
+    if not isinstance(coverage, dict):
+        return True
+    if _required_core_coverage_missing(
+        coverage,
+        repository_ids=repository_ids,
+        provider_ids_by_repository=provider_ids_by_repository,
+    ):
+        return True
+    fatal = coverage.get("fatal")
+    if isinstance(fatal, list) and fatal:
+        return True
+    for observation in coverage.get("observations", []):
+        if (
+            isinstance(observation, dict)
+            and observation.get("source") in (*RESOURCE_SOURCES, *ACTIVITY_SOURCES)
+            and (
+                (
+                    observation.get("source") in RESOURCE_SOURCES
+                    and (
+                        observation.get("status") != "supported"
+                        or bool(
+                            _diagnostic_failure_classes(observation.get("diagnostics"))
+                            & OPERATIONAL_FAILURE_CLASSES
+                        )
+                    )
+                )
+                or (
+                    observation.get("source") in ACTIVITY_SOURCES
+                    and "privacy_violation"
+                    in _diagnostic_failure_classes(observation.get("diagnostics"))
+                )
+            )
+        ):
+            return True
+    for failure in coverage.get("group_failures", []):
+        if isinstance(failure, dict) and failure.get("source") in RESOURCE_SOURCES:
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -426,6 +543,120 @@ def _provider_id_from_entity_id(
     return None
 
 
+def _canonical_repository_prefix(
+    collection_key: str,
+    repository_id: str,
+    provider: dict[str, Any],
+) -> str | None:
+    """Build an entity prefix from the complete canonical repository ID."""
+    kind = provider.get("kind")
+    instance = provider.get("instance")
+    if not isinstance(kind, str) or not isinstance(instance, str):
+        return None
+    provider_repository_prefix = f"repo:{kind}:{instance}:"
+    if not repository_id.startswith(provider_repository_prefix):
+        return None
+    repository_segment = repository_id[len(provider_repository_prefix):]
+    if not repository_segment:
+        return None
+    singular = {
+        "work_items": "work_item",
+        "change_requests": "change_request",
+        "ref_changes": "ref_change",
+    }.get(collection_key, collection_key.rstrip("s"))
+    return f"{singular}:{kind}:{instance}:{repository_segment}:"
+
+
+def _repository_target_from_id(
+    repository_id: str,
+    provider: dict[str, Any],
+) -> RepositoryTarget | None:
+    kind = provider.get("kind")
+    instance = provider.get("instance")
+    if not isinstance(kind, str) or not isinstance(instance, str):
+        return None
+    prefix = f"repo:{kind}:{instance}:"
+    if not repository_id.startswith(prefix):
+        return None
+    repository_segment = repository_id[len(prefix):]
+    if "/" not in repository_segment:
+        return None
+    owner, name = repository_segment.rsplit("/", 1)
+    if not owner or not name:
+        return None
+    try:
+        return RepositoryTarget(kind, instance, owner, name)
+    except ValueError:
+        return None
+
+
+def _canonical_repository_url_values(repository: dict[str, Any]) -> list[Any]:
+    values: list[Any] = []
+    for field in (
+        "web_url",
+        "html_url",
+        "repository_url",
+        "repo_url",
+        "project_url",
+        "api_url",
+        "url",
+    ):
+        if field in repository and repository[field] is not None:
+            values.append(repository[field])
+    links = repository.get("_links")
+    if isinstance(links, dict):
+        values.extend(value for value in links.values() if value is not None)
+    return values
+
+
+def _validate_canonical_repository_identity(
+    repository_id: str,
+    repository: dict[str, Any],
+    provider: dict[str, Any],
+    issues: list[ValidationIssue],
+) -> None:
+    target = _repository_target_from_id(repository_id, provider)
+    if target is None:
+        return
+    expected_full_name = f"{target.owner}/{target.name}"
+    identity_values = [
+        repository[field]
+        for field in ("full_name", "path_with_namespace")
+        if field in repository
+    ]
+    if not identity_values or any(
+        not isinstance(value, str) or value.strip() != expected_full_name
+        for value in identity_values
+    ):
+        _issue(
+            issues,
+            "repository.identity",
+            f"repository {repository_id} full_name/path identity does not match its canonical target",
+        )
+    if "name" in repository and (
+        not isinstance(repository["name"], str) or repository["name"].strip() != target.name
+    ):
+        _issue(
+            issues,
+            "repository.identity",
+            f"repository {repository_id} name does not match its canonical target",
+        )
+    url_values = _canonical_repository_url_values(repository)
+    if not url_values:
+        _issue(
+            issues,
+            "repository.url_missing",
+            f"repository {repository_id} has no verifiable canonical URL",
+        )
+    for value in url_values:
+        if not isinstance(value, str) or not repository_url_matches_target(value, target):
+            _issue(
+                issues,
+                "repository.url_identity",
+                f"repository {repository_id} URL does not match its canonical target",
+            )
+
+
 def _entity_provider_id(
     subject_type: str,
     item: dict[str, Any],
@@ -507,6 +738,7 @@ def _validate_provenance(
                 "repository.provenance",
                 f"repository {repository_id} does not match provider {provider_id}",
             )
+        _validate_canonical_repository_identity(repository_id, repository, provider, issues)
 
     entity_collections = tuple(
         key for key in COLLECTION_KEYS if key not in {"providers", "repositories", "evidence", "facts"}
@@ -554,6 +786,17 @@ def _validate_provenance(
                     issues,
                     "entity.provenance",
                     f"{collection_key} {entity_id} id does not match provider {provider_id}",
+                )
+            expected_repository_prefix = _canonical_repository_prefix(
+                collection_key,
+                repository_id,
+                provider,
+            ) if isinstance(repository_id, str) else None
+            if expected_repository_prefix and not entity_id.startswith(expected_repository_prefix):
+                _issue(
+                    issues,
+                    "entity.repository_binding",
+                    f"{collection_key} {entity_id} canonical repository does not match {repository_id}",
                 )
 
     for evidence_id, evidence in indexes.get("evidence", {}).items():
@@ -631,6 +874,16 @@ def _validate_coverage(
     if not isinstance(coverage, dict):
         _issue(issues, "coverage.missing", "coverage must be an object")
         return
+    provider_ids_by_repository: dict[str, str] = {}
+    for repository_id in scope_repository_ids:
+        repository = indexes.get("repositories", {}).get(repository_id)
+        provider_id = (
+            _entity_provider_id("repository", repository, indexes)
+            if isinstance(repository, dict)
+            else None
+        )
+        if isinstance(provider_id, str) and provider_id:
+            provider_ids_by_repository[repository_id] = provider_id
     required_sources = coverage.get("required_sources")
     observations = coverage.get("observations")
     if not isinstance(required_sources, list) or not all(
@@ -685,7 +938,102 @@ def _validate_coverage(
                 "coverage.group_failure_class",
                 f"coverage.group_failures[{position}] has invalid failure_class: {failure.get('failure_class')!r}",
             )
+    warnings = coverage.get("warnings", [])
+    if not isinstance(warnings, list):
+        _issue(issues, "coverage.warnings_shape", "coverage.warnings must be an array")
+        warnings = []
+    warning_groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for position, warning in enumerate(warnings):
+        if not isinstance(warning, dict):
+            _issue(issues, "coverage.warning_shape", f"coverage.warnings[{position}] must be an object")
+            continue
+        if warning.get("code") != OPTIONAL_COVERAGE_WARNING_CODE:
+            _issue(
+                issues,
+                "coverage.warning_code",
+                f"coverage.warnings[{position}] has invalid code: {warning.get('code')!r}",
+            )
+        source = warning.get("source")
+        if source not in ACTIVITY_SOURCES:
+            _issue(
+                issues,
+                "coverage.warning_source",
+                f"coverage.warnings[{position}] must reference an optional activity/ref source",
+            )
+        status = warning.get("status")
+        if status not in {"unsupported", "unavailable", "incomplete"}:
+            _issue(
+                issues,
+                "coverage.warning_status",
+                f"coverage.warnings[{position}] has invalid status: {status!r}",
+            )
+        provider_id = warning.get("provider_id")
+        repository_id = warning.get("repository_id")
+        if not isinstance(provider_id, str) or not provider_id.strip():
+            _issue(
+                issues,
+                "coverage.warning_provider_required",
+                f"coverage.warnings[{position}] must declare a provider_id",
+            )
+        elif provider_id not in indexes.get("providers", {}):
+            _issue(
+                issues,
+                "coverage.warning_provider_unknown",
+                f"coverage.warnings[{position}] references unknown provider: {provider_id}",
+            )
+        if not isinstance(repository_id, str) or not repository_id.strip():
+            _issue(
+                issues,
+                "coverage.warning_repository_required",
+                f"coverage.warnings[{position}] must declare a repository_id",
+            )
+        elif repository_id not in scope_repository_ids:
+            _issue(
+                issues,
+                "coverage.warning_repository_outside",
+                f"coverage.warnings[{position}] references repository outside the allowlist: {repository_id}",
+            )
+        message = warning.get("message")
+        if message is not None and (not isinstance(message, str) or not message.strip()):
+            _issue(
+                issues,
+                "coverage.warning_message",
+                f"coverage.warnings[{position}].message must be a non-empty string when present",
+            )
+        failure_class = warning.get("failure_class")
+        if failure_class is not None and (
+            not isinstance(failure_class, str) or failure_class not in FAILURE_CLASSES
+        ):
+            _issue(
+                issues,
+                "coverage.warning_failure_class",
+                f"coverage.warnings[{position}] has invalid failure_class: {failure_class!r}",
+            )
+        failure_classes = warning.get("failure_classes")
+        if failure_classes is not None and (
+            not isinstance(failure_classes, list)
+            or not failure_classes
+            or any(not isinstance(value, str) or value not in FAILURE_CLASSES for value in failure_classes)
+        ):
+            _issue(
+                issues,
+                "coverage.warning_failure_classes",
+                f"coverage.warnings[{position}] has invalid failure_classes: {failure_classes!r}",
+            )
+        if (
+            isinstance(source, str)
+            and source in ACTIVITY_SOURCES
+            and isinstance(provider_id, str)
+            and provider_id in indexes.get("providers", {})
+            and isinstance(repository_id, str)
+            and repository_id in scope_repository_ids
+        ):
+            key = (source, repository_id, provider_id)
+            if key in warning_groups:
+                _issue(issues, "coverage.warning_duplicate", f"duplicate coverage warning: {key}")
+            warning_groups.setdefault(key, []).append(warning)
     by_group: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    optional_privacy_observations: list[dict[str, Any]] = []
     for position, observation in enumerate(observations):
         if not isinstance(observation, dict):
             _issue(issues, "coverage.observation_shape", f"coverage.observations[{position}] must be an object")
@@ -725,6 +1073,18 @@ def _validate_coverage(
                         "coverage.failure_classes",
                         f"coverage {source} has invalid failure_classes: {failure_classes!r}",
                     )
+                operational_failures = (
+                    _diagnostic_failure_classes(diagnostics) & OPERATIONAL_FAILURE_CLASSES
+                )
+                if source in RESOURCE_SOURCES and state == "supported" and operational_failures:
+                    _issue(
+                        issues,
+                        "coverage.supported_operational_failure",
+                        f"core coverage {source} is marked supported despite operational failures: "
+                        + ", ".join(sorted(operational_failures)),
+                    )
+                if source in ACTIVITY_SOURCES and "privacy_violation" in operational_failures:
+                    optional_privacy_observations.append(observation)
         repository_id = observation.get("repository_id")
         if not isinstance(repository_id, str) or not repository_id.strip():
             _issue(
@@ -784,6 +1144,67 @@ def _validate_coverage(
                     "coverage.provenance",
                     f"coverage {source} repository does not match provider {provider_id}",
                 )
+    for (source, repository_id, provider_id), matches in by_group.items():
+        if source not in ACTIVITY_SOURCES:
+            continue
+        warning_key = (source, repository_id, provider_id)
+        for observation in matches:
+            if observation.get("status") != "supported" and warning_key not in warning_groups:
+                _issue(
+                    issues,
+                    "coverage.warning_missing",
+                    f"optional source requires a coverage warning: {source} for {repository_id}",
+                )
+    for warning_key, warning_items in warning_groups.items():
+        matches = by_group.get(warning_key, [])
+        if not matches:
+            _issue(
+                issues,
+                "coverage.warning_observation_missing",
+                f"coverage warning has no matching observation: {warning_key[0]} for {warning_key[1]}",
+            )
+            continue
+        non_supported_matches = [
+            observation for observation in matches if observation.get("status") != "supported"
+        ]
+        observed_failure_classes: set[str] = set()
+        observed_notes: list[str] = []
+        for observation in non_supported_matches:
+            observed_failure_classes.update(
+                _diagnostic_failure_classes(observation.get("diagnostics"))
+            )
+            note = observation.get("note")
+            if isinstance(note, str) and note.strip() and note not in observed_notes:
+                observed_notes.append(note)
+        for warning in warning_items:
+            if not non_supported_matches or any(
+                observation.get("status") != warning.get("status")
+                for observation in non_supported_matches
+            ):
+                _issue(
+                    issues,
+                    "coverage.warning_status_mismatch",
+                    f"coverage warning status does not match observation: {warning_key[0]} for {warning_key[1]}",
+                )
+            warning_failure_classes = _diagnostic_failure_classes(warning)
+            if warning_failure_classes != observed_failure_classes:
+                _issue(
+                    issues,
+                    "coverage.warning_diagnostics",
+                    f"coverage warning diagnostics do not fully cover observations: "
+                    f"{warning_key[0]} for {warning_key[1]}",
+                )
+            warning_message = warning.get("message")
+            if observed_notes and (
+                not isinstance(warning_message, str)
+                or any(note not in warning_message for note in observed_notes)
+            ):
+                _issue(
+                    issues,
+                    "coverage.warning_message_missing",
+                    f"coverage warning message does not cover observations: "
+                    f"{warning_key[0]} for {warning_key[1]}",
+                )
     for source in required_sources:
         for repository_id in sorted(scope_repository_ids):
             repository = indexes.get("repositories", {}).get(repository_id)
@@ -812,6 +1233,32 @@ def _validate_coverage(
         _issue(issues, "coverage.fatal_shape", "coverage.fatal must be an array")
     elif fatal:
         _issue(issues, "coverage.fatal", f"coverage contains fatal observations: {len(fatal)}")
+    for observation in optional_privacy_observations:
+        provider_id = observation.get("provider_id")
+        repository_id = observation.get("repository_id")
+        provider = indexes.get("providers", {}).get(provider_id) if isinstance(provider_id, str) else None
+        fatal_match = any(
+            isinstance(item, dict)
+            and isinstance(provider, dict)
+            and item.get("provider") == provider.get("kind")
+            and item.get("instance") == provider.get("instance")
+            and item.get("repository") == repository_id
+            and item.get("source") == observation.get("source")
+            and item.get("failure_class") == "privacy_violation"
+            for item in (fatal if isinstance(fatal, list) else [])
+        )
+        if not fatal_match:
+            _issue(
+                issues,
+                "coverage.optional_privacy_fatal",
+                f"optional privacy violation is missing a fatal ledger entry: {observation.get('source')} for {repository_id}",
+            )
+        if coverage.get("allow_publish") is True:
+            _issue(
+                issues,
+                "coverage.publish_blocked",
+                "optional privacy violations cannot coexist with allow_publish=true",
+            )
     for position, failure in enumerate(group_failures):
         if not isinstance(failure, dict):
             continue
@@ -883,23 +1330,23 @@ def _validate_coverage(
                     )
                 diagnostics = observation.get("diagnostics")
                 diagnostic_classes: set[str] = set()
-                def collect_diagnostic_classes(value: Any) -> None:
+                def collect_diagnostic_classes(value: Any, accumulator: set[str]) -> None:
                     if isinstance(value, dict):
                         diagnostic_class = value.get("failure_class")
                         if isinstance(diagnostic_class, str):
-                            diagnostic_classes.add(diagnostic_class)
-                        diagnostic_classes.update(
+                            accumulator.add(diagnostic_class)
+                        accumulator.update(
                             item
                             for item in value.get("failure_classes", [])
                             if isinstance(item, str)
                         )
                         for child in value.values():
-                            collect_diagnostic_classes(child)
+                            collect_diagnostic_classes(child, accumulator)
                     elif isinstance(value, list):
                         for child in value:
-                            collect_diagnostic_classes(child)
+                            collect_diagnostic_classes(child, accumulator)
 
-                collect_diagnostic_classes(diagnostics)
+                collect_diagnostic_classes(diagnostics, diagnostic_classes)
                 if isinstance(failure_class, str) and failure_class not in diagnostic_classes:
                     _issue(
                         issues,
@@ -922,13 +1369,23 @@ def _validate_coverage(
                     "coverage.group_failure_fatal",
                     f"required group failure {position} is missing a matching fatal ledger entry",
                 )
-        if coverage.get("allow_publish") is True:
+        if coverage.get("allow_publish") is True and source in RESOURCE_SOURCES:
             _issue(
                 issues,
                 "coverage.publish_blocked",
                 "coverage.group_failures cannot coexist with allow_publish=true",
             )
-    if coverage.get("allow_publish") is not True:
+    if coverage.get("allow_publish") is True and has_blocking_core_coverage(
+        coverage,
+        repository_ids=scope_repository_ids,
+        provider_ids_by_repository=provider_ids_by_repository,
+    ):
+        _issue(
+            issues,
+            "coverage.publish_blocked",
+            "coverage.allow_publish contradicts blocking core coverage",
+        )
+    elif coverage.get("allow_publish") is not True:
         _issue(issues, "coverage.publish_blocked", "coverage.allow_publish is not true")
 
 
@@ -999,6 +1456,13 @@ def validate_bundle(
                     f"{key} {entity_id} occurred_at must be within "
                     f"[{window.get('start')}, {window.get('end')})",
                 )
+    for entity_id, item in indexes.get("commits", {}).items():
+        sha = item.get("sha")
+        if not is_verifiable_sha(sha):
+            code = "commit.sha_missing" if not isinstance(sha, str) or not sha.strip() else "commit.sha_unverifiable"
+            _issue(issues, code, f"commit {entity_id} has no verifiable sha")
+        elif not entity_id.endswith(f":{sha}"):
+            _issue(issues, "commit.sha_mismatch", f"commit {entity_id} sha does not match its canonical id")
     for entity_id, item in indexes.get("ref_changes", {}).items():
         association = item.get("change_association")
         if not isinstance(association, str) or association not in ASSOCIATION_STATES:

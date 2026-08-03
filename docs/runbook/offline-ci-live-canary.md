@@ -77,12 +77,17 @@ PYTHONPATH=src python -m git_evidence render /tmp/live-bundle.json \
 
 The collection exit status, schema/semantic validation, required-source
 coverage, privacy gate, and offline render must all succeed before a canary is
-eligible for any publication workflow. A provider group failure, incomplete
-required source, unsafe URL/payload, missing secret, or validation error is a
-failed canary. Its diagnostic bundle may be retained outside the repository,
-but it must keep `coverage.allow_publish: false` where a bundle exists and must
-never be described as publishable. A canary that was not executed is simply
-**unverified**; offline CI cannot substitute for it.
+eligible for any publication workflow. A core provider group failure,
+incomplete required source, unsafe URL/payload, missing secret, or validation
+error is a failed canary. An ordinary optional activity/ref malformed, typed,
+transport, or capability failure is not by itself a failed canary when the
+core resources are complete, but its `coverage.warnings[]` entry must remain
+visible. An optional `privacy_violation` is fail-closed and is a failed
+canary even when core resources are complete. A diagnostic bundle with a
+core failure may be retained outside the repository, but it must keep
+`coverage.allow_publish: false` and never be described as publishable. A
+canary that was not executed is simply **unverified**; offline CI cannot
+substitute for it.
 
 The current repository validation does not execute a live canary. No GitHub,
 GitLab, or Gitee live-provider result should be inferred from the offline test

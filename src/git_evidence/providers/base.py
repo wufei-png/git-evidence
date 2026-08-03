@@ -26,6 +26,186 @@ RESOURCE_SOURCES = (
     "releases",
 )
 ACTIVITY_SOURCES = ("activities", "ref_changes")
+OPTIONAL_COVERAGE_WARNING_CODE = "optional_coverage_warning"
+# Optional warning status is an evidence-quality severity, not a success flag.
+# Keep the most conservative state when observations are combined in either
+# order so warning output cannot depend on provider/group iteration order.
+OPTIONAL_STATUS_PRIORITY = {
+    "unsupported": 1,
+    "unavailable": 2,
+    "incomplete": 3,
+}
+OPERATIONAL_FAILURE_CLASSES = frozenset(
+    {
+        "permission_denied",
+        "rate_limited",
+        "service_error",
+        "not_found",
+        "request_rejected",
+        "network_error",
+        "transport_error",
+        "fixture_missing",
+        "http_error",
+        "malformed_response",
+        "provider_not_ready",
+        "unexpected_error",
+        "unexpected_normalizer_error",
+        "budget_exhausted",
+        "privacy_violation",
+    }
+)
+UNVERIFIABLE_SHA_SENTINELS = frozenset(
+    {
+        "missing",
+        "na",
+        "n/a",
+        "nil",
+        "none",
+        "not available",
+        "not provided",
+        "null",
+        "undefined",
+        "unknown",
+        "unavailable",
+    }
+)
+
+
+def is_verifiable_sha(value: Any) -> bool:
+    """Return whether a commit SHA is a non-sentinel string value."""
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip().lower()
+    return bool(normalized) and normalized not in UNVERIFIABLE_SHA_SENTINELS
+
+
+def _coverage_failure_classes(value: Any) -> set[str]:
+    classes: set[str] = set()
+    if isinstance(value, Mapping):
+        failure_class = value.get("failure_class")
+        if isinstance(failure_class, str) and failure_class:
+            classes.add(failure_class)
+        failure_classes = value.get("failure_classes")
+        if isinstance(failure_classes, (list, tuple, set)):
+            classes.update(item for item in failure_classes if isinstance(item, str) and item)
+        for child in value.values():
+            classes.update(_coverage_failure_classes(child))
+    elif isinstance(value, (list, tuple, set)):
+        for child in value:
+            classes.update(_coverage_failure_classes(child))
+    return classes
+
+
+def optional_coverage_warning(observation: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Build a machine-readable warning for a non-complete optional source."""
+    source = observation.get("source")
+    status = observation.get("status")
+    provider_id = observation.get("provider_id")
+    repository_id = observation.get("repository_id")
+    if (
+        source not in ACTIVITY_SOURCES
+        or status == "supported"
+        or not isinstance(provider_id, str)
+        or not isinstance(repository_id, str)
+    ):
+        return None
+    warning: dict[str, Any] = {
+        "code": OPTIONAL_COVERAGE_WARNING_CODE,
+        "source": source,
+        "provider_id": provider_id,
+        "repository_id": repository_id,
+        "status": status,
+    }
+    note = observation.get("note")
+    if isinstance(note, str) and note.strip():
+        warning["message"] = note
+    failure_classes = sorted(_coverage_failure_classes(observation.get("diagnostics")))
+    if len(failure_classes) == 1:
+        warning["failure_class"] = failure_classes[0]
+    elif failure_classes:
+        warning["failure_classes"] = failure_classes
+    return warning
+
+
+def append_optional_coverage_warning(
+    coverage: dict[str, Any], observation: Mapping[str, Any]
+) -> None:
+    warning = optional_coverage_warning(observation)
+    if warning is None:
+        return
+    merge_optional_coverage_warning(coverage, warning)
+
+
+def merge_optional_coverage_warning(
+    coverage: dict[str, Any], warning: Mapping[str, Any]
+) -> None:
+    """Insert or monotonically enrich one optional coverage warning."""
+    if warning.get("code") != OPTIONAL_COVERAGE_WARNING_CODE:
+        return
+    warnings = coverage.setdefault("warnings", [])
+    if not isinstance(warnings, list):
+        warnings = []
+        coverage["warnings"] = warnings
+    fields = ("code", "source", "provider_id", "repository_id")
+    observation_fields = ("source", "provider_id", "repository_id")
+    key = tuple(warning.get(field) for field in fields)
+    statuses = [
+        status
+        for status in (warning.get("status"),)
+        if status in OPTIONAL_STATUS_PRIORITY
+    ]
+    for existing in warnings:
+        if not isinstance(existing, dict) or tuple(existing.get(field) for field in fields) != key:
+            continue
+        existing_status = existing.get("status")
+        if existing_status in OPTIONAL_STATUS_PRIORITY:
+            statuses.append(existing_status)
+        if statuses:
+            existing["status"] = max(statuses, key=OPTIONAL_STATUS_PRIORITY.__getitem__)
+        failure_classes = _coverage_failure_classes(existing) | _coverage_failure_classes(warning)
+        if len(failure_classes) == 1:
+            existing["failure_class"] = next(iter(failure_classes))
+            existing.pop("failure_classes", None)
+        elif failure_classes:
+            existing.pop("failure_class", None)
+            existing["failure_classes"] = sorted(failure_classes)
+        existing_message = existing.get("message")
+        incoming_message = warning.get("message")
+        if isinstance(existing_message, str) and existing_message.strip():
+            if isinstance(incoming_message, str) and incoming_message.strip():
+                if existing_message in incoming_message:
+                    existing["message"] = incoming_message
+                elif incoming_message not in existing_message:
+                    existing["message"] = f"{existing_message}; {incoming_message}"
+        elif isinstance(incoming_message, str) and incoming_message.strip():
+            existing["message"] = incoming_message
+        if statuses:
+            observations = coverage.get("observations")
+            if isinstance(observations, list):
+                for observation in observations:
+                    if (
+                        isinstance(observation, dict)
+                        and tuple(observation.get(field) for field in observation_fields)
+                        == key[1:]
+                        and observation.get("status") in OPTIONAL_STATUS_PRIORITY
+                    ):
+                        observation["status"] = existing["status"]
+        return
+    new_warning = dict(warning)
+    if statuses:
+        new_warning["status"] = max(statuses, key=OPTIONAL_STATUS_PRIORITY.__getitem__)
+    warnings.append(new_warning)
+    if statuses:
+        observations = coverage.get("observations")
+        if isinstance(observations, list):
+            for observation in observations:
+                if (
+                    isinstance(observation, dict)
+                    and tuple(observation.get(field) for field in observation_fields)
+                    == key[1:]
+                    and observation.get("status") in OPTIONAL_STATUS_PRIORITY
+                ):
+                    observation["status"] = new_warning["status"]
 
 
 @dataclass(frozen=True)

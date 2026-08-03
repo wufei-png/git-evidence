@@ -27,9 +27,10 @@ report can answer:
 - Is a commit associated with a change request, or is that association merely
   unknown?
 
-The project therefore fails closed for publishable output. It may leave an
-evidence bundle and diagnostics for repair, but it must not turn incomplete
-collection into a confident report.
+The project therefore fails closed when core resource evidence is incomplete or
+unverifiable. It may leave an evidence bundle and diagnostics for repair, while
+an otherwise complete core report may still publish with explicit warnings for
+optional activity/ref gaps.
 
 ## Current decisions
 
@@ -82,9 +83,13 @@ Actor names remain anonymous by default. To render a name, set
 GitLab, GitHub, and Gitee each have an experimental resource-API collector in
 this slice. They are exercised with recorded responses and emit explicit
 coverage for the optional activity/ref surface; live provider behavior is not
-advertised as production-complete yet. A blocked collection still writes its
-bundle when `--output` is provided, but exits non-zero so diagnostics can be
-repaired before rendering.
+advertised as production-complete yet. A collection with incomplete core
+resources still writes its bundle when `--output` is provided, but exits
+non-zero so diagnostics can be repaired before rendering. Ordinary optional
+activity/ref malformed, typed, transport, and capability failures remain
+publishable and appear in `coverage.warnings` and the rendered coverage
+section; an optional `privacy_violation` remains fail-closed with a fatal
+ledger entry.
 
 The public replay inputs live under
 [`fixtures/provider_contract/`](fixtures/provider_contract/). They contain
@@ -100,7 +105,10 @@ Live bundles are kept outside the public fixture set.
 With `include_activity_api: true`, GitLab and GitHub may add bounded push/ref
 observations marked `incomplete`; Gitee remains explicitly `unsupported` for
 that optional surface. No provider is allowed to turn these observations into
-a complete push/ref claim.
+a complete push/ref claim, and every non-supported optional observation carries
+an `optional_coverage_warning` entry. Ordinary optional warnings do not close a
+complete core gate; a privacy violation is the explicit security exception and
+does close publication.
 
 ## Status
 

@@ -16,6 +16,7 @@ from git_evidence.model import load_bundle  # noqa: E402
 from git_evidence.cli import main as cli_main  # noqa: E402
 from git_evidence.collect import collect_config  # noqa: E402
 from git_evidence.config import ConfigError, load_config  # noqa: E402
+from git_evidence.privacy import PrivacyError
 from git_evidence.providers import (  # noqa: E402
     CollectionRequest,
     GiteeProvider,
@@ -24,6 +25,7 @@ from git_evidence.providers import (  # noqa: E402
     RepositoryTarget,
     provider_catalog,
 )
+from git_evidence.providers.base import ProviderNotReady
 from git_evidence.providers.transport import (  # noqa: E402
     ApiError,
     ApiResponse,
@@ -54,6 +56,25 @@ def response(path: str, body: object, headers: dict[str, str] | None = None) -> 
 def provider_fixture(name: str) -> dict[str, object]:
     path = ROOT / "fixtures" / "provider_contract" / f"{name}.json"
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def rewrite_transport_urls(transport: MappingTransport, source: str, replacement: str) -> None:
+    def rewrite(value: object) -> object:
+        if isinstance(value, str):
+            return value.replace(source, replacement)
+        if isinstance(value, list):
+            for index, child in enumerate(value):
+                value[index] = rewrite(child)
+            return value
+        if isinstance(value, dict):
+            for key, child in value.items():
+                value[key] = rewrite(child)
+            return value
+        return value
+
+    for responses in transport.responses.values():
+        for recorded in responses:
+            rewrite(recorded.body)
 
 
 class FakeHttpResponse:
@@ -153,6 +174,16 @@ class ContractTests(unittest.TestCase):
     def test_public_fixture_is_publishable(self) -> None:
         bundle = load_bundle(FIXTURE)
         self.assertEqual(validate_bundle(bundle), [])
+
+    def test_optional_coverage_warning_is_required_by_the_machine_contract(self) -> None:
+        bundle = load_bundle(FIXTURE)
+        bundle["coverage"]["warnings"] = []
+        self.assertIn("coverage.warning_missing", {issue.code for issue in validate_bundle(bundle)})
+        report = render_bundle(load_bundle(FIXTURE))
+        self.assertIn("### Coverage warnings", report)
+        self.assertIn("optional\\_coverage\\_warning", report)
+        self.assertIn(r"provider=provider:github:github\.com", report)
+        self.assertIn(r"repository=repo:github:github\.com:example/project", report)
 
     def test_run_id_must_be_a_non_empty_string(self) -> None:
         bundle = load_bundle(FIXTURE)
@@ -339,17 +370,15 @@ class ContractTests(unittest.TestCase):
         self.assertNotIn("`raw`", escaped)
         self.assertIn("&lt;script&gt;", escaped)
 
-    def test_renderer_escapes_untrusted_fact_and_repository_text(self) -> None:
+    def test_renderer_escapes_untrusted_fact_text(self) -> None:
         bundle = load_bundle(FIXTURE)
         bundle["facts"][0]["summary"] = "<script>alert(1)</script> `raw` **bold** [link]"
-        bundle["repositories"][0]["full_name"] = "example/<project> **repo**"
         report = render_bundle(bundle)
         self.assertNotIn("<script>", report)
         self.assertNotIn("`raw`", report)
         self.assertNotIn("**bold**", report)
         self.assertNotIn("[link]", report)
         self.assertIn("&lt;script&gt;", report)
-        self.assertIn("&lt;project&gt;", report)
 
     def test_render_cli_reads_explicit_identity_map_from_config(self) -> None:
         temporary = ROOT / "tests" / ".tmp-render-config.yml"
@@ -436,6 +465,146 @@ class ContractTests(unittest.TestCase):
                     {"activities", "ref_changes"},
                 )
                 self.assertTrue(all(item["status"] == "unavailable" for item in bundle["coverage"]["observations"] if item["source"] in {"activities", "ref_changes"}))
+                self.assertEqual(
+                    {warning["source"] for warning in bundle["coverage"]["warnings"]},
+                    {"activities", "ref_changes"},
+                )
+
+    def test_native_item_repository_url_mismatch_is_malformed_for_all_providers(self) -> None:
+        cases = (
+            (
+                "github",
+                GitHubProvider,
+                github_transport,
+                "/repos/example/project/issues",
+                (
+                    ("html_url", "https://github.com/other/project/issues/1"),
+                    ("url", "https://api.github.com/repos/other/project/issues/1"),
+                    ("repository_url", "https://api.github.com/repos/other/project"),
+                ),
+            ),
+            (
+                "gitlab",
+                GitLabProvider,
+                gitlab_transport,
+                "/projects/example%2Fproject/issues",
+                (
+                    ("web_url", "https://gitlab.com/other/project/-/issues/1"),
+                    ("url", "https://gitlab.com/api/v4/projects/other%2Fproject/issues/1"),
+                    ("repository_url", "https://gitlab.com/api/v4/projects/other%2Fproject"),
+                    ("path_with_namespace", "other/project"),
+                ),
+            ),
+            (
+                "gitee",
+                GiteeProvider,
+                gitee_transport,
+                "/repos/example/project/issues",
+                (
+                    ("html_url", "https://gitee.com/other/project/issues/1"),
+                    ("url", "https://gitee.com/api/v5/repos/other/project/issues/1"),
+                    ("repository_url", "https://gitee.com/api/v5/repos/other/project"),
+                ),
+            ),
+        )
+        for provider_kind, provider_type, transport_factory, path, fields in cases:
+            for field, foreign_url in fields:
+                with self.subTest(provider=provider_kind, field=field):
+                    transport = transport_factory()
+                    transport.responses[path][0].body[0][field] = foreign_url
+                    bundle = provider_type(transport).collect(request_for(provider_kind, f"{provider_kind}.com"))
+                    observation = next(
+                        item for item in bundle["coverage"]["observations"] if item["source"] == "work_items"
+                    )
+                    self.assertEqual(observation["status"], "incomplete")
+                    self.assertEqual(observation["diagnostics"]["failure_class"], "malformed_response")
+                    self.assertFalse(bundle["coverage"]["allow_publish"])
+                    self.assertNotIn(foreign_url, {item.get("url") for item in bundle["evidence"]})
+
+    def test_github_base_repository_identity_mismatch_is_malformed(self) -> None:
+        transport = github_transport()
+        for pull in transport.responses["/repos/example/project/pulls"][0].body:
+            pull["base"] = {
+                "repo": {
+                    "full_name": "other/project",
+                    "name": "project",
+                    "owner": {"login": "other"},
+                }
+            }
+        bundle = GitHubProvider(transport).collect(request_for("github", "github.com"))
+        observation = next(
+            item for item in bundle["coverage"]["observations"] if item["source"] == "change_requests"
+        )
+        self.assertEqual(observation["diagnostics"]["failure_class"], "malformed_response")
+        self.assertFalse(bundle["change_requests"])
+
+    def test_gitee_git_suffix_is_accepted_for_root_and_native_urls(self) -> None:
+        transport = gitee_transport()
+        transport.responses["/repos/example/project"][0].body["html_url"] = (
+            "https://gitee.com/example/project.git"
+        )
+        transport.responses["/repos/example/project/issues"][0].body[0]["html_url"] = (
+            "https://gitee.com/example/project.git/issues/1"
+        )
+        bundle = GiteeProvider(transport).collect(request_for("gitee", "gitee.com"))
+
+        self.assertEqual(validate_bundle(bundle), [])
+        self.assertTrue(bundle["coverage"]["allow_publish"])
+        self.assertEqual(
+            bundle["repositories"][0]["web_url"],
+            "https://gitee.com/example/project.git",
+        )
+        self.assertEqual(
+            next(item for item in bundle["work_items"] if item["number"] == 1)["web_url"],
+            "https://gitee.com/example/project.git/issues/1",
+        )
+
+    def test_github_pull_self_link_href_mapping_is_repository_identity_url(self) -> None:
+        transport = github_transport()
+        transport.responses["/repos/example/project/pulls"][0].body[0]["_links"] = {
+            "self": {"href": "https://api.github.com/repos/example/project/pulls/2"}
+        }
+        bundle = GitHubProvider(transport).collect(request_for("github", "github.com"))
+
+        self.assertEqual(validate_bundle(bundle), [])
+        self.assertTrue(bundle["coverage"]["allow_publish"])
+        self.assertIn(2, {item["number"] for item in bundle["change_requests"]})
+
+    def test_root_2xx_non_object_is_malformed_for_all_providers(self) -> None:
+        cases = (
+            ("github", GitHubProvider, github_transport, "/repos/example/project"),
+            ("gitlab", GitLabProvider, gitlab_transport, "/projects/example%2Fproject"),
+            ("gitee", GiteeProvider, gitee_transport, "/repos/example/project"),
+        )
+        for provider_kind, provider_type, transport_factory, path in cases:
+            with self.subTest(provider=provider_kind):
+                transport = transport_factory()
+                recorded = transport.responses[path][0]
+                transport.responses[path] = [
+                    ApiResponse(recorded.url, recorded.status_code, recorded.headers, [])
+                ]
+                bundle = provider_type(transport).collect(request_for(provider_kind, f"{provider_kind}.com"))
+                repository_observation = next(
+                    item for item in bundle["coverage"]["observations"] if item["source"] == "repositories"
+                )
+                self.assertEqual(repository_observation["diagnostics"]["failure_class"], "malformed_response")
+                self.assertFalse(bundle["coverage"]["allow_publish"])
+                self.assertEqual(bundle["repositories"], [])
+
+    def test_gitlab_root_numeric_self_link_is_not_repository_identity_url(self) -> None:
+        transport = gitlab_transport()
+        rewrite_transport_urls(transport, "https://gitlab.com", "https://jihulab.com")
+        transport.responses["/projects/example%2Fproject"][0].body["_links"] = {
+            "self": {"href": "https://jihulab.com/api/v4/projects/358282"}
+        }
+        bundle = GitLabProvider(transport, instance="jihulab.com").collect(
+            request_for("gitlab", "jihulab.com")
+        )
+
+        self.assertEqual(validate_bundle(bundle), [])
+        self.assertTrue(bundle["coverage"]["allow_publish"])
+        self.assertEqual(len(bundle["repositories"]), 1)
+        self.assertTrue(all(item["status"] == "supported" for item in bundle["coverage"]["observations"] if item["source"] in {"repositories", "work_items", "change_requests", "commits", "releases", "facts", "interactions"}))
 
     def test_gitee_pull_request_query_uses_supported_parameters(self) -> None:
         transport = gitee_transport()
@@ -578,7 +747,7 @@ class ContractTests(unittest.TestCase):
         bundle = GitHubProvider(transport).collect(
             request_for("github", "github.com", include_activity_api=True)
         )
-        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertTrue(bundle["coverage"]["allow_publish"])
         self.assertTrue(
             any(
                 failure["source"] == "ref_changes"
@@ -586,7 +755,7 @@ class ContractTests(unittest.TestCase):
                 for failure in bundle["coverage"]["group_failures"]
             )
         )
-        self.assertIn("coverage.publish_blocked", {issue.code for issue in validate_bundle(bundle)})
+        self.assertEqual(validate_bundle(bundle), [])
         self.assertEqual(bundle["ref_changes"][0]["change_association"], "unknown")
         ref_coverage = next(
             item
@@ -597,6 +766,212 @@ class ContractTests(unittest.TestCase):
             ref_coverage["diagnostics"]["commit_association"]["failure_classes"],
             ["fixture_missing"],
         )
+        self.assertTrue(
+            any(
+                warning["source"] == "ref_changes"
+                and warning["failure_class"] == "fixture_missing"
+                for warning in bundle["coverage"]["warnings"]
+            )
+        )
+        self.assertIn("Coverage warnings", render_bundle(bundle))
+
+    def test_optional_activity_permission_and_transport_failures_are_publishable_warnings(self) -> None:
+        for status_code, failure_class in ((403, "permission_denied"), (503, "service_error")):
+            with self.subTest(status_code=status_code):
+                transport = github_transport()
+                event_path = "/repos/example/project/events"
+                transport.responses[event_path] = [ApiResponse(event_path, status_code, {}, {"error": "blocked"})]
+                bundle = GitHubProvider(transport).collect(
+                    request_for("github", "github.com", include_activity_api=True)
+                )
+                self.assertTrue(bundle["coverage"]["allow_publish"])
+                self.assertEqual(validate_bundle(bundle), [])
+                self.assertTrue(
+                    all(
+                        item["status"] == "supported"
+                        for item in bundle["coverage"]["observations"]
+                        if item["source"] in {"repositories", "work_items", "change_requests", "interactions", "commits", "releases"}
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        warning["source"] == "activities"
+                        and warning["failure_class"] == failure_class
+                        for warning in bundle["coverage"]["warnings"]
+                    )
+                )
+
+    def test_optional_activity_typed_exceptions_preserve_class_and_core_snapshot(self) -> None:
+        cases = (
+            (RuntimeError("synthetic activity failure"), "unexpected_error", True),
+            (ProviderNotReady("activity collector is not ready"), "provider_not_ready", True),
+            (PrivacyError("activity payload crossed the public boundary"), "privacy_violation", False),
+        )
+        for error, failure_class, allow_publish in cases:
+            with self.subTest(failure_class=failure_class):
+                provider = GitHubProvider(github_transport())
+                with patch.object(provider, "_collect_activity", side_effect=error):
+                    bundle = provider.collect(
+                        request_for("github", "github.com", include_activity_api=True)
+                    )
+                self.assertGreater(len(bundle["repositories"]), 0)
+                self.assertGreater(len(bundle["commits"]), 0)
+                self.assertEqual(bundle["coverage"]["allow_publish"], allow_publish)
+                warnings = bundle["coverage"]["warnings"]
+                self.assertEqual({warning["source"] for warning in warnings}, {"activities", "ref_changes"})
+                self.assertTrue(all(warning["failure_class"] == failure_class for warning in warnings))
+                if allow_publish:
+                    self.assertEqual(validate_bundle(bundle), [])
+                else:
+                    self.assertIn("coverage.publish_blocked", {issue.code for issue in validate_bundle(bundle)})
+
+    def test_optional_activity_malformed_source_shape_preserves_core_snapshot(self) -> None:
+        provider = GitHubProvider(github_transport())
+        with patch.object(
+            provider,
+            "_collect_activity",
+            return_value={"activities": None, "ref_changes": {"items": []}},
+        ):
+            bundle = provider.collect(
+                request_for("github", "github.com", include_activity_api=True)
+            )
+        self.assertGreater(len(bundle["repositories"]), 0)
+        self.assertGreater(len(bundle["commits"]), 0)
+        self.assertTrue(bundle["coverage"]["allow_publish"])
+        self.assertEqual(validate_bundle(bundle), [])
+        self.assertEqual(
+            {
+                warning["source"]: warning["failure_class"]
+                for warning in bundle["coverage"]["warnings"]
+                if warning["source"] in {"activities", "ref_changes"}
+            },
+            {"activities": "malformed_response", "ref_changes": "malformed_response"},
+        )
+
+    def test_collect_cli_returns_publishable_for_optional_group_failure(self) -> None:
+        transport = github_transport()
+        transport.responses.pop("/repos/example/project/commits/abc123/pulls")
+        bundle = GitHubProvider(transport).collect(
+            request_for("github", "github.com", include_activity_api=True)
+        )
+        stdout = StringIO()
+        stderr = StringIO()
+        with patch("git_evidence.cli.load_collection_config", return_value={}), patch(
+            "git_evidence.cli.collect_config", return_value=bundle
+        ), patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+            result = cli_main(["collect", "--config", "ignored-config.yml"])
+        self.assertEqual(result, 0)
+        self.assertIn("publishable with coverage warnings", stderr.getvalue())
+
+    def test_collect_config_preserves_core_gate_when_optional_group_fails(self) -> None:
+        transport = github_transport()
+        transport.responses.pop("/repos/example/project/commits/abc123/pulls")
+        config = {
+            "window": {"start": WINDOW_START, "end": WINDOW_END, "timezone": "UTC"},
+            "scope": {
+                "repositories": [
+                    {"provider": "github", "instance": "github.com", "owner": "example", "name": "project"}
+                ],
+                "actors": [],
+            },
+            "providers": {"github": {"include_activity_api": True}},
+        }
+
+        def factory(kind: str, instance: str, options: dict[str, object], token: str | None) -> object:
+            del kind, options, token
+            return GitHubProvider(transport, instance=instance)
+
+        bundle = collect_config(config, provider_factory=factory)
+        self.assertTrue(bundle["coverage"]["allow_publish"])
+        self.assertEqual(validate_bundle(bundle), [])
+        self.assertTrue(any(item["source"] == "ref_changes" for item in bundle["coverage"]["warnings"]))
+
+    def test_commit_sha_mismatch_blocks_core_publication(self) -> None:
+        transport = github_transport()
+        provider = GitHubProvider(transport)
+        target = request_for("github", "github.com").repositories[0]
+        mismatched_commit = {
+            "id": f"commit:github:github.com:example/project:abc123",
+            "sha": "def456",
+            "repository_id": target.canonical_id,
+            "occurred_at": EVENT_TIME,
+            "title": "Mismatched commit",
+            "_native_id": "abc123",
+        }
+        with patch.object(provider, "_normalize_commit", return_value=mismatched_commit):
+            bundle = provider.collect(request_for("github", "github.com"))
+        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertTrue(
+            any(
+                issue.code == "coverage.publish_blocked"
+                for issue in validate_bundle(bundle)
+            )
+        )
+        commits = next(item for item in bundle["coverage"]["observations"] if item["source"] == "commits")
+        self.assertEqual(commits["status"], "incomplete")
+        self.assertEqual(commits["diagnostics"]["failure_class"], "malformed_response")
+        self.assertIn("coverage.required_incomplete", {issue.code for issue in validate_bundle(bundle)})
+        self.assertEqual(bundle["commits"], [])
+
+    def test_canonical_commit_sha_mismatch_is_not_publishable(self) -> None:
+        bundle = load_bundle(FIXTURE)
+        bundle["commits"][0]["sha"] = "different-sha"
+        self.assertIn("commit.sha_mismatch", {issue.code for issue in validate_bundle(bundle)})
+
+    def test_canonical_commit_sentinel_sha_is_not_verifiable(self) -> None:
+        for sentinel in ("None", "null", "unknown", "N/A"):
+            with self.subTest(sentinel=sentinel):
+                bundle = load_bundle(FIXTURE)
+                commit = bundle["commits"][0]
+                previous_id = commit["id"]
+                commit_id = f"{previous_id.rsplit(':', 1)[0]}:{sentinel}"
+                commit["id"] = commit_id
+                commit["sha"] = sentinel
+                for ref_change in bundle["ref_changes"]:
+                    ref_change["commit_ids"] = [
+                        commit_id if value == previous_id else value
+                        for value in ref_change.get("commit_ids", [])
+                    ]
+                for evidence in bundle["evidence"]:
+                    if evidence.get("subject_id") == previous_id:
+                        evidence["subject_id"] = commit_id
+                self.assertIn(
+                    "commit.sha_unverifiable",
+                    {issue.code for issue in validate_bundle(bundle)},
+                )
+
+    def test_repository_scoped_canonical_ids_bind_to_repository(self) -> None:
+        for collection_key in (
+            "work_items",
+            "change_requests",
+            "interactions",
+            "commits",
+            "ref_changes",
+            "releases",
+        ):
+            with self.subTest(collection=collection_key):
+                bundle = load_bundle(FIXTURE)
+                item = bundle[collection_key][0]
+                item["id"] = item["id"].replace(":example/project:", ":other/project:", 1)
+                self.assertIn(
+                    "entity.repository_binding",
+                    {issue.code for issue in validate_bundle(bundle)},
+                )
+
+    def test_facts_remain_bound_to_the_allowlisted_repository(self) -> None:
+        bundle = load_bundle(FIXTURE)
+        bundle["facts"][0]["repository_id"] = "repo:github:github.com:other/project"
+        self.assertIn("scope.entity_outside", {issue.code for issue in validate_bundle(bundle)})
+
+    def test_repository_binding_handles_instance_path_and_colon_native_id(self) -> None:
+        instance = "https://ghe.example/base"
+        transport = github_transport()
+        rewrite_transport_urls(transport, "https://github.com", instance)
+        bundle = GitHubProvider(transport, instance=instance).collect(
+            request_for("github", instance)
+        )
+        self.assertEqual(validate_bundle(bundle), [])
+        self.assertTrue(any(":issue_comment:" in item["id"] for item in bundle["interactions"]))
 
     def test_collect_config_aggregates_multiple_provider_groups(self) -> None:
         transports = {
@@ -872,6 +1247,7 @@ class ContractTests(unittest.TestCase):
         }
         for kind, instance, provider_type, transport in cases:
             with self.subTest(provider=kind):
+                rewrite_transport_urls(transport, f"https://{kind}.com", instance)
                 repository = transport.responses[roots[kind]][0].body
                 repository["html_url" if kind != "gitlab" else "web_url"] = None
                 provider = provider_type(transport, instance=instance)

@@ -63,9 +63,10 @@ The record of what the run was asked to inspect, what each provider actually
 covered, and which limits, failures, or unknown associations remain.
 
 **Publishable report**:
-A rendered report produced only after the evidence and coverage checks pass.
-An incomplete run may produce diagnostics and an evidence bundle, but not a
-successful publication artifact.
+A rendered report produced only after the evidence and core coverage checks
+pass. An incomplete core run cannot be published; an incomplete optional
+activity/ref source may remain publishable when it carries a machine-readable
+coverage warning.
 
 **Change association**:
 The confidence state connecting a commit or ref change to a change request:

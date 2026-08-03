@@ -78,7 +78,8 @@ The acceptance checks are:
 3. `render` succeeds offline and makes no provider request.
 4. Every allowlisted resource has a coverage observation.
 5. Activity/ref coverage is reported as `incomplete` or `unsupported` unless a
-   provider-specific completeness proof exists.
+   provider-specific completeness proof exists, and each non-supported
+   observation has a matching `coverage.warnings[]` entry.
 6. A ref association is `linked` only after all commit-to-change-request
    checks needed for that ref complete successfully. Partial or failed checks
    remain `unknown`; multiple candidates are `ambiguous`; an empty result is
@@ -92,6 +93,7 @@ secrets:
 ```bash
 jq '.coverage.observations | map({source,status,note,diagnostics})' \
   /tmp/live-bundle.json
+jq '.coverage.warnings' /tmp/live-bundle.json
 jq '.ref_changes | group_by(.change_association) |
   map({state: .[0].change_association, count: length})' \
   /tmp/live-bundle.json

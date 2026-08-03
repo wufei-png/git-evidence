@@ -46,7 +46,8 @@
         "occurred_at": {"type": "string", "format": "date-time"},
         "provider_id": {"type": "string", "minLength": 1},
         "repository_id": {"type": "string", "minLength": 1},
-        "actor_id": {"type": "string", "minLength": 1}
+        "actor_id": {"type": "string", "minLength": 1},
+        "sha": {"type": "string", "minLength": 1}
       },
       "additionalProperties": true
     },
@@ -180,6 +181,61 @@
       },
       "additionalProperties": true
     },
+    "coverage_warning": {
+      "type": "object",
+      "required": ["code", "source", "provider_id", "repository_id", "status"],
+      "properties": {
+        "code": {"const": "optional_coverage_warning"},
+        "source": {"enum": ["activities", "ref_changes"]},
+        "provider_id": {"type": "string", "minLength": 1},
+        "repository_id": {"type": "string", "minLength": 1},
+        "status": {"enum": ["unsupported", "unavailable", "incomplete"]},
+        "message": {"type": "string", "minLength": 1},
+        "failure_class": {
+          "enum": [
+            "permission_denied",
+            "rate_limited",
+            "service_error",
+            "not_found",
+            "request_rejected",
+            "malformed_response",
+            "network_error",
+            "transport_error",
+            "fixture_missing",
+            "http_error",
+            "provider_not_ready",
+            "unexpected_error",
+            "unexpected_normalizer_error",
+            "budget_exhausted",
+            "privacy_violation"
+          ]
+        },
+        "failure_classes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": [
+              "permission_denied",
+              "rate_limited",
+              "service_error",
+              "not_found",
+              "request_rejected",
+              "malformed_response",
+              "network_error",
+              "transport_error",
+              "fixture_missing",
+              "http_error",
+              "provider_not_ready",
+              "unexpected_error",
+              "unexpected_normalizer_error",
+              "budget_exhausted",
+              "privacy_violation"
+            ]
+          }
+        }
+      },
+      "additionalProperties": true
+    },
     "privacy": {
       "type": "object",
       "required": ["actor_display", "source_urls", "auth_redaction"],
@@ -217,7 +273,7 @@
     },
     "coverage": {
       "type": "object",
-      "required": ["required_sources", "observations", "fatal", "allow_publish"],
+      "required": ["required_sources", "observations", "fatal", "warnings", "allow_publish"],
       "properties": {
         "required_sources": {
           "type": "array",
@@ -252,6 +308,10 @@
           }
         },
         "fatal": {"type": "array"},
+        "warnings": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/coverage_warning"}
+        },
         "group_failures": {
           "type": "array",
           "items": {
