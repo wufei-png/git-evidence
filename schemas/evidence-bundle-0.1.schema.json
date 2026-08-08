@@ -27,8 +27,8 @@
     "actors": {"type": "array", "items": {"$ref": "#/$defs/entity"}},
     "work_items": {"type": "array", "items": {"$ref": "#/$defs/entity"}},
     "change_requests": {"type": "array", "items": {"$ref": "#/$defs/entity"}},
-    "interactions": {"type": "array", "items": {"$ref": "#/$defs/entity"}},
-    "commits": {"type": "array", "items": {"$ref": "#/$defs/entity"}},
+    "interactions": {"type": "array", "items": {"$ref": "#/$defs/interaction"}},
+    "commits": {"type": "array", "items": {"$ref": "#/$defs/commit"}},
     "ref_changes": {"type": "array", "items": {"$ref": "#/$defs/ref_change"}},
     "releases": {"type": "array", "items": {"$ref": "#/$defs/entity"}},
     "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
@@ -115,6 +115,32 @@
           "required": ["change_association"],
           "properties": {
             "change_association": {"enum": ["linked", "unlinked", "ambiguous", "unknown"]}
+          }
+        }
+      ]
+    },
+    "interaction": {
+      "allOf": [
+        {"$ref": "#/$defs/entity"},
+        {
+          "type": "object",
+          "required": ["subject_type", "subject_id"],
+          "properties": {
+            "subject_type": {"enum": ["work_item", "change_request"]},
+            "subject_id": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "commit": {
+      "allOf": [
+        {"$ref": "#/$defs/entity"},
+        {
+          "type": "object",
+          "required": ["sha", "hash_algorithm"],
+          "properties": {
+            "sha": {"type": "string", "pattern": "^(?:[0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"},
+            "hash_algorithm": {"enum": ["sha1", "sha256"]}
           }
         }
       ]
@@ -316,7 +342,10 @@
             "additionalProperties": true
           }
         },
-        "fatal": {"type": "array"},
+        "fatal": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/coverage_blocker"}
+        },
         "warnings": {
           "type": "array",
           "items": {"$ref": "#/$defs/coverage_warning"}
@@ -359,6 +388,29 @@
         "allow_publish": {"type": "boolean"}
       },
       "additionalProperties": true
+    },
+    "coverage_blocker": {
+      "type": "object",
+      "required": ["code", "provider", "instance", "repository", "source", "status"],
+      "properties": {
+        "code": {
+          "enum": [
+            "aggregate_record_failure",
+            "duplicate_records",
+            "privacy_violation",
+            "required_source_failure",
+            "required_source_incomplete"
+          ]
+        },
+        "provider": {"type": "string", "minLength": 1},
+        "instance": {"type": "string", "minLength": 1},
+        "repository": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "minLength": 1},
+        "status": {"enum": ["unsupported", "unavailable", "incomplete"]},
+        "failure_class": {"type": "string", "minLength": 1},
+        "message": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
     }
   }
 }

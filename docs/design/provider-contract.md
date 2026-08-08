@@ -65,6 +65,17 @@ sources are complete.
   headers remain in coverage diagnostics without exposing credentials.
 - Provider-specific rate-limit and API-version details stay in diagnostics and
   capability metadata; they do not change canonical entity meaning.
+- Interaction normalization must retain the canonical parent `subject_id` and
+  its `work_item` or `change_request` type. Pagination task identity uses that
+  same canonical subject, not a provider-local number.
+- When actor scoping removes an interaction parent but retains an in-scope
+  interaction, the shared builder emits only a minimal, unattributed structural
+  parent. It does not emit a fact or evidence claim for the filtered parent.
+- Commit normalization accepts only full SHA-1 or SHA-256 object IDs and emits
+  the matching `hash_algorithm`; short display revisions are not evidence IDs.
+- Capability summaries fold all repository observations conservatively and
+  independently of collection order. Provider implementations return evidence
+  and coverage, while the shared validator derives publication eligibility.
 - Native fields without a safe common mapping remain provider-specific rather
   than being guessed into a common field.
 - Every coverage observation is keyed by registered provider, allowlisted

@@ -205,7 +205,7 @@ class GitLabProvider(ResourceProvider):
                         note, request, "created_at", "updated_at"
                     ),
                     subject_type,
-                    str(number),
+                    item["id"],
                     "notes",
                 )
             )
@@ -602,6 +602,8 @@ class GitLabProvider(ResourceProvider):
             "id": self._id(target, "interaction", note_id),
             "kind": "system_note" if note.get("system") else "comment",
             "repository_id": target.canonical_id,
+            "subject_type": "work_item" if subject.get("kind") == "issue" else "change_request",
+            "subject_id": subject.get("id"),
             "subject_number": number,
             "occurred_at": first_timestamp(note, "created_at", "updated_at"),
             "body_collected": False,

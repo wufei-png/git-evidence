@@ -196,7 +196,7 @@ class GiteeProvider(ResourceProvider):
                         comment, request, "created_at", "updated_at"
                     ),
                     subject_type,
-                    str(number),
+                    item["id"],
                     "comments",
                 )
             )
@@ -422,6 +422,8 @@ class GiteeProvider(ResourceProvider):
             "id": self._id(target, "interaction", comment_id),
             "kind": "comment",
             "repository_id": target.canonical_id,
+            "subject_type": "work_item" if subject.get("kind") == "issue" else "change_request",
+            "subject_id": subject.get("id"),
             "subject_number": number,
             "occurred_at": first_timestamp(comment, "created_at", "updated_at"),
             "body_collected": False,

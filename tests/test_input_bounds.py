@@ -249,6 +249,7 @@ class PageAndEntityBoundTests(unittest.TestCase):
         self.assertEqual(caught.exception.failure_class, "limit_exceeded")
 
         exact_builder, _ = make_builder()
+        exact_builder.bundle["coverage"]["allow_publish"] = False
         exact_size = json_size_with_limit(exact_builder.bundle, max_bytes=1_000_000) + 1
         with patch(
             "git_evidence.providers.resource_base.MAX_BUNDLE_BYTES",
@@ -338,7 +339,12 @@ class AggregateBoundTests(unittest.TestCase):
             "source": "activities",
             "failure_class": "privacy_violation",
         }
-        bundle["coverage"]["fatal"].append(prior_failure)
+        prior_blocker = {
+            **prior_failure,
+            "code": "privacy_violation",
+            "status": "incomplete",
+        }
+        bundle["coverage"]["fatal"].append(prior_blocker)
         bundle["coverage"]["group_failures"] = [prior_failure]
         bundle["coverage"]["allow_publish"] = False
         with patch("git_evidence.collect.MAX_BUNDLE_BYTES", 9_000):
@@ -353,7 +359,7 @@ class AggregateBoundTests(unittest.TestCase):
         self.assertEqual(merged["collection"]["failure_class"], "limit_exceeded")
         self.assertFalse(merged["coverage"]["allow_publish"])
         self.assertIn(prior_failure, merged["coverage"]["group_failures"])
-        self.assertIn(prior_failure, merged["coverage"]["fatal"])
+        self.assertIn(prior_blocker, merged["coverage"]["fatal"])
         self.assertNotIn(
             "limit_exceeded",
             {

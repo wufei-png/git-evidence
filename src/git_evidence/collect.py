@@ -22,11 +22,16 @@ from .providers.base import (
     ACTIVITY_SOURCES,
     RESOURCE_SOURCES,
     append_optional_coverage_warning,
+    coverage_blocker,
     merge_optional_coverage_warning,
 )
 from .providers.resource_base import exception_diagnostics, merge_diagnostics
 from .providers.transport import ResponseShapeError, empty_transport_metrics
-from .validation import has_blocking_core_coverage, validate_bundle
+from .validation import (
+    has_blocking_core_coverage,
+    recompute_allow_publish,
+    validate_bundle,
+)
 
 
 class CollectionError(ValueError):
@@ -165,7 +170,17 @@ def _failed_group_bundle(
             }
             group_failures.append(failure)
             if source in RESOURCE_SOURCES:
-                fatal.append(failure)
+                fatal.append(
+                    coverage_blocker(
+                        code="required_source_failure",
+                        status="incomplete",
+                        provider=kind,
+                        instance=instance,
+                        repository=target.canonical_id,
+                        source=source,
+                        failure_class=failure_class,
+                    )
+                )
     return {
         "schema_version": "0.1",
         "run": {
@@ -353,7 +368,17 @@ def _record_merge_failure(
                 )
             append_optional_coverage_warning(merged["coverage"], observation)
     if source in RESOURCE_SOURCES:
-        merged["coverage"]["fatal"].append(failure)
+        merged["coverage"]["fatal"].append(
+            coverage_blocker(
+                code="aggregate_record_failure",
+                status="incomplete",
+                provider=provider,
+                instance=instance,
+                repository=repository,
+                source=source,
+                failure_class="malformed_response",
+            )
+        )
 
 
 def _merge_bundles(
@@ -547,6 +572,7 @@ def _merge_bundles(
             raise CollectionError(
                 "aggregate limit diagnostic exceeds the final bundle size limit"
             ) from exc
+    recompute_allow_publish(merged)
     return merged
 
 

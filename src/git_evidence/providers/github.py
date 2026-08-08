@@ -177,23 +177,26 @@ class GitHubProvider(ResourceProvider):
         tasks: list[PageSourceRequest] = []
         issues = snapshot.sources["work_items"].items
         pulls = snapshot.sources["change_requests"].items
-        for item in [*issues, *pulls]:
+        subjects = [
+            *(("work_item", item) for item in issues),
+            *(("change_request", item) for item in pulls),
+        ]
+        for subject_type, item in subjects:
             number = item.get("number")
-            subject_type = "change_request" if item in pulls else "work_item"
             tasks.append(
                 PageSourceRequest(
                     target,
                     "interactions",
                     f"{root}/issues/{number}/comments",
                     {},
-                    lambda comment, number=number: self._normalize_comment(
-                        target, comment, number, "issue_comment"
+                    lambda comment, number=number, subject_type=subject_type: self._normalize_comment(
+                        target, comment, number, "issue_comment", subject_type
                     ),
                     lambda comment: in_window_or_malformed(
                         comment, request, "created_at", "submitted_at", "updated_at"
                     ),
                     subject_type,
-                    str(number),
+                    self._id(target, subject_type, number),
                     "issue_comment",
                 )
             )
@@ -216,14 +219,14 @@ class GitHubProvider(ResourceProvider):
                             "interactions",
                             endpoint,
                             {},
-                            lambda comment, number=number, kind=endpoint_kind: self._normalize_comment(
-                                target, comment, number, kind
+                            lambda comment, number=number, kind=endpoint_kind, subject_type=subject_type: self._normalize_comment(
+                                target, comment, number, kind, subject_type
                             ),
                             lambda comment, fields=timestamp_fields: in_window_or_malformed(
                                 comment, request, *fields
                             ),
                             subject_type,
-                            str(number),
+                            self._id(target, subject_type, number),
                             endpoint_kind,
                         )
                     )
@@ -524,13 +527,20 @@ class GitHubProvider(ResourceProvider):
         }
 
     def _normalize_comment(
-        self, target: RepositoryTarget, item: dict[str, Any], number: Any, kind: str
+        self,
+        target: RepositoryTarget,
+        item: dict[str, Any],
+        number: Any,
+        kind: str,
+        subject_type: str,
     ) -> dict[str, Any]:
         comment_id = item.get("id")
         return {
             "id": self._id(target, "interaction", f"{kind}:{comment_id}"),
             "kind": kind,
             "repository_id": target.canonical_id,
+            "subject_type": subject_type,
+            "subject_id": self._id(target, subject_type, number),
             "subject_number": number,
             "occurred_at": first_timestamp(item, "created_at", "submitted_at", "updated_at"),
             "body_collected": False,
@@ -553,7 +563,11 @@ class GitHubProvider(ResourceProvider):
         notes: list[str] = []
         diagnostics: dict[str, Any] = {}
         pull_numbers = {item.get("number") for item in pulls}
-        for item in [*issues, *pulls]:
+        subjects = [
+            *(("work_item", item) for item in issues),
+            *(("change_request", item) for item in pulls),
+        ]
+        for subject_type, item in subjects:
             number = item.get("number")
             result = self._safe_page(
                 "interactions",
@@ -564,8 +578,8 @@ class GitHubProvider(ResourceProvider):
             result = self._normalize_items(
                 result,
                 "interactions",
-                lambda comment, number=number: self._normalize_comment(
-                    target, comment, number, "issue_comment"
+                lambda comment, number=number, subject_type=subject_type: self._normalize_comment(
+                    target, comment, number, "issue_comment", subject_type
                 ),
                 target=target,
                 filter_item=lambda comment: in_window_or_malformed(
@@ -594,8 +608,8 @@ class GitHubProvider(ResourceProvider):
                     result = self._normalize_items(
                         result,
                         "interactions",
-                        lambda comment, number=number, kind=kind: self._normalize_comment(
-                            target, comment, number, kind
+                        lambda comment, number=number, kind=kind, subject_type=subject_type: self._normalize_comment(
+                            target, comment, number, kind, subject_type
                         ),
                         target=target,
                         filter_item=lambda comment, timestamp_fields=timestamp_fields: in_window_or_malformed(

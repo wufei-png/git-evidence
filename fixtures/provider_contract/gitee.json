@@ -40,8 +40,8 @@
   },
   "commits": [
     {
-      "sha": "abc123",
-      "html_url": "https://gitee.com/example/project/commit/abc123",
+      "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "html_url": "https://gitee.com/example/project/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "commit": {
         "message": "Synthetic commit",
         "committer": {"date": "2026-07-30T12:00:00Z"},

@@ -25,6 +25,12 @@ from ..limits import (
 )
 
 CAPABILITY_STATES = ("supported", "unsupported", "unavailable", "incomplete")
+CAPABILITY_STATUS_PRIORITY = {
+    "supported": 0,
+    "unsupported": 1,
+    "unavailable": 2,
+    "incomplete": 3,
+}
 RESOURCE_SOURCES = (
     "repositories",
     "work_items",
@@ -163,12 +169,59 @@ def canonicalize_base_path(
     return normalized if normalized.startswith("/") else f"/{normalized}"
 
 
-def is_verifiable_sha(value: Any) -> bool:
-    """Return whether a commit SHA is a non-sentinel string value."""
+def git_object_id_algorithm(value: Any) -> str | None:
+    """Return the Git object-id algorithm for a full hexadecimal identifier."""
     if not isinstance(value, str):
-        return False
-    normalized = value.strip().lower()
-    return bool(normalized) and normalized not in UNVERIFIABLE_SHA_SENTINELS
+        return None
+    normalized = value.lower()
+    if normalized in UNVERIFIABLE_SHA_SENTINELS:
+        return None
+    if re.fullmatch(r"[0-9a-f]{40}", normalized):
+        return "sha1"
+    if re.fullmatch(r"[0-9a-f]{64}", normalized):
+        return "sha256"
+    return None
+
+
+def is_verifiable_sha(value: Any) -> bool:
+    """Return whether value is a full SHA-1 or SHA-256 Git object id."""
+    return git_object_id_algorithm(value) is not None
+
+
+def merge_capability_status(current: Any, incoming: Any) -> str:
+    """Combine capability states monotonically using the conservative result."""
+    current_priority = CAPABILITY_STATUS_PRIORITY.get(current, -1)
+    incoming_priority = CAPABILITY_STATUS_PRIORITY.get(incoming, 3)
+    if current_priority >= incoming_priority and current in CAPABILITY_STATUS_PRIORITY:
+        return current
+    return incoming if incoming in CAPABILITY_STATUS_PRIORITY else "incomplete"
+
+
+def coverage_blocker(
+    *,
+    code: str,
+    provider: str,
+    instance: str,
+    repository: str,
+    source: str,
+    status: str = "incomplete",
+    failure_class: str | None = None,
+    message: str | None = None,
+) -> dict[str, str]:
+    """Build the single machine-readable publication-blocker shape."""
+    blocker = {
+        "code": code,
+        "provider": provider,
+        "instance": instance,
+        "repository": repository,
+        "source": source,
+        "status": status,
+    }
+    if failure_class:
+        blocker["failure_class"] = failure_class
+    if message:
+        blocker["message"] = message
+    return blocker
 
 
 def _coverage_failure_classes(value: Any) -> set[str]:

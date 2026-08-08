@@ -38,7 +38,7 @@ allowlist/coverage invariants that JSON Schema alone cannot express.
   "evidence": [],
   "facts": [],
   "coverage": {
-    "required_sources": ["repositories", "work_items", "change_requests", "commits", "releases"],
+    "required_sources": ["repositories", "work_items", "change_requests", "interactions", "commits", "releases"],
     "observations": [],
     "fatal": [],
     "warnings": [],
@@ -66,9 +66,14 @@ allowlist/coverage invariants that JSON Schema alone cannot express.
   is invalid.
 - Every required source has a coverage observation for every in-scope
   provider/repository combination.
-- The legacy `allow_publish` field is true only when every core resource source is complete and
-  verifiable. A core permission failure, unverifiable resource, or inconsistent
-  commit SHA closes the gate; missing evidence references also remain fatal.
+- `allow_publish` is a derived compatibility field, never caller authority. The
+  validator computes render eligibility from all intrinsic schema, provenance,
+  privacy, coverage, and reference checks; collectors overwrite the field with
+  that result. A contradictory caller-supplied value is invalid.
+- `coverage.fatal` contains only typed blockers with `code`, provider and
+  instance identity, repository, source, and non-supported status. Operational
+  blockers also carry a bounded `failure_class`; ad-hoc fatal strings are not
+  part of the contract.
 - Activity/ref sources are optional supplements. Their `unsupported`,
   `unavailable`, or `incomplete` observations do not close the core gate, but
   each such observation must have a machine-readable entry in
@@ -79,7 +84,9 @@ allowlist/coverage invariants that JSON Schema alone cannot express.
 - `change_association` is one of `linked`, `unlinked`, `ambiguous`, or
   `unknown`.
 - `capability_state` is one of `supported`, `unsupported`, `unavailable`, or
-  `incomplete`.
+  `incomplete`. Provider capability summaries are a deterministic conservative
+  fold of repository observations, so a later success cannot overwrite an
+  earlier incomplete or unavailable observation.
 - A coverage diagnostic may carry a `failure_class` such as
   `permission_denied`, `rate_limited`, `service_error`, `not_found`,
   `request_rejected`, `malformed_response`, or `network_error`. The class is
@@ -105,10 +112,16 @@ allowlist/coverage invariants that JSON Schema alone cannot express.
 - A ref/change association is `linked` only when the available native SHA
   evidence resolves to one change request; multiple candidates are
   `ambiguous`, and any unresolved SHA keeps the result `unknown`.
-- A canonical commit must preserve the same SHA in its native identity,
-  canonical ID, and `sha` field. A mismatch is a malformed core resource and
-  blocks rendering. Per ADR-0017, this field expresses render eligibility and
-  never authorizes disclosure.
+- Every interaction carries `subject_type` (`work_item` or `change_request`)
+  and a canonical `subject_id` that resolves to a parent in the same repository.
+- A canonical commit must preserve one full hexadecimal Git object ID in its
+  native identity, canonical ID, and `sha` field, plus a matching
+  `hash_algorithm` of `sha1` or `sha256`. Abbreviated and sentinel revisions are
+  unverifiable. A mismatch is a malformed core resource and blocks rendering.
+  Per ADR-0017, this field expresses render eligibility and never authorizes
+  disclosure.
+- Each executable validation issue exposes stable `code`, `severity`, JSON
+  `path`, `scope`, safe `message`, and `remediation` fields for automation.
 
 ## Minimum entity vocabulary
 

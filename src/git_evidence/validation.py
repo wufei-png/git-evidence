@@ -20,7 +20,9 @@ from .providers.base import (
     OPERATIONAL_FAILURE_CLASSES,
     RESOURCE_SOURCES,
     RepositoryTarget,
+    git_object_id_algorithm,
     is_verifiable_sha,
+    merge_capability_status,
 )
 from .providers.catalog import PROVIDER_REGISTRY
 from .providers.resource_base import repository_url_matches_target
@@ -47,6 +49,13 @@ FAILURE_CLASSES = {
     "privacy_violation",
 }
 KNOWN_COVERAGE_SOURCES = frozenset((*RESOURCE_SOURCES, *ACTIVITY_SOURCES))
+BLOCKER_CODES = {
+    "aggregate_record_failure",
+    "duplicate_records",
+    "privacy_violation",
+    "required_source_failure",
+    "required_source_incomplete",
+}
 SUBJECT_COLLECTIONS = {
     "provider": "providers",
     "repository": "repositories",
@@ -178,10 +187,60 @@ def has_blocking_core_coverage(
 class ValidationIssue:
     code: str
     message: str
+    severity: str
+    path: str
+    scope: str
+    remediation: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "code": self.code,
+            "severity": self.severity,
+            "path": self.path,
+            "scope": self.scope,
+            "message": self.message,
+            "remediation": self.remediation,
+        }
 
 
-def _issue(issues: list[ValidationIssue], code: str, message: str) -> None:
-    issues.append(ValidationIssue(code, message))
+def _issue(
+    issues: list[ValidationIssue],
+    code: str,
+    message: str,
+    *,
+    severity: str = "error",
+    path: str | None = None,
+    scope: str | None = None,
+    remediation: str | None = None,
+) -> None:
+    area = code.split(".", 1)[0]
+    default_paths = {
+        "schema": "$",
+        "run": "$.run",
+        "window": "$.run.window",
+        "scope": "$.run.scope",
+        "coverage": "$.coverage",
+        "privacy": "$.privacy",
+        "collection": "$.collection",
+        "commit": "$.commits",
+        "interaction": "$.interactions",
+        "association": "$.ref_changes",
+        "fact": "$.facts",
+        "evidence": "$.evidence",
+        "entity": "$",
+        "provenance": "$",
+    }
+    issues.append(
+        ValidationIssue(
+            code=code,
+            message=message,
+            severity=severity,
+            path=path or default_paths.get(area, "$"),
+            scope=scope or area,
+            remediation=remediation
+            or "Correct the referenced bundle field and regenerate the evidence bundle.",
+        )
+    )
 
 
 @lru_cache(maxsize=1)
@@ -236,6 +295,8 @@ def _validate_schema(value: Any, issues: list[ValidationIssue]) -> None:
             issues,
             f"schema.{error.validator}",
             f"{_schema_path(error.absolute_path)}: {error.message}",
+            path=_schema_path(error.absolute_path),
+            remediation="Emit a bundle that conforms to the canonical JSON Schema.",
         )
 
 
@@ -865,6 +926,52 @@ def _validate_scope(
                     _issue(issues, "scope.actor_outside", f"{key} {entity_id} has an actor outside the actor allowlist")
 
 
+def _validate_interactions(
+    indexes: dict[str, dict[str, dict[str, Any]]],
+    issues: list[ValidationIssue],
+) -> None:
+    subject_collections = {
+        "work_item": "work_items",
+        "change_request": "change_requests",
+    }
+    for interaction_id, interaction in indexes.get("interactions", {}).items():
+        subject_type = interaction.get("subject_type")
+        subject_id = interaction.get("subject_id")
+        collection_key = subject_collections.get(subject_type)
+        if collection_key is None:
+            _issue(
+                issues,
+                "interaction.subject_type",
+                f"interaction {interaction_id} has an invalid subject_type",
+                path="$.interactions",
+            )
+            continue
+        if not isinstance(subject_id, str) or not subject_id:
+            _issue(
+                issues,
+                "interaction.subject_id",
+                f"interaction {interaction_id} has no subject_id",
+                path="$.interactions",
+            )
+            continue
+        subject = indexes.get(collection_key, {}).get(subject_id)
+        if not isinstance(subject, dict):
+            _issue(
+                issues,
+                "interaction.subject_missing",
+                f"interaction {interaction_id} references missing {subject_type} {subject_id}",
+                path="$.interactions",
+            )
+            continue
+        if subject.get("repository_id") != interaction.get("repository_id"):
+            _issue(
+                issues,
+                "interaction.subject_repository",
+                f"interaction {interaction_id} and its subject belong to different repositories",
+                path="$.interactions",
+            )
+
+
 def _validate_coverage(
     bundle: dict[str, Any],
     indexes: dict[str, dict[str, dict[str, Any]]],
@@ -876,16 +983,6 @@ def _validate_coverage(
     if not isinstance(coverage, dict):
         _issue(issues, "coverage.missing", "coverage must be an object")
         return
-    provider_ids_by_repository: dict[str, str] = {}
-    for repository_id in scope_repository_ids:
-        repository = indexes.get("repositories", {}).get(repository_id)
-        provider_id = (
-            _entity_provider_id("repository", repository, indexes)
-            if isinstance(repository, dict)
-            else None
-        )
-        if isinstance(provider_id, str) and provider_id:
-            provider_ids_by_repository[repository_id] = provider_id
     required_sources = coverage.get("required_sources")
     observations = coverage.get("observations")
     if not isinstance(required_sources, list) or not all(
@@ -1157,6 +1254,47 @@ def _validate_coverage(
                     "coverage.warning_missing",
                     f"optional source requires a coverage warning: {source} for {repository_id}",
                 )
+    for provider_id, provider in indexes.get("providers", {}).items():
+        capabilities = provider.get("capabilities")
+        if not isinstance(capabilities, dict):
+            _issue(
+                issues,
+                "coverage.capabilities_shape",
+                f"provider {provider_id} capabilities must be an object",
+                path="$.providers",
+            )
+            continue
+        for source, state in capabilities.items():
+            if source not in KNOWN_COVERAGE_SOURCES:
+                _issue(
+                    issues,
+                    "coverage.capability_source",
+                    f"provider {provider_id} has an unknown capability source",
+                    path="$.providers",
+                )
+            if state not in CAPABILITY_STATES:
+                _issue(
+                    issues,
+                    "coverage.capability_status",
+                    f"provider {provider_id} capability {source} has an invalid status",
+                    path="$.providers",
+                )
+        observed: dict[str, str] = {}
+        for (source, _repository_id, observed_provider_id), matches in by_group.items():
+            if observed_provider_id != provider_id:
+                continue
+            for observation in matches:
+                observed[source] = merge_capability_status(
+                    observed.get(source), observation.get("status")
+                )
+        for source, expected in observed.items():
+            if capabilities.get(source) != expected:
+                _issue(
+                    issues,
+                    "coverage.capability_mismatch",
+                    f"provider {provider_id} capability {source} must conservatively equal {expected}",
+                    path="$.providers",
+                )
     for warning_key, warning_items in warning_groups.items():
         matches = by_group.get(warning_key, [])
         if not matches:
@@ -1233,8 +1371,124 @@ def _validate_coverage(
     fatal = coverage.get("fatal")
     if not isinstance(fatal, list):
         _issue(issues, "coverage.fatal_shape", "coverage.fatal must be an array")
-    elif fatal:
-        _issue(issues, "coverage.fatal", f"coverage contains fatal observations: {len(fatal)}")
+        fatal = []
+    else:
+        for position, blocker in enumerate(fatal):
+            if not isinstance(blocker, dict):
+                _issue(
+                    issues,
+                    "coverage.fatal_shape",
+                    f"coverage.fatal[{position}] must be an object",
+                )
+                continue
+            for field in ("code", "provider", "instance", "repository", "source", "status"):
+                if not isinstance(blocker.get(field), str) or not blocker[field]:
+                    _issue(
+                        issues,
+                        "coverage.fatal_field",
+                        f"coverage.fatal[{position}].{field} must be a non-empty string",
+                    )
+            if blocker.get("status") not in {"unsupported", "unavailable", "incomplete"}:
+                _issue(
+                    issues,
+                    "coverage.fatal_status",
+                    f"coverage.fatal[{position}] has invalid status",
+                )
+            if blocker.get("code") not in BLOCKER_CODES:
+                _issue(
+                    issues,
+                    "coverage.fatal_code",
+                    f"coverage.fatal[{position}] has an unknown blocker code",
+                )
+            if blocker.get("source") not in KNOWN_COVERAGE_SOURCES:
+                _issue(
+                    issues,
+                    "coverage.fatal_source",
+                    f"coverage.fatal[{position}] has an unknown source",
+                )
+            failure_class = blocker.get("failure_class")
+            if failure_class is not None and failure_class not in FAILURE_CLASSES:
+                _issue(
+                    issues,
+                    "coverage.fatal_failure_class",
+                    f"coverage.fatal[{position}] has invalid failure_class",
+                )
+            provider_kind = blocker.get("provider")
+            instance = blocker.get("instance")
+            repository_id = blocker.get("repository")
+            source = blocker.get("source")
+            expected_provider_id = (
+                f"provider:{provider_kind}:{instance}"
+                if isinstance(provider_kind, str) and isinstance(instance, str)
+                else None
+            )
+            if (
+                isinstance(provider_kind, str)
+                and not PROVIDER_REGISTRY.contains(provider_kind)
+            ):
+                _issue(
+                    issues,
+                    "coverage.fatal_provider",
+                    f"coverage.fatal[{position}] uses an unsupported provider",
+                )
+            if (
+                expected_provider_id is not None
+                and expected_provider_id not in indexes.get("providers", {})
+            ):
+                _issue(
+                    issues,
+                    "coverage.fatal_provenance",
+                    f"coverage.fatal[{position}] has no matching provider entity",
+                )
+            if (
+                isinstance(repository_id, str)
+                and repository_id not in scope_repository_ids
+            ):
+                _issue(
+                    issues,
+                    "coverage.fatal_scope",
+                    f"coverage.fatal[{position}] repository is outside the allowlist",
+                )
+            matches = (
+                by_group.get((source, repository_id, expected_provider_id), [])
+                if isinstance(source, str)
+                and isinstance(repository_id, str)
+                and expected_provider_id is not None
+                else []
+            )
+            if not matches:
+                _issue(
+                    issues,
+                    "coverage.fatal_observation",
+                    f"coverage.fatal[{position}] has no matching observation",
+                )
+            elif all(
+                observation.get("status") != blocker.get("status")
+                for observation in matches
+            ):
+                _issue(
+                    issues,
+                    "coverage.fatal_status_mismatch",
+                    f"coverage.fatal[{position}] status does not match its observation",
+                )
+            if (
+                isinstance(failure_class, str)
+                and matches
+                and all(
+                    failure_class
+                    not in _diagnostic_failure_classes(
+                        observation.get("diagnostics")
+                    )
+                    for observation in matches
+                )
+            ):
+                _issue(
+                    issues,
+                    "coverage.fatal_diagnostics",
+                    f"coverage.fatal[{position}] failure_class is not recorded by its observation",
+                )
+        if fatal:
+            _issue(issues, "coverage.fatal", f"coverage contains fatal observations: {len(fatal)}")
     for observation in optional_privacy_observations:
         provider_id = observation.get("provider_id")
         repository_id = observation.get("repository_id")
@@ -1254,12 +1508,6 @@ def _validate_coverage(
                 issues,
                 "coverage.optional_privacy_fatal",
                 f"optional privacy violation is missing a fatal ledger entry: {observation.get('source')} for {repository_id}",
-            )
-        if coverage.get("allow_publish") is True:
-            _issue(
-                issues,
-                "coverage.publish_blocked",
-                "optional privacy violations cannot coexist with allow_publish=true",
             )
     for position, failure in enumerate(group_failures):
         if not isinstance(failure, dict):
@@ -1371,24 +1619,6 @@ def _validate_coverage(
                     "coverage.group_failure_fatal",
                     f"required group failure {position} is missing a matching fatal ledger entry",
                 )
-        if coverage.get("allow_publish") is True and source in RESOURCE_SOURCES:
-            _issue(
-                issues,
-                "coverage.publish_blocked",
-                "coverage.group_failures cannot coexist with allow_publish=true",
-            )
-    if coverage.get("allow_publish") is True and has_blocking_core_coverage(
-        coverage,
-        repository_ids=scope_repository_ids,
-        provider_ids_by_repository=provider_ids_by_repository,
-    ):
-        _issue(
-            issues,
-            "coverage.publish_blocked",
-            "coverage.allow_publish contradicts blocking core coverage",
-        )
-    elif coverage.get("allow_publish") is not True:
-        _issue(issues, "coverage.publish_blocked", "coverage.allow_publish is not true")
 
 
 def _validate_privacy(bundle: dict[str, Any], issues: list[ValidationIssue]) -> None:
@@ -1449,12 +1679,12 @@ def _validate_collection_transport(bundle: dict[str, Any], issues: list[Validati
             pending.extend(item for item in nested_groups if isinstance(item, dict))
 
 
-def validate_bundle(
+def _validate_intrinsic(
     bundle: dict[str, Any],
     *,
     required_sources_contract: Iterable[str] | None = None,
 ) -> list[ValidationIssue]:
-    """Validate deterministic invariants; an empty list means publishable."""
+    """Validate bundle content without trusting its publication declaration."""
     issues: list[ValidationIssue] = []
     _validate_schema(bundle, issues)
     if not isinstance(bundle, dict):
@@ -1465,6 +1695,7 @@ def validate_bundle(
     scope_repository_ids, scope_actor_ids = _validate_run(bundle, issues)
     _validate_provenance(indexes, issues)
     _validate_scope(indexes, scope_repository_ids, scope_actor_ids, issues)
+    _validate_interactions(indexes, issues)
     _validate_evidence(indexes, issues)
     _validate_privacy(bundle, issues)
     _validate_collection_transport(bundle, issues)
@@ -1499,11 +1730,18 @@ def validate_bundle(
                 )
     for entity_id, item in indexes.get("commits", {}).items():
         sha = item.get("sha")
-        if not is_verifiable_sha(sha):
+        algorithm = git_object_id_algorithm(sha)
+        if algorithm is None or not is_verifiable_sha(sha):
             code = "commit.sha_missing" if not isinstance(sha, str) or not sha.strip() else "commit.sha_unverifiable"
             _issue(issues, code, f"commit {entity_id} has no verifiable sha")
         elif not entity_id.endswith(f":{sha}"):
             _issue(issues, "commit.sha_mismatch", f"commit {entity_id} sha does not match its canonical id")
+        if algorithm is not None and item.get("hash_algorithm") != algorithm:
+            _issue(
+                issues,
+                "commit.hash_algorithm",
+                f"commit {entity_id} hash_algorithm does not match its object id",
+            )
     for entity_id, item in indexes.get("ref_changes", {}).items():
         association = item.get("change_association")
         if not isinstance(association, str) or association not in ASSOCIATION_STATES:
@@ -1511,5 +1749,69 @@ def validate_bundle(
     return issues
 
 
+def compute_render_eligibility(
+    bundle: dict[str, Any],
+    *,
+    required_sources_contract: Iterable[str] | None = None,
+) -> bool:
+    """Derive publication eligibility solely from intrinsic bundle invariants."""
+    return not _validate_intrinsic(
+        bundle,
+        required_sources_contract=required_sources_contract,
+    )
+
+
+def recompute_allow_publish(
+    bundle: dict[str, Any],
+    *,
+    required_sources_contract: Iterable[str] | None = None,
+) -> bool:
+    """Overwrite the declaration with the authoritative derived decision."""
+    coverage = bundle.get("coverage")
+    if not isinstance(coverage, dict):
+        return False
+    coverage["allow_publish"] = False
+    eligible = compute_render_eligibility(
+        bundle,
+        required_sources_contract=required_sources_contract,
+    )
+    coverage["allow_publish"] = eligible
+    return eligible
+
+
+def validate_bundle(
+    bundle: dict[str, Any],
+    *,
+    required_sources_contract: Iterable[str] | None = None,
+) -> list[ValidationIssue]:
+    """Validate deterministic invariants; an empty list means publishable."""
+    issues = _validate_intrinsic(
+        bundle,
+        required_sources_contract=required_sources_contract,
+    )
+    eligible = not issues
+    coverage = bundle.get("coverage") if isinstance(bundle, dict) else None
+    declared = coverage.get("allow_publish") if isinstance(coverage, dict) else None
+    if not eligible:
+        _issue(
+            issues,
+            "coverage.publish_blocked",
+            "intrinsic validation blockers make this bundle ineligible for publication",
+            remediation="Resolve every validation blocker, then recompute allow_publish.",
+        )
+    if declared is not eligible:
+        _issue(
+            issues,
+            "coverage.publish_mismatch",
+            f"coverage.allow_publish must equal the derived value {eligible}",
+            remediation="Set allow_publish only through the authoritative eligibility computation.",
+        )
+    return issues
+
+
 def format_issues(issues: Iterable[ValidationIssue]) -> str:
-    return "\n".join(f"ERROR: {item.code}: {item.message}" for item in issues)
+    return "\n".join(
+        f"{item.severity.upper()}: {item.code} at {item.path} "
+        f"[{item.scope}]: {item.message} Remediation: {item.remediation}"
+        for item in issues
+    )

@@ -24,8 +24,11 @@ from .base import (
     ProviderNotReady,
     RepositoryTarget,
     append_optional_coverage_warning,
+    coverage_blocker,
+    git_object_id_algorithm,
     instance_web_base,
     is_verifiable_sha,
+    merge_capability_status,
     validate_instance,
 )
 from .transport import (
@@ -676,6 +679,7 @@ class BundleBuilder:
         self._commit_ids_by_sha: dict[tuple[str, str], set[str]] = {}
         self._change_request_ids_by_sha: dict[tuple[str, str], set[str]] = {}
         self._duplicate_counts: dict[tuple[str, str], int] = {}
+        self._filtered_subjects: dict[str, dict[str, Any]] = {}
         self._entity_count = 1
         self._bundle_size_estimate = json_size_with_limit(
             self.bundle,
@@ -692,6 +696,7 @@ class BundleBuilder:
                 "commit_ids_by_sha": self._commit_ids_by_sha,
                 "change_request_ids_by_sha": self._change_request_ids_by_sha,
                 "duplicate_counts": self._duplicate_counts,
+                "filtered_subjects": self._filtered_subjects,
                 "entity_count": self._entity_count,
                 "bundle_size_estimate": self._bundle_size_estimate,
             }
@@ -705,6 +710,7 @@ class BundleBuilder:
         self._commit_ids_by_sha = checkpoint["commit_ids_by_sha"]
         self._change_request_ids_by_sha = checkpoint["change_request_ids_by_sha"]
         self._duplicate_counts = checkpoint["duplicate_counts"]
+        self._filtered_subjects = checkpoint["filtered_subjects"]
         self._entity_count = checkpoint["entity_count"]
         self._bundle_size_estimate = checkpoint["bundle_size_estimate"]
 
@@ -776,7 +782,10 @@ class BundleBuilder:
             observation["diagnostics"] = diagnostics
         self.bundle["coverage"]["observations"].append(observation)
         append_optional_coverage_warning(self.bundle["coverage"], observation)
-        self.bundle["providers"][0]["capabilities"][source] = result.status
+        capabilities = self.bundle["providers"][0]["capabilities"]
+        capabilities[source] = merge_capability_status(
+            capabilities.get(source), result.status
+        )
         if result.status != "supported" and group_failure_classes:
             observation.setdefault("diagnostics", {})["group_failure"] = True
             for failure_class in sorted(group_failure_classes):
@@ -789,13 +798,26 @@ class BundleBuilder:
                 }
                 self.bundle["coverage"]["group_failures"].append(failure)
                 if source in RESOURCE_SOURCES:
-                    self.bundle["coverage"]["fatal"].append(failure)
+                    self.bundle["coverage"]["fatal"].append(
+                        coverage_blocker(
+                            code="required_source_failure",
+                            status=result.status,
+                            **failure,
+                        )
+                    )
             if source in RESOURCE_SOURCES:
                 self.bundle["coverage"]["allow_publish"] = False
         elif source in RESOURCE_SOURCES and result.status != "supported":
             self.bundle["coverage"]["allow_publish"] = False
             self.bundle["coverage"]["fatal"].append(
-                f"{target.canonical_id}:{source}:{result.status}:{result.note}"
+                coverage_blocker(
+                    code="required_source_incomplete",
+                    provider=self.descriptor.kind,
+                    instance=self.request.instance,
+                    repository=target.canonical_id,
+                    source=source,
+                    status=result.status,
+                )
             )
         self._apply_duplicate_coverage(source, target.canonical_id)
         growth = {
@@ -849,7 +871,10 @@ class BundleBuilder:
             observation_diagnostics = observation.setdefault("diagnostics", {})
             if isinstance(observation_diagnostics, dict):
                 merge_diagnostics(observation_diagnostics, diagnostics)
-            self.bundle["providers"][0]["capabilities"][source] = "incomplete"
+            capabilities = self.bundle["providers"][0]["capabilities"]
+            capabilities[source] = merge_capability_status(
+                capabilities.get(source), "incomplete"
+            )
             append_optional_coverage_warning(self.bundle["coverage"], observation)
         failure = {
             "provider": self.descriptor.kind,
@@ -865,8 +890,13 @@ class BundleBuilder:
         ):
             self.bundle["coverage"]["group_failures"].append(failure)
         if fail_closed:
-            if failure not in self.bundle["coverage"]["fatal"]:
-                self.bundle["coverage"]["fatal"].append(failure)
+            blocker = coverage_blocker(
+                code="privacy_violation",
+                status="incomplete",
+                **failure,
+            )
+            if blocker not in self.bundle["coverage"]["fatal"]:
+                self.bundle["coverage"]["fatal"].append(blocker)
             self.bundle["coverage"]["allow_publish"] = False
 
     def add_repository(
@@ -913,7 +943,39 @@ class BundleBuilder:
                 continue
             actor_id = self._actor_id(actor)
             if self.request.actor_ids and actor is not None and actor_id not in self.request.actor_ids:
+                if category in {"work_items", "change_requests"}:
+                    self._filtered_subjects[entity_id] = {
+                        key: record[key]
+                        for key in ("id", "kind", "repository_id", "number")
+                        if key in record
+                    }
                 continue
+            if category == "interactions":
+                subject_type = record.get("subject_type")
+                subject_id = record.get("subject_id")
+                subject_collection = {
+                    "work_item": "work_items",
+                    "change_request": "change_requests",
+                }.get(subject_type)
+                if (
+                    not isinstance(subject_id, str)
+                    or subject_collection is None
+                ):
+                    raise ResponseShapeError(
+                        "interaction has no canonical subject",
+                        failure_class="malformed_response",
+                    )
+                if subject_id not in self._seen.setdefault(subject_collection, set()):
+                    structural_subject = self._filtered_subjects.pop(subject_id, None)
+                    if structural_subject is None or not self._add_entity(
+                        subject_collection,
+                        structural_subject,
+                        repository_id=target.canonical_id,
+                    ):
+                        raise ResponseShapeError(
+                            "interaction subject is unavailable after actor filtering",
+                            failure_class="malformed_response",
+                        )
             if category == "change_requests":
                 for sha in association_shas:
                     self._change_request_ids_by_sha.setdefault((target.canonical_id, sha), set()).add(entity_id)
@@ -921,6 +983,9 @@ class BundleBuilder:
                 sha = record.get("sha")
                 if isinstance(sha, str) and sha:
                     self._commit_ids_by_sha.setdefault((target.canonical_id, sha), set()).add(entity_id)
+                    algorithm = git_object_id_algorithm(sha)
+                    if algorithm is not None:
+                        record["hash_algorithm"] = algorithm
             elif category == "ref_changes":
                 known_change_request_ids = [
                     change_request_id
@@ -1088,11 +1153,22 @@ class BundleBuilder:
             observation_diagnostics = observation.setdefault("diagnostics", {})
             if isinstance(observation_diagnostics, dict):
                 merge_diagnostics(observation_diagnostics, diagnostic)
-            self.bundle["providers"][0]["capabilities"][source] = "incomplete"
+            capabilities = self.bundle["providers"][0]["capabilities"]
+            capabilities[source] = merge_capability_status(
+                capabilities.get(source), "incomplete"
+            )
             append_optional_coverage_warning(self.bundle["coverage"], observation)
         if source in RESOURCE_SOURCES:
             self.bundle["coverage"]["allow_publish"] = False
-            fatal = f"{repository_id}:{source}:incomplete:duplicate records dropped"
+            fatal = coverage_blocker(
+                code="duplicate_records",
+                provider=self.descriptor.kind,
+                instance=self.request.instance,
+                repository=repository_id,
+                source=source,
+                status="incomplete",
+                failure_class="malformed_response",
+            )
             if fatal not in self.bundle["coverage"]["fatal"]:
                 self.bundle["coverage"]["fatal"].append(fatal)
 
@@ -1147,7 +1223,10 @@ class BundleBuilder:
                 if isinstance(diagnostics, dict):
                     diagnostics["failure_class"] = "insecure_transport"
                     diagnostics["group_failure"] = True
-                self.bundle["providers"][0]["capabilities"][source] = "incomplete"
+                capabilities = self.bundle["providers"][0]["capabilities"]
+                capabilities[source] = merge_capability_status(
+                    capabilities.get(source), "incomplete"
+                )
                 key = (repository_id, source)
                 if key in seen_failures:
                     continue
@@ -1161,12 +1240,21 @@ class BundleBuilder:
                 }
                 self.bundle["coverage"]["group_failures"].append(failure)
                 if source in RESOURCE_SOURCES:
-                    self.bundle["coverage"]["fatal"].append(failure)
+                    self.bundle["coverage"]["fatal"].append(
+                        coverage_blocker(
+                            code="required_source_failure",
+                            status="incomplete",
+                            **failure,
+                        )
+                    )
                 else:
                     append_optional_coverage_warning(self.bundle["coverage"], observation)
         for observation in self.bundle["coverage"]["observations"]:
             if isinstance(observation, dict):
                 append_optional_coverage_warning(self.bundle["coverage"], observation)
+        from ..validation import recompute_allow_publish
+
+        recompute_allow_publish(self.bundle)
         try:
             json_size_with_limit(
                 self.bundle,
@@ -1779,6 +1867,19 @@ class ResourceProvider:
             item.get("number") if source != "interactions" else item.get("subject_number")
         ):
             raise StrictNormalizationError(f"{source} item has no stable subject number")
+        if source == "interactions":
+            subject_type = item.get("subject_type")
+            subject_id = item.get("subject_id")
+            if subject_type not in {"work_item", "change_request"}:
+                raise StrictNormalizationError("interaction has no valid subject type")
+            expected_subject_id = target.canonical_id.replace(
+                "repo:", f"{subject_type}:", 1
+            ) + f":{item.get('subject_number')}"
+            if (
+                not isinstance(subject_id, str)
+                or subject_id != expected_subject_id
+            ):
+                raise StrictNormalizationError("interaction has no canonical subject identity")
 
     def _normalize_items(
         self,

@@ -72,6 +72,7 @@
       "id": "interaction:github:github.com:example/project:issue-comment:91",
       "kind": "issue_comment",
       "repository_id": "repo:github:github.com:example/project",
+      "subject_type": "work_item",
       "subject_id": "work_item:github:github.com:example/project:7",
       "actor_id": "actor:github:github.com:42",
       "occurred_at": "2026-07-30T09:00:00Z",
@@ -83,6 +84,7 @@
     {
       "id": "commit:github:github.com:example/project:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "hash_algorithm": "sha1",
       "repository_id": "repo:github:github.com:example/project",
       "actor_id": "actor:github:github.com:42",
       "occurred_at": "2026-07-29T09:30:00Z",

@@ -346,6 +346,8 @@ class ReviewLoopFindingTests(unittest.TestCase):
                 observation["diagnostics"] = {
                     "child_diagnostics": [{"failure_classes": ["permission_denied"]}],
                 }
+        bundle["providers"][0]["capabilities"]["activities"] = "supported"
+        bundle["providers"][0]["capabilities"]["ref_changes"] = "supported"
         bundle["coverage"]["warnings"] = []
         self.assertTrue(bundle["coverage"]["allow_publish"])
         self.assertEqual(validate_bundle(bundle), [])
@@ -1123,12 +1125,12 @@ class ReviewLoopFindingTests(unittest.TestCase):
 
     def test_commit_association_rejects_bad_candidates_and_keeps_valid_siblings(self) -> None:
         github = github_transport()
-        github.responses["/repos/example/project/commits/abc123/pulls"][0].body.extend(
+        github.responses["/repos/example/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/pulls"][0].body.extend(
             [{"number": {"not": "a number"}}, {"number": 7}]
         )
         github_provider = GitHubProvider(github)
         target = request_for("github", "github.com").repositories[0]
-        candidates, result = github_provider._commit_change_request_candidates(target, "abc123")
+        candidates, result = github_provider._commit_change_request_candidates(target, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         self.assertEqual(candidates[-1], "change_request:github:github.com:example/project:7")
         self.assertEqual(result.status, "incomplete")
         self.assertEqual(result.diagnostics["failure_class"], "malformed_response")
@@ -1136,11 +1138,11 @@ class ReviewLoopFindingTests(unittest.TestCase):
 
         gitlab = gitlab_transport()
         gitlab.responses[
-            "/projects/example%2Fproject/repository/commits/abc123/merge_requests"
+            "/projects/example%2Fproject/repository/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/merge_requests"
         ][0].body.extend([{"iid": {"not": "an iid"}}, {"iid": 8}])
         gitlab_provider = GitLabProvider(gitlab)
         target = request_for("gitlab", "gitlab.com").repositories[0]
-        candidates, result = gitlab_provider._commit_change_request_candidates(target, "abc123")
+        candidates, result = gitlab_provider._commit_change_request_candidates(target, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         self.assertEqual(candidates[-1], "change_request:gitlab:gitlab.com:example/project:8")
         self.assertEqual(result.status, "incomplete")
         self.assertEqual(result.diagnostics["failure_class"], "malformed_response")

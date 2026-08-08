@@ -25,8 +25,8 @@
       "created_at": "2026-07-30T12:00:00Z",
       "html_url": "https://github.com/example/project/pull/2",
       "user": {"id": 7, "login": "synthetic-user"},
-      "head": {"sha": "abc123"},
-      "merge_commit_sha": "merge123"
+      "head": {"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+      "merge_commit_sha": "dddddddddddddddddddddddddddddddddddddddd"
     },
     {
       "number": 3,
@@ -37,7 +37,7 @@
       "created_at": "2026-07-30T12:00:00Z",
       "html_url": "https://github.com/example/project/pull/3",
       "user": {"id": 7, "login": "synthetic-user"},
-      "head": {"sha": "multi123"},
+      "head": {"sha": "cccccccccccccccccccccccccccccccccccccccc"},
       "merge_commit_sha": null
     }
   ],
@@ -77,8 +77,8 @@
   },
   "commits": [
     {
-      "sha": "abc123",
-      "html_url": "https://github.com/example/project/commit/abc123",
+      "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "html_url": "https://github.com/example/project/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "commit": {
         "message": "Synthetic commit\n\nDetails",
         "committer": {"date": "2026-07-30T12:00:00Z"},
@@ -87,8 +87,8 @@
       "author": {"id": 7, "login": "synthetic-user"}
     },
     {
-      "sha": "def456",
-      "html_url": "https://github.com/example/project/commit/def456",
+      "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "html_url": "https://github.com/example/project/commit/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "commit": {
         "message": "Synthetic unlinked commit",
         "committer": {"date": "2026-07-30T12:00:00Z"},
@@ -97,8 +97,8 @@
       "author": {"id": 7, "login": "synthetic-user"}
     },
     {
-      "sha": "multi123",
-      "html_url": "https://github.com/example/project/commit/multi123",
+      "sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "html_url": "https://github.com/example/project/commit/cccccccccccccccccccccccccccccccccccccccc",
       "commit": {
         "message": "Synthetic ambiguous commit",
         "committer": {"date": "2026-07-30T12:00:00Z"},
@@ -127,9 +127,9 @@
         "push_id": 401,
         "ref": "refs/heads/main",
         "before": "000000",
-        "head": "abc123",
+        "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "size": 1,
-        "commits": [{"sha": "abc123"}]
+        "commits": [{"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]
       }
     },
     {
@@ -141,10 +141,10 @@
       "payload": {
         "push_id": 402,
         "ref": "refs/heads/main",
-        "before": "abc123",
-        "head": "def456",
+        "before": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "size": 1,
-        "commits": [{"sha": "def456"}]
+        "commits": [{"sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]
       }
     },
     {
@@ -156,19 +156,19 @@
       "payload": {
         "push_id": 403,
         "ref": "refs/heads/feature",
-        "before": "def456",
-        "head": "multi123",
+        "before": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "head": "cccccccccccccccccccccccccccccccccccccccc",
         "size": 1,
-        "commits": [{"sha": "multi123"}]
+        "commits": [{"sha": "cccccccccccccccccccccccccccccccccccccccc"}]
       }
     }
   ],
   "commit_pulls": {
-    "abc123": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
       {"number": 2}
     ],
-    "def456": [],
-    "multi123": [
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [],
+    "cccccccccccccccccccccccccccccccccccccccc": [
       {"number": 2},
       {"number": 3}
     ]
