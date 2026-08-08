@@ -105,9 +105,10 @@ only the selected provider's `LIVE_<PROVIDER>_CONFIG` and
 authorized exact instances. The protected config must reference
 `token_env: LIVE_PROVIDER_TOKEN`. The workflow itself rejects non-`main` refs,
 provider/config mismatches, and instances outside that environment allowlist.
-It logs only the sanitized provider/instances/window/repository-count scope,
-does not upload the sensitive bundle or report, and removes its temporary
-config, bundle, and report at exit.
+It logs only the provider kind, window, and repository count. Exact instances,
+repository coordinates, tokens, the sensitive bundle, and the report are not
+logged or uploaded; temporary config, bundle, and report files are removed at
+exit.
 
 After `.github/workflows/ci.yml` is present on the default branch, protect
 `main` with a branch ruleset that requires the stable `Offline contract

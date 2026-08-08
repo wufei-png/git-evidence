@@ -25,9 +25,12 @@ LABELS = {
         "other": "Other verified activity",
         "coverage": "Data coverage",
         "coverage_warnings": "Coverage warnings",
+        "validation_warnings": "Validation warnings",
         "evidence": "evidence",
         "anonymous": "anonymous actor",
         "actor_warning": "Actor view is informational only; it is not a productivity or performance score.",
+        "no_coverage": "No coverage observations.",
+        "no_releases": "No verified releases or release changes.",
     },
     "zh-CN": {
         "title": "Git 平台工程活动报告",
@@ -40,9 +43,12 @@ LABELS = {
         "other": "其他已验证活动",
         "coverage": "数据覆盖",
         "coverage_warnings": "覆盖警告",
+        "validation_warnings": "校验警告",
         "evidence": "证据",
         "anonymous": "匿名成员",
         "actor_warning": "人员视图仅用于信息回顾，不代表生产力或绩效评分。",
+        "no_coverage": "没有覆盖观测。",
+        "no_releases": "没有已验证的版本或版本变更。",
     },
 }
 
@@ -53,6 +59,18 @@ class RenderError(ValueError):
 
 def _escape_text(value: Any) -> str:
     text = str(value or "").replace("\n", " ").strip()
+    visual_controls = {
+        *range(0x200B, 0x2010),
+        *range(0x202A, 0x202F),
+        *range(0x2060, 0x2070),
+        0xFEFF,
+    }
+    text = "".join(
+        f"U+{ord(character):04X}"
+        if ord(character) in visual_controls
+        else character
+        for character in text
+    )
     text = html_escape(text, quote=False)
     markdown_punctuation = r"\\`*_[\]{}()#+\-.!|>"
     return "".join(f"\\{character}" if character in markdown_punctuation else character for character in text)
@@ -112,12 +130,13 @@ def _fact_line(
     language: str,
     *,
     allow_source_urls: bool = True,
+    include_actor: bool = True,
 ) -> str:
     labels = LABELS[language]
     summary = _escape_text(fact.get("summary") or fact.get("title") or fact.get("kind") or "verified activity")
     actor_id = fact.get("actor_id")
     actor = actor_labels.get(actor_id) if actor_id else None
-    if actor:
+    if actor and include_actor:
         summary = f"{summary} — {actor}"
     links = []
     for evidence_id in fact.get("evidence_ids") or []:
@@ -143,7 +162,7 @@ def _render_coverage(bundle: dict[str, Any], language: str) -> list[str]:
         note = _escape_text(observation.get("note") or "")
         lines.append(f"- {source}: **{status}**" + (f" — {note}" if note else ""))
     if not (coverage.get("observations") or []):
-        lines.append("- No coverage observations.")
+        lines.append(f"- {labels['no_coverage']}")
     warnings = coverage.get("warnings") or []
     if warnings:
         lines.extend(["", f"### {labels['coverage_warnings']}", ""])
@@ -184,8 +203,11 @@ def render_bundle(
     if language not in LANGUAGES:
         raise RenderError(f"unknown language: {language}; choose from {', '.join(LANGUAGES)}")
     issues = validate_bundle(bundle)
-    if issues:
-        raise RenderError("bundle is not publishable:\n" + format_issues(issues))
+    blocking_issues = [issue for issue in issues if issue.severity == "error"]
+    if blocking_issues:
+        raise RenderError(
+            "bundle is not publishable:\n" + format_issues(blocking_issues)
+        )
 
     labels = LABELS[language]
     repositories, evidence = _indexes(bundle)
@@ -240,6 +262,7 @@ def render_bundle(
                         rendered_actor_labels,
                         language,
                         allow_source_urls=allow_source_urls,
+                        include_actor=False,
                     )
                 )
             lines.append("")
@@ -267,7 +290,7 @@ def render_bundle(
                     )
                 )
             if not release_facts:
-                lines.append("- No verified releases or release changes.")
+                lines.append(f"- {labels['no_releases']}")
             lines.append("")
 
         heading = labels["projects"] if profile == "project-first" else labels["project_activity"]
@@ -304,4 +327,11 @@ def render_bundle(
             lines.append("")
 
     lines.extend(_render_coverage(bundle, language))
+    warning_issues = [issue for issue in issues if issue.severity == "warning"]
+    if warning_issues:
+        lines.extend(["", f"### {labels['validation_warnings']}", ""])
+        for issue in warning_issues:
+            lines.append(
+                f"- **{_escape_text(issue.code)}** — {_escape_text(issue.path)}"
+            )
     return "\n".join(lines).rstrip() + "\n"

@@ -5,20 +5,28 @@ import json
 import sys
 from pathlib import Path
 
+from . import __version__
+from .atomic_io import AtomicWriteError, atomic_write_text
 from .collect import CollectionError, collect_config
 from .config import ConfigError, load_collection_config, load_report_config
 from .model import BundleLoadError, load_bundle
 from .providers import RESOURCE_SOURCES, provider_catalog
 from .render import LANGUAGES, PROFILES, RenderError, render_bundle
-from .validation import format_issues, validate_bundle
+from .validation import ValidationIssue, format_issues, validate_bundle
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="git-evidence")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     validate = subparsers.add_parser("validate", help="validate an evidence bundle")
     validate.add_argument("bundle", type=Path)
+    validate.add_argument(
+        "--diagnostics-format",
+        choices=("text", "json"),
+        default="text",
+    )
 
     render = subparsers.add_parser("render", help="render a validated evidence bundle")
     render.add_argument("bundle", type=Path)
@@ -35,7 +43,71 @@ def _parser() -> argparse.ArgumentParser:
     collect = subparsers.add_parser("collect", help="collect an evidence bundle from a configuration")
     collect.add_argument("--config", required=True, type=Path)
     collect.add_argument("--output", "-o", type=Path)
+    collect.add_argument(
+        "--diagnostics-format",
+        choices=("text", "json"),
+        default="text",
+    )
     return parser
+
+
+def _diagnostics_text(issues: list[ValidationIssue]) -> str:
+    return format_issues(issues)
+
+
+def _diagnostics_json(
+    status: str,
+    issues: list[ValidationIssue],
+    **summary: int,
+) -> str:
+    return json.dumps(
+        {
+            "status": status,
+            "issues": [item.as_dict() for item in issues],
+            **summary,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _emit_collect_diagnostics(
+    *,
+    status: str,
+    issues: list[ValidationIssue],
+    diagnostics_format: str,
+    group_failure_count: int,
+    coverage_warning_count: int,
+) -> None:
+    if diagnostics_format == "json":
+        print(
+            _diagnostics_json(
+                status,
+                issues,
+                group_failure_count=group_failure_count,
+                coverage_warning_count=coverage_warning_count,
+            ),
+            file=sys.stderr,
+        )
+        return
+    if issues:
+        print(_diagnostics_text(issues), file=sys.stderr)
+    messages = {
+        "group_failure": "COLLECTION: one or more provider groups failed",
+        "invalid": "COLLECTION: validation failed",
+        "publishable_with_warnings": "COLLECTION: publishable with coverage warnings",
+        "publishable": "COLLECTION: publishable",
+    }
+    print(messages[status], file=sys.stderr)
+
+
+def _write_output(path: Path, text: str) -> bool:
+    try:
+        atomic_write_text(path, text)
+    except AtomicWriteError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return False
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -61,8 +133,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         serialized = json.dumps(bundle, ensure_ascii=False, indent=2) + "\n"
         if args.output:
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(serialized, encoding="utf-8")
+            if not _write_output(args.output, serialized):
+                return 2
         else:
             print(serialized, end="")
         issues = validate_bundle(bundle, required_sources_contract=RESOURCE_SOURCES)
@@ -72,19 +144,33 @@ def main(argv: list[str] | None = None) -> int:
             for failure in group_failures
             if isinstance(failure, dict) and failure.get("source") in RESOURCE_SOURCES
         ]
-        if blocking_group_failures:
-            if issues:
-                print(format_issues(issues), file=sys.stderr)
-            print("COLLECTION: one or more provider groups failed", file=sys.stderr)
-            return 3
-        if issues:
-            print(format_issues(issues), file=sys.stderr)
-            return 1
         warnings = (bundle.get("coverage") or {}).get("warnings") or []
-        if warnings:
-            print("COLLECTION: publishable with coverage warnings", file=sys.stderr)
-        else:
-            print("COLLECTION: publishable", file=sys.stderr)
+        if blocking_group_failures:
+            _emit_collect_diagnostics(
+                status="group_failure",
+                issues=issues,
+                diagnostics_format=args.diagnostics_format,
+                group_failure_count=len(blocking_group_failures),
+                coverage_warning_count=len(warnings),
+            )
+            return 3
+        blocking_issues = [issue for issue in issues if issue.severity == "error"]
+        if blocking_issues:
+            _emit_collect_diagnostics(
+                status="invalid",
+                issues=issues,
+                diagnostics_format=args.diagnostics_format,
+                group_failure_count=0,
+                coverage_warning_count=len(warnings),
+            )
+            return 1
+        _emit_collect_diagnostics(
+            status="publishable_with_warnings" if warnings or issues else "publishable",
+            issues=issues,
+            diagnostics_format=args.diagnostics_format,
+            group_failure_count=0,
+            coverage_warning_count=len(warnings),
+        )
         return 0
     try:
         bundle = load_bundle(args.bundle)
@@ -93,10 +179,20 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     issues = validate_bundle(bundle)
     if args.command == "validate":
-        if issues:
-            print(format_issues(issues))
+        blocking_issues = [issue for issue in issues if issue.severity == "error"]
+        if args.diagnostics_format == "json":
+            print(
+                _diagnostics_json(
+                    "invalid" if blocking_issues else "valid_with_warnings" if issues else "valid",
+                    issues,
+                )
+            )
+        elif issues:
+            print(_diagnostics_text(issues))
+        if blocking_issues:
             return 1
-        print("VALIDATION: none")
+        if not issues and args.diagnostics_format == "text":
+            print("VALIDATION: none")
         return 0
     report_config: dict[str, object] = {}
     if args.config:
@@ -126,8 +222,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(rendered, encoding="utf-8")
+        if not _write_output(args.output, rendered):
+            return 2
     else:
         print(rendered, end="")
     return 0

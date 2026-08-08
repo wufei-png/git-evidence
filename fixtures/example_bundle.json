@@ -217,11 +217,11 @@
     ],
     "observations": [
       {"source": "repositories", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported"},
-      {"source": "work_items", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported"},
-      {"source": "change_requests", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported"},
-      {"source": "interactions", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported", "note": "metadata only"},
-      {"source": "commits", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported"},
-      {"source": "releases", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported"},
+      {"source": "work_items", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported", "diagnostics": {"pagination": {"outcome": "link_exhausted", "complete": true}}},
+      {"source": "change_requests", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported", "diagnostics": {"pagination": {"outcome": "link_exhausted", "complete": true}}},
+      {"source": "interactions", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported", "note": "metadata only", "diagnostics": {"pagination": {"outcome": "link_exhausted", "complete": true}}},
+      {"source": "commits", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported", "diagnostics": {"pagination": {"outcome": "link_exhausted", "complete": true}}},
+      {"source": "releases", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported", "diagnostics": {"pagination": {"outcome": "link_exhausted", "complete": true}}},
       {"source": "ref_changes", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "unavailable", "note": "activity API not enabled; ref completeness is not claimed"}
     ],
     "fatal": [],

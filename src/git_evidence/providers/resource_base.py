@@ -33,9 +33,11 @@ from .base import (
 )
 from .transport import (
     ApiError,
+    DOCUMENTED_SHORT_PAGE_PAGINATION,
     JsonTransport,
     PageResult,
     PaginationCursor,
+    PaginationStrategy,
     ResponseShapeError,
     failure_class_for_status,
     is_success_status,
@@ -213,6 +215,11 @@ def api_error_diagnostics(error: ApiError) -> dict[str, Any]:
         diagnostics["retry_after_seconds"] = error.retry_after
     if error.rate_limit:
         diagnostics["rate_limit"] = dict(error.rate_limit)
+    if error.pagination_outcome:
+        diagnostics["pagination"] = {
+            "outcome": error.pagination_outcome,
+            "complete": False,
+        }
     return diagnostics
 
 
@@ -619,6 +626,12 @@ class BundleBuilder:
         self.descriptor = descriptor
         self.transport = transport
         self.provider_id = f"provider:{descriptor.kind}:{request.instance}"
+        transport_token = getattr(transport, "token", None)
+        self._secret_values = (
+            (transport_token,)
+            if isinstance(transport_token, str) and transport_token
+            else ()
+        )
         self.bundle: dict[str, Any] = {
             "schema_version": "0.1",
             "run": {
@@ -780,6 +793,10 @@ class BundleBuilder:
             observation["note"] = result.note
         if diagnostics:
             observation["diagnostics"] = diagnostics
+        observation = sanitize_public_payload(
+            observation,
+            secret_values=self._secret_values,
+        )
         self.bundle["coverage"]["observations"].append(observation)
         append_optional_coverage_warning(self.bundle["coverage"], observation)
         capabilities = self.bundle["providers"][0]["capabilities"]
@@ -908,7 +925,7 @@ class BundleBuilder:
         repository = target.canonical_id if target is not None else record.get("id")
         self._add_entity(
             "repositories",
-            sanitize_public_payload(record),
+            record,
             source="repositories",
             repository_id=repository if isinstance(repository, str) else None,
         )
@@ -1018,7 +1035,10 @@ class BundleBuilder:
                 self._add_actor(actor)
             if actor_id:
                 record["actor_id"] = actor_id
-            record = sanitize_public_payload(record)
+            record = sanitize_public_payload(
+                record,
+                secret_values=self._secret_values,
+            )
             if not self._add_entity(
                 category,
                 record,
@@ -1180,7 +1200,10 @@ class BundleBuilder:
         source: str | None = None,
         repository_id: str | None = None,
     ) -> bool:
-        record = sanitize_public_payload(record)
+        record = sanitize_public_payload(
+            record,
+            secret_values=self._secret_values,
+        )
         validate_json_value_limits(record)
         entity_id = record.get("id")
         if not isinstance(entity_id, str) or not entity_id:
@@ -1270,6 +1293,7 @@ class BundleBuilder:
 
 class ResourceProvider:
     descriptor: ProviderDescriptor
+    pagination_strategy: PaginationStrategy = DOCUMENTED_SHORT_PAGE_PAGINATION
 
     def __init__(self, transport: JsonTransport, instance: str, *, max_pages: int = 100) -> None:
         if isinstance(max_pages, bool) or not isinstance(max_pages, int):
@@ -1650,6 +1674,7 @@ class ResourceProvider:
                     task.params,
                     per_page=100,
                     max_pages=self.max_pages,
+                    strategy=self.pagination_strategy,
                 )
             except Exception as exc:  # noqa: BLE001 - source isolation boundary
                 task.result = self._unexpected_source_result(

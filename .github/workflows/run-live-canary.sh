@@ -4,9 +4,26 @@ set -euo pipefail
 umask 077
 canary_root="${RUNNER_TEMP:?}/git-evidence-live-canary"
 mkdir -p "$canary_root"
-trap 'rm -f "$canary_root/config.yml" "$canary_root/bundle.json" "$canary_root/report.md"' EXIT
+trap 'rm -f "$canary_root/config.yml" "$canary_root/bundle.json" "$canary_root/report.md" "$canary_root/doctor.log" "$canary_root/collect.log" "$canary_root/validate.log" "$canary_root/render.log"' EXIT
 printf '%s' "${LIVE_CANARY_CONFIG_CONTENT:?}" > "$canary_root/config.yml"
-git-evidence doctor --config "$canary_root/config.yml"
+
+run_quietly() {
+  local label="$1"
+  local log="$2"
+  shift 2
+  set +e
+  "$@" > "$log" 2>&1
+  local status=$?
+  set -e
+  if (( status != 0 )); then
+    printf '%s: failed (exit %s)\n' "$label" "$status" >&2
+    return "$status"
+  fi
+  printf '%s: ok\n' "$label"
+}
+
+run_quietly CANARY_DOCTOR "$canary_root/doctor.log" \
+  git-evidence doctor --config "$canary_root/config.yml"
 python - \
   "$canary_root/config.yml" \
   "${LIVE_EXPECTED_PROVIDER:?}" \
@@ -44,17 +61,21 @@ window = config["window"]
 print(
     "CANARY_SCOPE: "
     f"provider={expected} "
-    f"instances={','.join(sorted(configured_instances))} "
     f"window_start={window['start']} "
     f"window_end={window['end']} "
     f"timezone={window['timezone']} "
     f"repository_count={len(repositories)}"
 )
 PY
-git-evidence collect --config "$canary_root/config.yml" \
-  --output "$canary_root/bundle.json"
-git-evidence validate "$canary_root/bundle.json"
-git-evidence render "$canary_root/bundle.json" \
-  --config "$canary_root/config.yml" \
-  --output "$canary_root/report.md"
+run_quietly CANARY_COLLECT "$canary_root/collect.log" \
+  git-evidence collect --config "$canary_root/config.yml" \
+    --output "$canary_root/bundle.json" \
+    --diagnostics-format json
+run_quietly CANARY_VALIDATE "$canary_root/validate.log" \
+  git-evidence validate "$canary_root/bundle.json" \
+    --diagnostics-format json
+run_quietly CANARY_RENDER "$canary_root/render.log" \
+  git-evidence render "$canary_root/bundle.json" \
+    --config "$canary_root/config.yml" \
+    --output "$canary_root/report.md"
 test -s "$canary_root/report.md"

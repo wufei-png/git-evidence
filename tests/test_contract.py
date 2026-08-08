@@ -581,6 +581,15 @@ class ContractTests(unittest.TestCase):
             self.assertIn("ref_changes", descriptor.activity_sources)
             self.assertEqual(descriptor.implementation_status, "experimental")
 
+    def test_offline_bundle_validation_does_not_require_collector_registration(self) -> None:
+        serialized = json.dumps(load_bundle(FIXTURE)).replace(
+            ":github:github.com",
+            ":forge:github.com",
+        )
+        bundle = json.loads(serialized)
+        bundle["providers"][0]["kind"] = "forge"
+        self.assertEqual(validate_bundle(bundle), [])
+
     def test_resource_collectors_replay_shared_minimum_contract(self) -> None:
         providers = (
             ("github", "github.com", GitHubProvider(github_transport())),
@@ -796,7 +805,16 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(len(interaction_coverage), 1)
         self.assertEqual(
             interaction_coverage[0]["diagnostics"],
-            {"rate_limit": {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "123"}},
+            {
+                "rate_limit": {
+                    "x-ratelimit-remaining": "0",
+                    "x-ratelimit-reset": "123",
+                },
+                "pagination": {
+                    "complete": True,
+                    "outcome": "link_exhausted",
+                },
+            },
         )
 
     def test_optional_activity_produces_explicit_ref_evidence_and_conservative_association(self) -> None:
@@ -1490,7 +1508,16 @@ class ContractTests(unittest.TestCase):
         result = paginate(transport, "/items", {}, per_page=100)
         self.assertEqual(
             result.diagnostics,
-            {"rate_limit": {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "123"}},
+            {
+                "rate_limit": {
+                    "x-ratelimit-remaining": "0",
+                    "x-ratelimit-reset": "123",
+                },
+                "pagination": {
+                    "complete": True,
+                    "outcome": "documented_short_page",
+                },
+            },
         )
 
     def test_config_requires_explicit_allowlist_and_aware_window(self) -> None:

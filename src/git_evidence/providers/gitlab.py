@@ -28,6 +28,7 @@ from .resource_base import (
 )
 from .transport import (
     ApiError,
+    HEADER_CURSOR_PAGINATION,
     JsonTransport,
     PageResult,
     ResponseShapeError,
@@ -42,6 +43,7 @@ class GitLabProvider(ResourceProvider):
     """GitLab resource collector for GitLab.com and compatible instances."""
 
     descriptor = PROVIDER_DESCRIPTORS["gitlab"]
+    pagination_strategy = HEADER_CURSOR_PAGINATION
 
     def __init__(
         self,
@@ -102,7 +104,14 @@ class GitLabProvider(ResourceProvider):
         return f"{kind}:gitlab:{target.instance}:{target.owner}/{target.name}:{native_id}"
 
     def _page(self, path: str, params: dict[str, Any]) -> PageResult:
-        return paginate(self.transport, path, params, per_page=100, max_pages=self.max_pages)
+        return paginate(
+            self.transport,
+            path,
+            params,
+            per_page=100,
+            max_pages=self.max_pages,
+            strategy=self.pagination_strategy,
+        )
 
     def _scheduled_root_path(self, target: RepositoryTarget) -> str:
         return self._project_path(target)

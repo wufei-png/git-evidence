@@ -407,8 +407,9 @@ class PaginationProgressTests(unittest.TestCase):
                 )
             }
         )
-        with self.assertRaises(ResponseShapeError):
+        with self.assertRaises(ResponseShapeError) as cycle_error:
             paginate(cycle, "/items", per_page=1)
+        self.assertEqual(cycle_error.exception.pagination_outcome, "cycle_detected")
 
         regression = MappingTransport(
             {
@@ -440,8 +441,9 @@ class PaginationProgressTests(unittest.TestCase):
                 ),
             }
         )
-        with self.assertRaises(ResponseShapeError):
+        with self.assertRaises(ResponseShapeError) as cycle_error:
             paginate(transport, "/items", per_page=1)
+        self.assertEqual(cycle_error.exception.pagination_outcome, "cycle_detected")
 
     def test_opaque_cursor_cycle_is_rejected(self) -> None:
         transport = MappingTransport(
@@ -460,8 +462,9 @@ class PaginationProgressTests(unittest.TestCase):
                 ),
             }
         )
-        with self.assertRaises(ResponseShapeError):
+        with self.assertRaises(ResponseShapeError) as cycle_error:
             paginate(transport, "/items", per_page=1)
+        self.assertEqual(cycle_error.exception.pagination_outcome, "cycle_detected")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,8 @@ from urllib.error import HTTPError
 from git_evidence.providers.transport import (
     ApiError,
     ApiResponse,
+    HEADER_CURSOR_PAGINATION,
+    LINK_PAGINATION,
     MappingTransport,
     PaginationCursor,
     UrllibTransport,
@@ -89,7 +91,16 @@ class PaginationCursorTests(unittest.TestCase):
         result = cursor.result()
         self.assertFalse(result.complete)
         self.assertEqual(result.pages, 1)
-        self.assertEqual(result.diagnostics, {"budget_exhausted": True})
+        self.assertEqual(
+            result.diagnostics,
+            {
+                "budget_exhausted": True,
+                "pagination": {
+                    "complete": False,
+                    "outcome": "max_pages_reached",
+                },
+            },
+        )
         with self.assertRaisesRegex(RuntimeError, "already complete"):
             cursor.step()
 
@@ -200,8 +211,61 @@ class PaginationCursorTests(unittest.TestCase):
 
         result = cursor.result()
         result.items.append({"id": "external"})
-        assert result.diagnostics is None
+        self.assertEqual(
+            result.diagnostics,
+            {
+                "pagination": {
+                    "complete": True,
+                    "outcome": "documented_short_page",
+                }
+            },
+        )
         self.assertEqual(cursor.result().items, [])
+
+    def test_provider_strategies_record_their_own_completion_proof(self) -> None:
+        full_page = [{"id": index} for index in range(2)]
+        link_result = paginate(
+            MappingTransport(
+                {"/items": ApiResponse("https://example.test/items", 200, {}, full_page)}
+            ),
+            "/items",
+            per_page=2,
+            strategy=LINK_PAGINATION,
+        )
+        self.assertEqual(link_result.pages, 1)
+        self.assertEqual(
+            link_result.diagnostics,
+            {"pagination": {"complete": True, "outcome": "link_exhausted"}},
+        )
+
+        cursor_result = paginate(
+            MappingTransport(
+                {
+                    "/items": [
+                        ApiResponse(
+                            "https://example.test/items?page=1",
+                            200,
+                            {"x-next-page": "2"},
+                            full_page,
+                        ),
+                        ApiResponse(
+                            "https://example.test/items?page=2",
+                            200,
+                            {},
+                            [],
+                        ),
+                    ]
+                }
+            ),
+            "/items",
+            per_page=2,
+            strategy=HEADER_CURSOR_PAGINATION,
+        )
+        self.assertEqual(cursor_result.pages, 2)
+        self.assertEqual(
+            cursor_result.diagnostics,
+            {"pagination": {"complete": True, "outcome": "cursor_exhausted"}},
+        )
 
 
 if __name__ == "__main__":

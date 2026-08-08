@@ -3,12 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import random
 import re
 import ssl
 import stat
-import tempfile
 import time
 from collections.abc import Callable, Mapping
 from copy import deepcopy
@@ -34,6 +32,8 @@ from urllib.request import (
     build_opener,
 )
 
+from .. import __version__
+from ..atomic_io import AtomicWriteError, atomic_write_text
 from ..bounds import InputLimitError, json_size_with_limit, read_bounded_bytes
 from ..bounds import validate_json_value_limits as _validate_json_value_limits
 from ..limits import (
@@ -799,28 +799,8 @@ class LocalResponseCache:
         if len(serialized_payload.encode("utf-8")) > MAX_CACHE_FILE_BYTES:
             return
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            file_descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f"{self.path.name}.", suffix=".tmp", dir=str(self.path.parent)
-            )
-            temporary = Path(temporary_name)
-            try:
-                os.fchmod(file_descriptor, 0o600)
-                with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
-                    handle.write(serialized_payload)
-                os.replace(temporary, self.path)
-                os.chmod(self.path, 0o600)
-            except Exception:
-                try:
-                    os.close(file_descriptor)
-                except OSError:
-                    pass
-                try:
-                    temporary.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                raise
-        except (OSError, TypeError, ValueError):
+            atomic_write_text(self.path, serialized_payload)
+        except (AtomicWriteError, TypeError, ValueError):
             return
 
 
@@ -897,6 +877,7 @@ class ApiError(RuntimeError):
         failure_class: str | None = None,
         rate_limit: Mapping[str, str] | None = None,
         failure_classes: tuple[str, ...] | None = None,
+        pagination_outcome: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -912,6 +893,7 @@ class ApiError(RuntimeError):
                 if isinstance(value, str) and value
             )
         )
+        self.pagination_outcome = pagination_outcome
 
     def add_failure_class(self, failure_class: str | None) -> None:
         if not isinstance(failure_class, str) or not failure_class:
@@ -1475,7 +1457,7 @@ class UrllibRequestCursor:
         headers = {
             "Accept": "application/json",
             "Accept-Encoding": "identity",
-            "User-Agent": "git-evidence/0.1",
+            "User-Agent": f"git-evidence/{__version__}",
         }
         if transport.token and not transport.token_param:
             headers[transport.token_header] = (
@@ -1622,6 +1604,122 @@ class PageResult:
     diagnostics: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class PaginationDecision:
+    """One provider-owned decision about the next pagination transition."""
+
+    next_url: str | None = None
+    next_page: int | None = None
+    complete: bool = False
+    outcome: str | None = None
+
+
+class PaginationStrategy(Protocol):
+    """Provider contract for interpreting its documented pagination signals."""
+
+    def decide(
+        self,
+        response: ApiResponse,
+        *,
+        page_size: int,
+        per_page: int,
+    ) -> PaginationDecision: ...
+
+
+class LinkPaginationStrategy:
+    """Follow RFC Link next relations; their absence proves exhaustion."""
+
+    def decide(
+        self,
+        response: ApiResponse,
+        *,
+        page_size: int,
+        per_page: int,
+    ) -> PaginationDecision:
+        del page_size, per_page
+        headers = response.headers if isinstance(response.headers, Mapping) else {}
+        link_header = _header_get(headers, "link") or ""
+        parsed_links = parse_link_header(link_header) if link_header else ()
+        if parsed_links is None:
+            raise ResponseShapeError(f"invalid Link header from {response.url}")
+        next_url = next_link_url(link_header)
+        if next_url:
+            return PaginationDecision(next_url=next_url)
+        return PaginationDecision(complete=True, outcome="link_exhausted")
+
+
+class HeaderCursorPaginationStrategy:
+    """Follow GitLab-style numeric next-page headers until exhausted."""
+
+    def decide(
+        self,
+        response: ApiResponse,
+        *,
+        page_size: int,
+        per_page: int,
+    ) -> PaginationDecision:
+        del page_size, per_page
+        headers = response.headers if isinstance(response.headers, Mapping) else {}
+        next_page = _header_get(headers, "x-next-page") or _header_get(
+            headers, "x-next-page-number"
+        )
+        if next_page in (None, ""):
+            return PaginationDecision(complete=True, outcome="cursor_exhausted")
+        try:
+            page_number = int(next_page)
+        except (TypeError, ValueError) as exc:
+            raise ResponseShapeError(
+                f"invalid x-next-page header from {response.url}"
+            ) from exc
+        if page_number <= 0:
+            return PaginationDecision(complete=True, outcome="cursor_exhausted")
+        return PaginationDecision(next_page=page_number)
+
+
+class DocumentedShortPagePaginationStrategy:
+    """Compatibility strategy for explicitly documented page-number APIs."""
+
+    def decide(
+        self,
+        response: ApiResponse,
+        *,
+        page_size: int,
+        per_page: int,
+    ) -> PaginationDecision:
+        headers = response.headers if isinstance(response.headers, Mapping) else {}
+        link_header = _header_get(headers, "link") or ""
+        parsed_links = parse_link_header(link_header) if link_header else ()
+        if parsed_links is None:
+            raise ResponseShapeError(f"invalid Link header from {response.url}")
+        next_url = next_link_url(link_header)
+        if next_url:
+            return PaginationDecision(next_url=next_url)
+        next_page = _header_get(headers, "x-next-page") or _header_get(
+            headers, "x-next-page-number"
+        )
+        if next_page not in (None, ""):
+            try:
+                page_number = int(next_page)
+            except (TypeError, ValueError) as exc:
+                raise ResponseShapeError(
+                    f"invalid x-next-page header from {response.url}"
+                ) from exc
+            if page_number <= 0:
+                return PaginationDecision(complete=True, outcome="cursor_exhausted")
+            return PaginationDecision(next_page=page_number)
+        if page_size < per_page:
+            return PaginationDecision(
+                complete=True,
+                outcome="documented_short_page",
+            )
+        return PaginationDecision()
+
+
+LINK_PAGINATION = LinkPaginationStrategy()
+HEADER_CURSOR_PAGINATION = HeaderCursorPaginationStrategy()
+DOCUMENTED_SHORT_PAGE_PAGINATION = DocumentedShortPagePaginationStrategy()
+
+
 def _pagination_request_identity(
     path: str,
     params: Mapping[str, Any] | None,
@@ -1703,12 +1801,14 @@ class PaginationCursor:
         *,
         per_page: int = 100,
         max_pages: int = 100,
+        strategy: PaginationStrategy = DOCUMENTED_SHORT_PAGE_PAGINATION,
     ) -> None:
         self.transport = transport
         self.path = path
         self.params = deepcopy(dict(params or {}))
         self.per_page = per_page
         self.max_pages = max_pages
+        self.strategy = strategy
         self._validate_limits()
         self.base_params = dict(self.params)
         self.base_params.setdefault("per_page", per_page)
@@ -1740,15 +1840,19 @@ class PaginationCursor:
         if max_pages < 1 or max_pages > MAX_PAGES:
             raise ValueError(f"max_pages must be in [1, {MAX_PAGES}]")
 
-    def _finish(self, *, complete: bool) -> None:
+    def _finish(self, *, complete: bool, outcome: str) -> None:
         self.done = True
         self.complete = complete
+        self.diagnostics["pagination"] = {
+            "outcome": outcome,
+            "complete": complete,
+        }
         if not complete:
             self.diagnostics["budget_exhausted"] = True
 
     def _continue_or_exhaust(self) -> None:
         if self.pages >= self.max_pages:
-            self._finish(complete=False)
+            self._finish(complete=False, outcome="max_pages_reached")
 
     def step(self) -> None:
         if self._failure is not None:
@@ -1796,6 +1900,7 @@ class PaginationCursor:
             raise ResponseShapeError(
                 "provider pagination repeated a request target",
                 failure_class="malformed_response",
+                pagination_outcome="cycle_detected",
             )
         if self._request_cursor is None:
             begin_get = getattr(self.transport, "begin_get", None)
@@ -1836,6 +1941,7 @@ class PaginationCursor:
                 raise ResponseShapeError(
                     f"provider pagination repeated a response target from {response.url}",
                     failure_class="malformed_response",
+                    pagination_outcome="cycle_detected",
                 )
             self.visited_responses.add(response_identity)
         page_items = [item for item in response.body if isinstance(item, dict)]
@@ -1868,25 +1974,24 @@ class PaginationCursor:
                 failure_class="limit_exceeded",
             )
 
-        headers = (
-            response.headers if callable(getattr(response.headers, "get", None)) else {}
+        decision = self.strategy.decide(
+            response,
+            page_size=len(page_items),
+            per_page=self.per_page,
         )
-        link_header = _header_get(headers, "link") or ""
-        parsed_links = parse_link_header(link_header) if link_header else ()
-        if parsed_links is None:
-            raise ResponseShapeError(f"invalid Link header from {response.url}")
-        next_url = next_link_url(link_header)
-        next_page = _header_get(headers, "x-next-page") or _header_get(
-            headers,
-            "x-next-page-number",
-        )
-        if next_url:
-            next_identity = _pagination_request_identity(next_url, None)
+        if decision.complete:
+            self._finish(
+                complete=True,
+                outcome=decision.outcome or "documented_short_page",
+            )
+            return
+        if decision.next_url:
+            next_identity = _pagination_request_identity(decision.next_url, None)
             current_page = (
                 _pagination_page_number(self.current_path, self.current_params)
                 or self.pages
             )
-            next_page_from_url = _pagination_page_number(next_url, None)
+            next_page_from_url = _pagination_page_number(decision.next_url, None)
             if (
                 next_identity in self.visited_requests
                 or next_identity in self.visited_responses
@@ -1894,26 +1999,19 @@ class PaginationCursor:
                 raise ResponseShapeError(
                     f"provider pagination cycle detected from {response.url}",
                     failure_class="malformed_response",
+                    pagination_outcome="cycle_detected",
                 )
             if next_page_from_url is not None and next_page_from_url <= current_page:
                 raise ResponseShapeError(
                     f"provider pagination page regressed from {response.url}",
                     failure_class="malformed_response",
                 )
-            self.current_path = next_url
+            self.current_path = decision.next_url
             self.current_params = None
             self._continue_or_exhaust()
             return
-        if next_page:
-            try:
-                next_page_number = int(next_page)
-            except ValueError as exc:
-                raise ResponseShapeError(
-                    f"invalid x-next-page header from {response.url}"
-                ) from exc
-            if next_page_number <= 0:
-                self._finish(complete=True)
-                return
+        if decision.next_page is not None:
+            next_page_number = decision.next_page
             current_page = (
                 _pagination_page_number(self.current_path, self.current_params)
                 or self.pages
@@ -1926,9 +2024,6 @@ class PaginationCursor:
             self.current_path = self.path
             self.current_params = {**self.base_params, "page": next_page_number}
             self._continue_or_exhaust()
-            return
-        if len(page_items) < self.per_page:
-            self._finish(complete=True)
             return
         current_page = _pagination_page_number(self.current_path, self.current_params)
         self.current_path = self.path
@@ -1958,6 +2053,7 @@ def paginate(
     *,
     per_page: int = 100,
     max_pages: int = 100,
+    strategy: PaginationStrategy = DOCUMENTED_SHORT_PAGE_PAGINATION,
 ) -> PageResult:
     """Follow Link, x-next-page, or page-size pagination without silent truncation."""
     cursor = PaginationCursor(
@@ -1966,6 +2062,7 @@ def paginate(
         params,
         per_page=per_page,
         max_pages=max_pages,
+        strategy=strategy,
     )
     while not cursor.done:
         cursor.step()

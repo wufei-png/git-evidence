@@ -198,6 +198,24 @@
         "attempts": {"type": "integer", "minimum": 1},
         "retryable": {"type": "boolean"},
         "retry_after_seconds": {"type": "number", "minimum": 0},
+        "pagination": {
+          "type": "object",
+          "required": ["outcome", "complete"],
+          "properties": {
+            "outcome": {
+              "enum": [
+                "cursor_exhausted",
+                "link_exhausted",
+                "documented_short_page",
+                "date_boundary_reached",
+                "max_pages_reached",
+                "cycle_detected"
+              ]
+            },
+            "complete": {"type": "boolean"}
+          },
+          "additionalProperties": false
+        },
         "rate_limit": {
           "type": "object",
           "properties": {

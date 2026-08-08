@@ -119,7 +119,8 @@ def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
     hard_issues = [
         issue
         for issue in validation_issues
-        if not issue.code.startswith("coverage.")
+        if issue.severity == "error"
+        and not issue.code.startswith("coverage.")
         and issue.code not in {"collection.insecure_transport", "collection.limit_exceeded"}
         and not (issue.code == "scope.repository_missing" and group_failures)
     ]

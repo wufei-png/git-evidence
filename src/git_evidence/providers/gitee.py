@@ -27,6 +27,7 @@ from .resource_base import (
 from .transport import (
     ApiError,
     JsonTransport,
+    LINK_PAGINATION,
     PageResult,
     ResponseShapeError,
     UrllibTransport,
@@ -40,6 +41,7 @@ class GiteeProvider(ResourceProvider):
     """Gitee v5 resource collector; activity/ref APIs remain optional."""
 
     descriptor = PROVIDER_DESCRIPTORS["gitee"]
+    pagination_strategy = LINK_PAGINATION
 
     def __init__(
         self,
@@ -100,7 +102,14 @@ class GiteeProvider(ResourceProvider):
         return f"{kind}:gitee:{target.instance}:{target.owner}/{target.name}:{native_id}"
 
     def _page(self, path: str, params: dict[str, Any]) -> PageResult:
-        return paginate(self.transport, path, params, per_page=100, max_pages=self.max_pages)
+        return paginate(
+            self.transport,
+            path,
+            params,
+            per_page=100,
+            max_pages=self.max_pages,
+            strategy=self.pagination_strategy,
+        )
 
     def _scheduled_root_path(self, target: RepositoryTarget) -> str:
         return self._repo_path(target)

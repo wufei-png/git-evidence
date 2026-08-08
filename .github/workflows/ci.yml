@@ -76,7 +76,9 @@ jobs:
               "schemas/evidence-bundle-0.1.schema.json"
           ).read_text(encoding="utf-8")
           assert json.loads(schema)["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+          assert files("git_evidence").joinpath("py.typed").is_file()
           PY
+          "$smoke_root/venv/bin/git-evidence" --version
           "$smoke_root/venv/bin/git-evidence" providers > providers.json
           "$smoke_root/venv/bin/git-evidence" doctor --config "$repo/config.example.yml"
           "$smoke_root/venv/bin/git-evidence" validate "$repo/fixtures/example_bundle.json"

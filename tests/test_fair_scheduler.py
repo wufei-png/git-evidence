@@ -22,8 +22,12 @@ from git_evidence.providers.transport import ApiError, ApiResponse, MappingTrans
 from git_evidence.privacy import PrivacyError
 
 
-def response(url: str, body: Any) -> ApiResponse:
-    return ApiResponse(url, 200, {}, body)
+def response(
+    url: str,
+    body: Any,
+    headers: dict[str, str] | None = None,
+) -> ApiResponse:
+    return ApiResponse(url, 200, headers or {}, body)
 
 
 def two_repository_request(
@@ -112,10 +116,19 @@ def large_first_page_transport() -> MappingTransport:
         }
         for index in range(1, 101)
     ]
+    second_page = f"https://api.github.com{path}?page=2"
     transport.responses[path] = [
-        response(f"https://api.github.com{path}?page=1", full_out_of_window_page),
-        response(f"https://api.github.com{path}?page=2", []),
+        response(
+            f"https://api.github.com{path}?page=1",
+            full_out_of_window_page,
+            {
+                "Link": (
+                    f'<{second_page}>; rel="next"'
+                )
+            },
+        ),
     ]
+    transport.responses[second_page] = [response(second_page, [])]
     comment_path = "/repos/a/large/issues/1/comments"
     transport.responses[comment_path] = [
         response(f"https://api.github.com{comment_path}?page=1", [])
@@ -183,7 +196,10 @@ class FairSchedulerTests(unittest.TestCase):
             "/repos/z/small/releases",
         ]
         self.assertEqual(paths[:10], expected_first_round)
-        self.assertEqual(paths[10], "/repos/a/large/issues")
+        self.assertEqual(
+            paths[10],
+            "https://api.github.com/repos/a/large/issues?page=2",
+        )
 
     def test_repository_permutation_has_identical_schedule(self) -> None:
         first = large_first_page_transport()

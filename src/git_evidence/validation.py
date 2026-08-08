@@ -13,7 +13,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import SchemaError
 
 from .model import COLLECTION_KEYS, collection
-from .privacy import iter_privacy_violations
+from .privacy import iter_privacy_violations, iter_privacy_warnings
 from .providers.base import (
     ACTIVITY_SOURCES,
     OPTIONAL_COVERAGE_WARNING_CODE,
@@ -23,8 +23,8 @@ from .providers.base import (
     git_object_id_algorithm,
     is_verifiable_sha,
     merge_capability_status,
+    validate_instance,
 )
-from .providers.catalog import PROVIDER_REGISTRY
 from .providers.resource_base import repository_url_matches_target
 
 CAPABILITY_STATES = {"supported", "unsupported", "unavailable", "incomplete"}
@@ -55,6 +55,20 @@ BLOCKER_CODES = {
     "privacy_violation",
     "required_source_failure",
     "required_source_incomplete",
+}
+PAGINATION_OUTCOMES = {
+    "cursor_exhausted": True,
+    "link_exhausted": True,
+    "documented_short_page": True,
+    "date_boundary_reached": True,
+    "max_pages_reached": False,
+    "cycle_detected": False,
+}
+PAGINATED_COVERAGE_SOURCES = frozenset(RESOURCE_SOURCES) - {"repositories"}
+PROVIDER_PAGINATION_OUTCOMES = {
+    "github": "link_exhausted",
+    "gitee": "link_exhausted",
+    "gitlab": "cursor_exhausted",
 }
 SUBJECT_COLLECTIONS = {
     "provider": "providers",
@@ -755,8 +769,22 @@ def _validate_provenance(
         if not isinstance(kind, str) or not kind or not isinstance(instance, str) or not instance:
             _issue(issues, "provider.provenance", f"provider {provider_id} must declare kind and instance")
             continue
-        if not PROVIDER_REGISTRY.contains(kind):
-            _issue(issues, "provider.unknown", f"provider {provider_id} has unsupported kind {kind!r}")
+        if re.fullmatch(r"[a-z][a-z0-9_-]*", kind) is None:
+            _issue(
+                issues,
+                "provider.kind",
+                f"provider {provider_id} has an invalid embedded namespace",
+            )
+        try:
+            canonical_instance = validate_instance(instance)
+        except ValueError:
+            canonical_instance = None
+        if canonical_instance != instance:
+            _issue(
+                issues,
+                "provider.instance",
+                f"provider {provider_id} has a non-canonical embedded instance",
+            )
         expected_id = f"provider:{kind}:{instance}"
         if provider_id != expected_id:
             _issue(
@@ -1145,6 +1173,7 @@ def _validate_coverage(
         if state not in CAPABILITY_STATES:
             _issue(issues, "coverage.observation_status", f"coverage {source} has invalid status: {state!r}")
         diagnostics = observation.get("diagnostics")
+        pagination: Any = None
         if diagnostics is not None:
             if not isinstance(diagnostics, dict):
                 _issue(issues, "coverage.diagnostics_shape", f"coverage {source} diagnostics must be an object")
@@ -1172,6 +1201,51 @@ def _validate_coverage(
                         "coverage.failure_classes",
                         f"coverage {source} has invalid failure_classes: {failure_classes!r}",
                     )
+                pagination = diagnostics.get("pagination")
+                if pagination is not None:
+                    if not isinstance(pagination, dict):
+                        _issue(
+                            issues,
+                            "coverage.pagination_shape",
+                            f"coverage {source} pagination must be an object",
+                        )
+                    else:
+                        outcome = pagination.get("outcome")
+                        complete = pagination.get("complete")
+                        if outcome not in PAGINATION_OUTCOMES:
+                            _issue(
+                                issues,
+                                "coverage.pagination_outcome",
+                                f"coverage {source} has an unknown pagination outcome",
+                            )
+                        elif complete is not PAGINATION_OUTCOMES[outcome]:
+                            _issue(
+                                issues,
+                                "coverage.pagination_completion",
+                                f"coverage {source} pagination proof contradicts completion",
+                            )
+                        if state == "supported" and complete is not True:
+                            _issue(
+                                issues,
+                                "coverage.pagination_supported_incomplete",
+                                f"coverage {source} is supported without a complete pagination proof",
+                            )
+                        provider_id = observation.get("provider_id")
+                        provider = indexes.get("providers", {}).get(provider_id, {})
+                        provider_kind = provider.get("kind") if isinstance(provider, dict) else None
+                        expected_outcome = PROVIDER_PAGINATION_OUTCOMES.get(provider_kind)
+                        if (
+                            state == "supported"
+                            and expected_outcome is not None
+                            and outcome in PAGINATION_OUTCOMES
+                            and outcome != expected_outcome
+                        ):
+                            _issue(
+                                issues,
+                                "coverage.pagination_provider_outcome",
+                                f"coverage {source} uses {outcome!r}, not the documented "
+                                f"{provider_kind} terminal outcome {expected_outcome!r}",
+                            )
                 operational_failures = (
                     _diagnostic_failure_classes(diagnostics) & OPERATIONAL_FAILURE_CLASSES
                 )
@@ -1184,6 +1258,16 @@ def _validate_coverage(
                     )
                 if source in ACTIVITY_SOURCES and "privacy_violation" in operational_failures:
                     optional_privacy_observations.append(observation)
+        if (
+            source in PAGINATED_COVERAGE_SOURCES
+            and state == "supported"
+            and not isinstance(pagination, dict)
+        ):
+            _issue(
+                issues,
+                "coverage.pagination_missing",
+                f"coverage {source} is supported without a terminal pagination proof",
+            )
         repository_id = observation.get("repository_id")
         if not isinstance(repository_id, str) or not repository_id.strip():
             _issue(
@@ -1423,15 +1507,6 @@ def _validate_coverage(
                 else None
             )
             if (
-                isinstance(provider_kind, str)
-                and not PROVIDER_REGISTRY.contains(provider_kind)
-            ):
-                _issue(
-                    issues,
-                    "coverage.fatal_provider",
-                    f"coverage.fatal[{position}] uses an unsupported provider",
-                )
-            if (
                 expected_provider_id is not None
                 and expected_provider_id not in indexes.get("providers", {})
             ):
@@ -1517,12 +1592,6 @@ def _validate_coverage(
         repository_id = failure.get("repository")
         source = failure.get("source")
         failure_class = failure.get("failure_class")
-        if isinstance(provider_kind, str) and not PROVIDER_REGISTRY.contains(provider_kind):
-            _issue(
-                issues,
-                "coverage.group_failure_provider",
-                f"coverage.group_failures[{position}] uses unsupported provider: {provider_kind}",
-            )
         expected_provider_id = (
             f"provider:{provider_kind}:{instance}"
             if isinstance(provider_kind, str) and isinstance(instance, str)
@@ -1623,7 +1692,21 @@ def _validate_coverage(
 
 def _validate_privacy(bundle: dict[str, Any], issues: list[ValidationIssue]) -> None:
     for path, reason in iter_privacy_violations(bundle):
-        _issue(issues, f"privacy.{reason}", f"public payload is unsafe at {path}")
+        _issue(
+            issues,
+            f"privacy.{reason}",
+            f"public payload is unsafe at {path}",
+            path=path,
+        )
+    for path, reason in iter_privacy_warnings(bundle):
+        _issue(
+            issues,
+            f"privacy.{reason}",
+            f"public payload contains low-confidence secret-like text at {path}",
+            severity="warning",
+            path=path,
+            remediation="Review the source text before disclosing this bundle or report.",
+        )
 
     policy = bundle.get("privacy")
     if policy is None:
@@ -1755,9 +1838,12 @@ def compute_render_eligibility(
     required_sources_contract: Iterable[str] | None = None,
 ) -> bool:
     """Derive publication eligibility solely from intrinsic bundle invariants."""
-    return not _validate_intrinsic(
-        bundle,
-        required_sources_contract=required_sources_contract,
+    return not any(
+        issue.severity == "error"
+        for issue in _validate_intrinsic(
+            bundle,
+            required_sources_contract=required_sources_contract,
+        )
     )
 
 
@@ -1789,7 +1875,7 @@ def validate_bundle(
         bundle,
         required_sources_contract=required_sources_contract,
     )
-    eligible = not issues
+    eligible = not any(issue.severity == "error" for issue in issues)
     coverage = bundle.get("coverage") if isinstance(bundle, dict) else None
     declared = coverage.get("allow_publish") if isinstance(coverage, dict) else None
     if not eligible:

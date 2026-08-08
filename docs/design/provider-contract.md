@@ -43,7 +43,17 @@ sources are complete.
 ## Pagination and failure rules
 
 - A page is complete only when the provider has followed its documented next
-  page/cursor signal.
+  page/cursor signal. GitHub and Gitee follow the HTTP `Link` next relation
+  until it is absent; GitLab follows `X-Next-Page` until it is absent or zero.
+  The generic short-page strategy is retained only for endpoints whose native
+  contract explicitly documents that proof; provider adapters do not silently
+  fall back to it.
+- Every terminal page records a typed pagination outcome. `link_exhausted`,
+  `cursor_exhausted`, and an explicitly documented `documented_short_page`
+  prove completeness. `max_pages_reached` and `cycle_detected` are incomplete
+  outcomes and close the publication gate. A required paginated source cannot
+  be `supported` when this proof is missing, incomplete, or inconsistent with
+  the known provider strategy.
 - A cached or replayed response is data only when its status is a non-boolean
   2xx value. Cached pagination and rate-limit headers are allowlisted, format
   checked, and credential-checked before replay; unsafe headers cause a cache
@@ -78,8 +88,12 @@ sources are complete.
   and coverage, while the shared validator derives publication eligibility.
 - Native fields without a safe common mapping remain provider-specific rather
   than being guessed into a common field.
-- Every coverage observation is keyed by registered provider, allowlisted
-  repository, and source. Repeated canonical IDs are not silently accepted:
+- Every coverage observation is keyed by a syntactically valid provider kind,
+  canonical instance, allowlisted repository, and source. Offline validation
+  deliberately does not require that provider adapter to be installed in the
+  validating process, so a canonical bundle remains independently verifiable.
+  Collection still requires a registered adapter. Repeated canonical IDs are
+  not silently accepted:
   valid siblings remain, while the source becomes `incomplete` with
   `malformed_response` diagnostics and the render gate remains closed.
 

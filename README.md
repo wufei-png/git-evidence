@@ -12,8 +12,8 @@ explicit coverage boundary.
 
 This project is in the implementation and contract-hardening stage. Its
 product is a standalone CLI/library that collects platform data, normalizes it
-into a versioned evidence bundle, validates coverage, and renders reproducible
-Markdown or JSON reports. Agent skills and scheduled jobs are optional
+into a versioned JSON evidence bundle, validates coverage, and renders
+reproducible Markdown reports. Agent skills and scheduled jobs are optional
 adapters around that core, not the source of truth.
 
 ## Why it exists
@@ -65,14 +65,25 @@ The current slice can replay a bundle offline or collect an explicitly scoped
 bundle from configured providers:
 
 ```bash
-PYTHONPATH=src python3 -m git_evidence providers
-PYTHONPATH=src python3 -m git_evidence doctor --config config.example.yml
-PYTHONPATH=src python3 -m git_evidence collect --config config.example.yml \
+python -m pip install .
+git-evidence --version
+git-evidence providers
+git-evidence doctor --config config.example.yml
+git-evidence collect --config config.example.yml \
   --output evidence/bundle.json
-PYTHONPATH=src python3 -m git_evidence validate fixtures/example_bundle.json
-PYTHONPATH=src python3 -m git_evidence render fixtures/example_bundle.json \
+git-evidence validate fixtures/example_bundle.json
+git-evidence render fixtures/example_bundle.json \
   --config config.example.yml --profile project-first --output report.md
 ```
+
+`validate` and `collect` accept `--diagnostics-format json` for structured
+automation output. JSON mode emits one document per diagnostic stream with a
+stable `status`, an `issues` array, and collection summary counts; it never
+mixes prose into that document. Exit statuses are stable: `0` success (possibly with
+non-blocking warnings), `1` validation/render-eligibility failure, `2`
+configuration/input/I/O failure, and `3` a core provider-group collection
+failure. Bundle, report, and cache files use atomic replacement and mode
+`0600`; stdout remains available when no output path is supplied.
 
 The v0.1 CLI status word `publishable` is legacy wording for render eligibility
 only. A successful collect, validate, or render command does not approve

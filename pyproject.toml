@@ -1,14 +1,14 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "git-evidence"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Git Evidence: evidence-first engineering activity reports across GitHub, GitLab, and Gitee"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 dependencies = [
     "PyYAML>=6.0",
     "idna>=3.7,<4",
@@ -22,5 +22,8 @@ git-evidence = "git_evidence.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.dynamic]
+version = {attr = "git_evidence.__version__"}
+
 [tool.setuptools.package-data]
-git_evidence = ["schemas/*.json"]
+git_evidence = ["py.typed", "schemas/*.json"]

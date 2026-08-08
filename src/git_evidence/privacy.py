@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 import re
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, quote_plus, unquote, urlencode, urlsplit, urlunsplit
 
 
 class PrivacyError(ValueError):
@@ -55,6 +55,25 @@ AUTH_QUERY_NAMES = frozenset(
         "sig",
         "token",
     }
+)
+_INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_PRIVATE_KEY_MARKER = re.compile(
+    r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----",
+    re.IGNORECASE,
+)
+_AUTHORIZATION_ASSIGNMENT = re.compile(
+    r"\bauthorization\s*:\s*(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}",
+    re.IGNORECASE,
+)
+_JWT_TOKEN = re.compile(
+    r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+)
+_KNOWN_PAT = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,})\b"
+)
+_LOW_CONFIDENCE_ASSIGNMENT = re.compile(
+    r"\b(?:access[_-]?token|api[_-]?key|password|secret|token)\s*[=:]\s*\S+",
+    re.IGNORECASE,
 )
 
 
@@ -258,7 +277,70 @@ def is_url_field(name: Any) -> bool:
     return normalized in {"url", "href", "source_url"} or normalized.endswith("_url")
 
 
-def iter_privacy_violations(value: Any, *, path: str = "$") -> Iterator[tuple[str, str]]:
+def _secret_variants(secret_values: Iterable[str] | None) -> set[str]:
+    variants: set[str] = set()
+    for secret in secret_values or ():
+        if not isinstance(secret, str) or len(secret) < 4:
+            continue
+        variants.update({secret, quote(secret, safe=""), quote_plus(secret, safe="")})
+    return {value for value in variants if value}
+
+
+def contains_high_confidence_secret(
+    value: Any,
+    *,
+    secret_values: Iterable[str] | None = None,
+) -> bool:
+    """Detect secret material with a sufficiently low false-positive rate."""
+    if not isinstance(value, str) or not value:
+        return False
+    return (
+        any(variant in value for variant in _secret_variants(secret_values))
+        or _PRIVATE_KEY_MARKER.search(value) is not None
+        or _AUTHORIZATION_ASSIGNMENT.search(value) is not None
+        or _JWT_TOKEN.search(value) is not None
+        or _KNOWN_PAT.search(value) is not None
+    )
+
+
+def _sanitize_url_field(
+    value: Any,
+    *,
+    path: str,
+    secret_values: Iterable[str] | None = None,
+) -> Any:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise PrivacyError(f"public payload contains a malformed URL at {path}")
+    if _INVALID_PERCENT_ESCAPE.search(value) or any(
+        ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F
+        for character in value
+    ):
+        raise PrivacyError(f"public payload contains a malformed URL at {path}")
+    try:
+        parts = urlsplit(value)
+        unquote(parts.path, errors="strict")
+        unquote(parts.query, errors="strict")
+        unquote(parts.fragment, errors="strict")
+        hostname = parts.hostname
+        parts.port
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise PrivacyError(f"public payload contains a malformed URL at {path}") from exc
+    if parts.scheme not in {"http", "https"} or not parts.netloc or not hostname:
+        raise PrivacyError(f"public payload contains a malformed URL at {path}")
+    sanitized = sanitize_public_url(value)
+    if contains_high_confidence_secret(sanitized, secret_values=secret_values):
+        raise PrivacyError(f"public payload contains secret material at {path}")
+    return sanitized
+
+
+def iter_privacy_violations(
+    value: Any,
+    *,
+    path: str = "$",
+    secret_values: Iterable[str] | None = None,
+) -> Iterator[tuple[str, str]]:
     """Find sensitive field names and auth-bearing URLs without exposing values."""
     if isinstance(value, dict):
         for key, child in value.items():
@@ -267,13 +349,57 @@ def iter_privacy_violations(value: Any, *, path: str = "$") -> Iterator[tuple[st
                 yield child_path, "sensitive_field"
             if is_url_field(key) and has_auth_material(child):
                 yield child_path, "auth_url"
-            yield from iter_privacy_violations(child, path=child_path)
+            if is_url_field(key):
+                try:
+                    _sanitize_url_field(
+                        child,
+                        path=child_path,
+                        secret_values=secret_values,
+                    )
+                except PrivacyError:
+                    yield child_path, "malformed_url"
+            yield from iter_privacy_violations(
+                child,
+                path=child_path,
+                secret_values=secret_values,
+            )
     elif isinstance(value, list):
         for index, child in enumerate(value):
-            yield from iter_privacy_violations(child, path=f"{path}[{index}]")
+            yield from iter_privacy_violations(
+                child,
+                path=f"{path}[{index}]",
+                secret_values=secret_values,
+            )
+    elif contains_high_confidence_secret(value, secret_values=secret_values):
+        yield path, "secret_material"
 
 
-def sanitize_public_payload(value: Any, *, path: str = "$") -> Any:
+def iter_privacy_warnings(
+    value: Any,
+    *,
+    path: str = "$",
+) -> Iterator[tuple[str, str]]:
+    """Find low-confidence secret-like text without blocking publication."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield from iter_privacy_warnings(child, path=f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield from iter_privacy_warnings(child, path=f"{path}[{index}]")
+    elif (
+        isinstance(value, str)
+        and _LOW_CONFIDENCE_ASSIGNMENT.search(value) is not None
+        and not contains_high_confidence_secret(value)
+    ):
+        yield path, "possible_secret_material"
+
+
+def sanitize_public_payload(
+    value: Any,
+    *,
+    path: str = "$",
+    secret_values: Iterable[str] | None = None,
+) -> Any:
     """Copy a canonical payload, sanitize URLs, and reject credential fields."""
     if isinstance(value, dict):
         result: dict[Any, Any] = {}
@@ -282,15 +408,37 @@ def sanitize_public_payload(value: Any, *, path: str = "$") -> Any:
             if is_sensitive_field(key):
                 raise PrivacyError(f"public payload contains a sensitive field at {child_path}")
             result[key] = (
-                sanitize_public_url(child)
+                _sanitize_url_field(
+                    child,
+                    path=child_path,
+                    secret_values=secret_values,
+                )
                 if is_url_field(key)
-                else sanitize_public_payload(child, path=child_path)
+                else sanitize_public_payload(
+                    child,
+                    path=child_path,
+                    secret_values=secret_values,
+                )
             )
         return result
     if isinstance(value, list):
-        return [sanitize_public_payload(child, path=f"{path}[{index}]") for index, child in enumerate(value)]
+        return [
+            sanitize_public_payload(
+                child,
+                path=f"{path}[{index}]",
+                secret_values=secret_values,
+            )
+            for index, child in enumerate(value)
+        ]
     if isinstance(value, tuple):
         return tuple(
-            sanitize_public_payload(child, path=f"{path}[{index}]") for index, child in enumerate(value)
+            sanitize_public_payload(
+                child,
+                path=f"{path}[{index}]",
+                secret_values=secret_values,
+            )
+            for index, child in enumerate(value)
         )
+    if contains_high_confidence_secret(value, secret_values=secret_values):
+        raise PrivacyError(f"public payload contains secret material at {path}")
     return value
