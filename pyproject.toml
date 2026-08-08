@@ -13,6 +13,7 @@ dependencies = [
     "PyYAML>=6.0",
     "idna>=3.7,<4",
     "jsonschema>=4.18",
+    "rfc8785>=0.1.4,<0.2",
     "tzdata>=2025.2",
 ]
 

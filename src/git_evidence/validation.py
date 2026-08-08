@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
@@ -13,6 +15,12 @@ from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import SchemaError
 
 from .model import COLLECTION_KEYS, collection
+from .identity import (
+    IdentityError,
+    compute_bundle_digest,
+    compute_plan_id,
+    normalize_plan,
+)
 from .privacy import iter_privacy_violations, iter_privacy_warnings
 from .providers.base import (
     ACTIVITY_SOURCES,
@@ -82,7 +90,10 @@ SUBJECT_COLLECTIONS = {
     "release": "releases",
 }
 FACT_SUBJECT_TYPES = tuple(SUBJECT_COLLECTIONS)
-SCHEMA_RESOURCE = "schemas/evidence-bundle-0.1.schema.json"
+SCHEMA_RESOURCES = {
+    "0.1": "schemas/evidence-bundle-0.1.schema.json",
+    "0.2": "schemas/evidence-bundle-0.2.schema.json",
+}
 RFC3339_DATE_TIME = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
 )
@@ -257,23 +268,29 @@ def _issue(
     )
 
 
-@lru_cache(maxsize=1)
-def _schema_validator() -> Draft202012Validator:
-    resource = files("git_evidence").joinpath(SCHEMA_RESOURCE)
+@lru_cache(maxsize=len(SCHEMA_RESOURCES))
+def _schema_validator(schema_version: str) -> Draft202012Validator:
+    resource_name = SCHEMA_RESOURCES.get(schema_version)
+    if resource_name is None:
+        raise ValueError(f"unsupported schema_version: {schema_version!r}")
+    resource = files("git_evidence").joinpath(resource_name)
     schema = json.loads(resource.read_text(encoding="utf-8"))
     checker = FormatChecker()
 
     @checker.checks("date-time")
     def _check_date_time(value: Any) -> bool:
+        if not isinstance(value, str):
+            return True
         return (
-            isinstance(value, str)
-            and RFC3339_DATE_TIME.fullmatch(value) is not None
+            RFC3339_DATE_TIME.fullmatch(value) is not None
             and _parse_timestamp(value) is not None
         )
 
     @checker.checks("uri")
     def _check_uri(value: Any) -> bool:
-        if not isinstance(value, str) or not value or any(character.isspace() for character in value):
+        if not isinstance(value, str):
+            return True
+        if not value or any(character.isspace() for character in value):
             return False
         return bool(urlparse(value).scheme)
 
@@ -290,9 +307,14 @@ def _schema_path(path: Iterable[Any]) -> str:
     return rendered
 
 
-def _validate_schema(value: Any, issues: list[ValidationIssue]) -> None:
+def _validate_schema(
+    value: Any,
+    issues: list[ValidationIssue],
+    *,
+    schema_version: str,
+) -> None:
     try:
-        validator = _schema_validator()
+        validator = _schema_validator(schema_version)
     except (OSError, json.JSONDecodeError, SchemaError) as exc:
         _issue(issues, "schema.load", f"cannot load canonical bundle schema: {exc}")
         return
@@ -1762,14 +1784,16 @@ def _validate_collection_transport(bundle: dict[str, Any], issues: list[Validati
             pending.extend(item for item in nested_groups if isinstance(item, dict))
 
 
-def _validate_intrinsic(
+def _validate_v01_intrinsic(
     bundle: dict[str, Any],
     *,
     required_sources_contract: Iterable[str] | None = None,
+    check_schema: bool = True,
 ) -> list[ValidationIssue]:
     """Validate bundle content without trusting its publication declaration."""
     issues: list[ValidationIssue] = []
-    _validate_schema(bundle, issues)
+    if check_schema:
+        _validate_schema(bundle, issues, schema_version="0.1")
     if not isinstance(bundle, dict):
         return issues
     if bundle.get("schema_version") != "0.1":
@@ -1832,6 +1856,422 @@ def _validate_intrinsic(
     return issues
 
 
+_FACT_KIND_BY_PREDICATE = {
+    "work_item.observed.v1": ("work_item_observed", "project"),
+    "change_request.observed.v1": ("change_request_observed", "change"),
+    "change_request.merged.v1": ("change_request_merged", "release"),
+    "interaction.observed.v1": ("interaction_observed", "project"),
+    "commit.observed.v1": ("commit_observed", "change"),
+    "ref_change.observed.v1": ("ref_change_observed", "change"),
+    "release.observed.v1": ("release_observed", "release"),
+    "release.published.v1": ("release_published", "release"),
+}
+_SUBJECT_TYPE_BY_PREDICATE = {
+    "work_item.observed.v1": "work_item",
+    "change_request.observed.v1": "change_request",
+    "change_request.merged.v1": "change_request",
+    "interaction.observed.v1": "interaction",
+    "commit.observed.v1": "commit",
+    "ref_change.observed.v1": "ref_change",
+    "release.observed.v1": "release",
+    "release.published.v1": "release",
+}
+
+
+def _v02_semantic_view(bundle: dict[str, Any]) -> dict[str, Any]:
+    """Build a non-serialized v0.1-shaped view for shared semantic checks."""
+    view = deepcopy(bundle)
+    plan = view.get("plan") if isinstance(view.get("plan"), dict) else {}
+    view["schema_version"] = "0.1"
+    view["run"] = {
+        "run_id": f"compat:{view.get('plan_id', 'unknown')}",
+        "window": deepcopy(plan.get("window")),
+        "scope": deepcopy(plan.get("scope")),
+    }
+    subjects: dict[str, dict[str, Any]] = {}
+    for key in (
+        "repositories",
+        "actors",
+        "work_items",
+        "change_requests",
+        "interactions",
+        "commits",
+        "ref_changes",
+        "releases",
+    ):
+        for item in view.get(key, []):
+            if isinstance(item, dict) and isinstance(item.get("id"), str):
+                subjects[item["id"]] = item
+    facts: list[dict[str, Any]] = []
+    for assertion in view.get("assertions", []):
+        if not isinstance(assertion, dict):
+            continue
+        kind, section = _FACT_KIND_BY_PREDICATE.get(
+            assertion.get("predicate"),
+            (str(assertion.get("predicate") or "unknown"), "project"),
+        )
+        subject = subjects.get(assertion.get("subject_id"), {})
+        summary = (
+            subject.get("title")
+            or subject.get("name")
+            or subject.get("tag")
+            or assertion.get("predicate")
+        )
+        fact = {
+            key: deepcopy(value)
+            for key, value in assertion.items()
+            if key
+            in {
+                "id",
+                "subject_type",
+                "subject_id",
+                "repository_id",
+                "actor_id",
+                "occurred_at",
+                "evidence_ids",
+            }
+        }
+        fact.update({"kind": kind, "section": section, "summary": summary})
+        facts.append(fact)
+    view["facts"] = facts
+    coverage = view.get("coverage")
+    if isinstance(coverage, dict):
+        coverage["allow_publish"] = coverage.get("render_eligible")
+    return view
+
+
+def _validate_v02_identity_and_retrievals(
+    bundle: dict[str, Any],
+    issues: list[ValidationIssue],
+    *,
+    verify_bundle_digest: bool,
+) -> None:
+    plan = bundle.get("plan")
+    declared_plan_id = bundle.get("plan_id")
+    if isinstance(plan, dict):
+        try:
+            normalized_plan = normalize_plan(plan)
+            expected_plan_id = compute_plan_id(plan)
+        except IdentityError as exc:
+            _issue(issues, "plan.canonicalization", str(exc), path="$.plan")
+        else:
+            if plan != normalized_plan:
+                _issue(
+                    issues,
+                    "plan.noncanonical",
+                    "plan sets and provider entries must use canonical order",
+                    path="$.plan",
+                )
+            if declared_plan_id != expected_plan_id:
+                _issue(
+                    issues,
+                    "plan.digest_mismatch",
+                    "plan_id does not match the canonical plan",
+                    path="$.plan_id",
+                )
+    invocation = bundle.get("invocation")
+    if isinstance(invocation, dict):
+        started_at = _parse_timestamp(invocation.get("started_at"))
+        finished_at = _parse_timestamp(invocation.get("finished_at"))
+        if started_at is not None and finished_at is not None and started_at > finished_at:
+            _issue(
+                issues,
+                "invocation.order",
+                "invocation.started_at must not be later than finished_at",
+                path="$.invocation",
+            )
+    if verify_bundle_digest:
+        try:
+            expected_bundle_digest = compute_bundle_digest(bundle)
+        except IdentityError as exc:
+            _issue(issues, "bundle.canonicalization", str(exc), path="$")
+        else:
+            if bundle.get("bundle_digest") != expected_bundle_digest:
+                _issue(
+                    issues,
+                    "bundle.digest_mismatch",
+                    "bundle_digest does not match the canonical bundle",
+                    path="$.bundle_digest",
+                )
+
+    providers = {
+        item.get("id"): item
+        for item in bundle.get("providers", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    top_provider_pairs = {
+        (item.get("kind"), item.get("instance"))
+        for item in providers.values()
+        if isinstance(item.get("kind"), str) and isinstance(item.get("instance"), str)
+    }
+    plan_provider_pairs: list[tuple[str, str]] = []
+    plan_sources: dict[str, set[str]] = {}
+    plan_origin = plan.get("origin") if isinstance(plan, dict) else None
+    if isinstance(plan, dict) and isinstance(plan.get("providers"), list):
+        for position, provider in enumerate(plan["providers"]):
+            if not isinstance(provider, dict):
+                continue
+            kind = provider.get("kind")
+            instance = provider.get("instance")
+            if not isinstance(kind, str) or not isinstance(instance, str):
+                continue
+            pair = (kind, instance)
+            plan_provider_pairs.append(pair)
+            provider_id = f"provider:{kind}:{instance}"
+            sources = provider.get("selected_sources")
+            if isinstance(sources, list):
+                plan_sources[provider_id] = {
+                    source for source in sources if isinstance(source, str)
+                }
+            if plan_origin == "legacy_migration" and "options" in provider:
+                _issue(
+                    issues,
+                    "plan.legacy_options",
+                    "a legacy migration cannot claim unavailable collection options",
+                    path=f"$.plan.providers[{position}].options",
+                )
+    if len(plan_provider_pairs) != len(set(plan_provider_pairs)):
+        _issue(
+            issues,
+            "plan.provider_duplicate",
+            "plan providers must be unique by kind and canonical instance",
+            path="$.plan.providers",
+        )
+    if set(plan_provider_pairs) != top_provider_pairs:
+        _issue(
+            issues,
+            "plan.provider_mismatch",
+            "plan providers must exactly match the Bundle provider identities",
+            path="$.plan.providers",
+        )
+    coverage = bundle.get("coverage")
+    observed_sources: dict[str, set[str]] = {}
+    if isinstance(coverage, dict) and isinstance(coverage.get("observations"), list):
+        for observation in coverage["observations"]:
+            if not isinstance(observation, dict):
+                continue
+            provider_id = observation.get("provider_id")
+            source = observation.get("source")
+            if isinstance(provider_id, str) and isinstance(source, str):
+                observed_sources.setdefault(provider_id, set()).add(source)
+    for provider_id in set(plan_sources) | set(observed_sources):
+        if plan_sources.get(provider_id, set()) != observed_sources.get(provider_id, set()):
+            _issue(
+                issues,
+                "plan.sources_mismatch",
+                f"plan selected_sources do not match coverage for {provider_id}",
+                path="$.plan.providers",
+            )
+    scope = plan.get("scope") if isinstance(plan, dict) else None
+    if isinstance(scope, dict) and isinstance(scope.get("repositories"), list):
+        for repository_id in scope["repositories"]:
+            matches = [
+                pair
+                for pair in set(plan_provider_pairs)
+                if isinstance(repository_id, str)
+                and repository_id.startswith(f"repo:{pair[0]}:{pair[1]}:")
+            ]
+            if len(matches) != 1:
+                _issue(
+                    issues,
+                    "plan.repository_provider",
+                    f"scope repository {repository_id!r} does not resolve to exactly one plan provider",
+                    path="$.plan.scope.repositories",
+                )
+
+    subject_repositories: dict[str, str] = {}
+    for repository in bundle.get("repositories", []):
+        if isinstance(repository, dict) and isinstance(repository.get("id"), str):
+            subject_repositories[repository["id"]] = repository["id"]
+    for key in (
+        "work_items", "change_requests", "interactions", "commits", "ref_changes", "releases"
+    ):
+        for subject in bundle.get(key, []):
+            if (
+                isinstance(subject, dict)
+                and isinstance(subject.get("id"), str)
+                and isinstance(subject.get("repository_id"), str)
+            ):
+                subject_repositories[subject["id"]] = subject["repository_id"]
+    retrievals: dict[str, dict[str, Any]] = {}
+    for position, retrieval in enumerate(bundle.get("retrievals", [])):
+        if not isinstance(retrieval, dict):
+            continue
+        retrieval_id = retrieval.get("id")
+        if not isinstance(retrieval_id, str) or not retrieval_id:
+            continue
+        if retrieval_id in retrievals:
+            _issue(
+                issues,
+                "retrieval.duplicate_id",
+                f"duplicate retrieval id: {retrieval_id}",
+                path=f"$.retrievals[{position}].id",
+            )
+        retrievals[retrieval_id] = retrieval
+        if retrieval.get("provider_id") not in providers:
+            _issue(
+                issues,
+                "retrieval.provider_missing",
+                f"retrieval {retrieval_id} references an unknown provider",
+                path=f"$.retrievals[{position}].provider_id",
+            )
+        if retrieval.get("mode") == "cache_replay":
+            fetched_at = _parse_timestamp(retrieval.get("fetched_at"))
+            stored_at = _parse_timestamp(retrieval.get("stored_at"))
+            replayed_at = _parse_timestamp(retrieval.get("replayed_at"))
+            age = retrieval.get("cache_age_seconds")
+            ttl = retrieval.get("cache_ttl_seconds")
+            if (
+                fetched_at is not None
+                and stored_at is not None
+                and replayed_at is not None
+                and not fetched_at <= stored_at <= replayed_at
+            ):
+                _issue(
+                    issues,
+                    "retrieval.cache_time_order",
+                    f"retrieval {retrieval_id} has inconsistent cache timestamps",
+                    path=f"$.retrievals[{position}]",
+                )
+            if stored_at is not None and replayed_at is not None and isinstance(age, (int, float)):
+                expected_age = (replayed_at - stored_at).total_seconds()
+                if not math.isclose(float(age), expected_age, rel_tol=0.0, abs_tol=1e-6):
+                    _issue(
+                        issues,
+                        "retrieval.cache_age_mismatch",
+                        f"retrieval {retrieval_id} cache age does not match its timestamps",
+                        path=f"$.retrievals[{position}].cache_age_seconds",
+                    )
+                if isinstance(ttl, (int, float)) and expected_age > float(ttl):
+                    _issue(
+                        issues,
+                        "retrieval.cache_stale",
+                        f"retrieval {retrieval_id} exceeds its recorded cache TTL",
+                        path=f"$.retrievals[{position}]",
+                    )
+            elif isinstance(age, (int, float)) and isinstance(ttl, (int, float)) and age > ttl:
+                _issue(
+                    issues,
+                    "retrieval.cache_stale",
+                    f"retrieval {retrieval_id} exceeds its recorded cache TTL",
+                    path=f"$.retrievals[{position}]",
+                )
+        common_fields = {
+            "id", "provider_id", "mode", "endpoint_kind", "target_ref",
+            "repository_id", "page", "pagination_outcome", "etag", "last_modified",
+            "api_version", "payload_digest", "extensions",
+        }
+        mode_fields = {
+            "live": common_fields | {"fetched_at"},
+            "cache_replay": common_fields
+            | {"fetched_at", "stored_at", "replayed_at", "cache_age_seconds", "cache_ttl_seconds"},
+            "legacy_import": {
+                "id", "provider_id", "mode", "endpoint_kind", "target_ref",
+                "source_artifact_digest", "extensions",
+            },
+        }
+        allowed_fields = mode_fields.get(retrieval.get("mode"))
+        if allowed_fields is not None and set(retrieval) - allowed_fields:
+            _issue(
+                issues,
+                "retrieval.mode_fields",
+                f"retrieval {retrieval_id} carries fields not valid for its mode",
+                path=f"$.retrievals[{position}]",
+            )
+    for position, evidence in enumerate(bundle.get("evidence", [])):
+        if not isinstance(evidence, dict):
+            continue
+        retrieval_id = evidence.get("retrieval_id")
+        if retrieval_id not in retrievals:
+            _issue(
+                issues,
+                "evidence.retrieval_missing",
+                f"evidence {evidence.get('id')} references an unknown Retrieval",
+                path=f"$.evidence[{position}].retrieval_id",
+            )
+            continue
+        retrieval = retrievals[retrieval_id]
+        if evidence.get("provider_id") != retrieval.get("provider_id"):
+            _issue(
+                issues,
+                "evidence.retrieval_provider",
+                f"evidence {evidence.get('id')} and its Retrieval use different providers",
+                path=f"$.evidence[{position}].retrieval_id",
+            )
+        if retrieval.get("mode") != "legacy_import":
+            subject_repository = subject_repositories.get(evidence.get("subject_id"))
+            if subject_repository != retrieval.get("repository_id"):
+                _issue(
+                    issues,
+                    "evidence.retrieval_repository",
+                    f"evidence {evidence.get('id')} and its Retrieval use different repositories",
+                    path=f"$.evidence[{position}].retrieval_id",
+                )
+    for position, assertion in enumerate(bundle.get("assertions", [])):
+        if not isinstance(assertion, dict):
+            continue
+        expected_subject_type = _SUBJECT_TYPE_BY_PREDICATE.get(assertion.get("predicate"))
+        if expected_subject_type is not None and assertion.get("subject_type") != expected_subject_type:
+            _issue(
+                issues,
+                "assertion.predicate_subject",
+                f"assertion {assertion.get('id')} predicate requires subject_type {expected_subject_type}",
+                path=f"$.assertions[{position}].subject_type",
+            )
+
+
+def _validate_v02_intrinsic(
+    bundle: dict[str, Any],
+    *,
+    required_sources_contract: Iterable[str] | None = None,
+    verify_bundle_digest: bool = True,
+) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    _validate_schema(bundle, issues, schema_version="0.2")
+    _validate_v02_identity_and_retrievals(
+        bundle,
+        issues,
+        verify_bundle_digest=verify_bundle_digest,
+    )
+    view = _v02_semantic_view(bundle)
+    issues.extend(
+        _validate_v01_intrinsic(
+            view,
+            required_sources_contract=required_sources_contract,
+            check_schema=False,
+        )
+    )
+    return issues
+
+
+def _validate_intrinsic(
+    bundle: dict[str, Any],
+    *,
+    required_sources_contract: Iterable[str] | None = None,
+    verify_bundle_digest: bool = True,
+) -> list[ValidationIssue]:
+    schema_version = bundle.get("schema_version") if isinstance(bundle, dict) else None
+    if schema_version == "0.1":
+        return _validate_v01_intrinsic(
+            bundle,
+            required_sources_contract=required_sources_contract,
+        )
+    if schema_version == "0.2":
+        return _validate_v02_intrinsic(
+            bundle,
+            required_sources_contract=required_sources_contract,
+            verify_bundle_digest=verify_bundle_digest,
+        )
+    issues: list[ValidationIssue] = []
+    _issue(
+        issues,
+        "schema.version",
+        "schema_version must be '0.1' or '0.2' during the compatibility window",
+        path="$.schema_version",
+    )
+    return issues
+
+
 def compute_render_eligibility(
     bundle: dict[str, Any],
     *,
@@ -1856,6 +2296,23 @@ def recompute_allow_publish(
     coverage = bundle.get("coverage")
     if not isinstance(coverage, dict):
         return False
+    if bundle.get("schema_version") == "0.2":
+        coverage["render_eligible"] = False
+        eligible = not any(
+            issue.severity == "error"
+            for issue in _validate_intrinsic(
+                bundle,
+                required_sources_contract=required_sources_contract,
+                verify_bundle_digest=False,
+            )
+        )
+        coverage["render_eligible"] = eligible
+        try:
+            bundle["bundle_digest"] = compute_bundle_digest(bundle)
+        except IdentityError:
+            coverage["render_eligible"] = False
+            return False
+        return eligible
     coverage["allow_publish"] = False
     eligible = compute_render_eligibility(
         bundle,
@@ -1877,7 +2334,10 @@ def validate_bundle(
     )
     eligible = not any(issue.severity == "error" for issue in issues)
     coverage = bundle.get("coverage") if isinstance(bundle, dict) else None
-    declared = coverage.get("allow_publish") if isinstance(coverage, dict) else None
+    declaration_name = (
+        "render_eligible" if bundle.get("schema_version") == "0.2" else "allow_publish"
+    )
+    declared = coverage.get(declaration_name) if isinstance(coverage, dict) else None
     if not eligible:
         _issue(
             issues,
@@ -1889,8 +2349,8 @@ def validate_bundle(
         _issue(
             issues,
             "coverage.publish_mismatch",
-            f"coverage.allow_publish must equal the derived value {eligible}",
-            remediation="Set allow_publish only through the authoritative eligibility computation.",
+            f"coverage.{declaration_name} must equal the derived value {eligible}",
+            remediation=f"Set {declaration_name} only through the authoritative eligibility computation.",
         )
     return issues
 

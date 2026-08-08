@@ -4,10 +4,29 @@ The canonical bundle is the stable boundary between provider collection,
 reconciliation, validation, and rendering. It is versioned, serializable, and
 usable offline. A renderer must not make another provider request.
 
-The machine-readable draft is
-[`schemas/evidence-bundle-0.1.schema.json`](../../schemas/evidence-bundle-0.1.schema.json);
-the executable validator additionally checks cross-record references and
-allowlist/coverage invariants that JSON Schema alone cannot express.
+The machine-readable Schemas have one package authority under
+[`src/git_evidence/schemas`](../../src/git_evidence/schemas);
+the executable validator additionally checks cross-record references,
+canonical identities and digests, and allowlist/coverage invariants that JSON
+Schema alone cannot express. Schema 0.1 is read-only compatibility; Schema 0.2
+is strict, contains unknown provider data only under namespaced `extensions`,
+and is the migration target.
+
+## Schema 0.2 identity envelope
+
+Schema 0.2 removes `run_id`. `plan_id` is the RFC 8785 plus Unicode-NFC digest
+of the retained plan, `invocation.id` identifies one actual execution or
+migration, and `bundle_digest` covers the complete canonical Bundle except its
+own field. The validator recomputes both digests. The plan and Bundle digest
+domains are separated as specified by ADR-0018.
+
+`facts` are replaced by typed `assertions`, Evidence references a Retrieval,
+and `coverage.render_eligible` replaces the misleading v0.1
+`coverage.allow_publish` name. An explicit legacy migration uses
+`Retrieval.mode: legacy_import`; it does not invent a fetch timestamp or source
+API version that the 0.1 artifact never recorded. Migrated Evidence likewise
+marks native identity unavailable instead of copying a canonical subject ID
+into a native-ID field.
 
 ## Top-level shape
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from io import StringIO
 import json
 import sys
 from pathlib import Path
@@ -10,6 +11,10 @@ from .atomic_io import AtomicWriteError, atomic_write_text
 from .collect import CollectionError, collect_config
 from .config import ConfigError, load_collection_config, load_report_config
 from .model import BundleLoadError, load_bundle
+from .bounds import InputLimitError, read_bounded_bytes
+from .identity import compute_artifact_bytes_digest
+from .limits import MAX_BUNDLE_BYTES
+from .migration import MigrationError, migrate_v01_to_v02
 from .providers import RESOURCE_SOURCES, provider_catalog
 from .render import LANGUAGES, PROFILES, RenderError, render_bundle
 from .validation import ValidationIssue, format_issues, validate_bundle
@@ -34,6 +39,12 @@ def _parser() -> argparse.ArgumentParser:
     render.add_argument("--profile", choices=PROFILES)
     render.add_argument("--language", choices=LANGUAGES)
     render.add_argument("--output", "-o", type=Path)
+
+    migrate = subparsers.add_parser(
+        "migrate", help="explicitly migrate a schema 0.1 bundle to 0.2"
+    )
+    migrate.add_argument("bundle", type=Path)
+    migrate.add_argument("--output", "-o", type=Path)
 
     subparsers.add_parser("providers", help="list provider contracts")
 
@@ -171,6 +182,30 @@ def main(argv: list[str] | None = None) -> int:
             group_failure_count=0,
             coverage_warning_count=len(warnings),
         )
+        return 0
+    if args.command == "migrate":
+        try:
+            raw = read_bounded_bytes(args.bundle, max_bytes=MAX_BUNDLE_BYTES)
+            bundle = load_bundle(StringIO(raw.decode("utf-8")))
+            migrated = migrate_v01_to_v02(
+                bundle,
+                source_artifact_digest=compute_artifact_bytes_digest(raw),
+            )
+        except (
+            BundleLoadError,
+            InputLimitError,
+            MigrationError,
+            OSError,
+            UnicodeDecodeError,
+        ) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        serialized = json.dumps(migrated, ensure_ascii=False, indent=2) + "\n"
+        if args.output:
+            if not _write_output(args.output, serialized):
+                return 2
+        else:
+            print(serialized, end="")
         return 0
     try:
         bundle = load_bundle(args.bundle)

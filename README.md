@@ -72,6 +72,8 @@ git-evidence doctor --config config.example.yml
 git-evidence collect --config config.example.yml \
   --output evidence/bundle.json
 git-evidence validate fixtures/example_bundle.json
+git-evidence migrate fixtures/example_bundle.json \
+  --output evidence/bundle-0.2.json
 git-evidence render fixtures/example_bundle.json \
   --config config.example.yml --profile project-first --output report.md
 ```
@@ -84,6 +86,10 @@ non-blocking warnings), `1` validation/render-eligibility failure, `2`
 configuration/input/I/O failure, and `3` a core provider-group collection
 failure. Bundle, report, and cache files use atomic replacement and mode
 `0600`; stdout remains available when no output path is supplied.
+
+Schema 0.1 remains readable for one compatibility window. Migration to the
+strict 0.2 contract is always explicit and records the source artifact digest;
+see the [0.1 to 0.2 migration guide](docs/migration/0.1-to-0.2.md).
 
 The v0.1 CLI status word `publishable` is legacy wording for render eligibility
 only. A successful collect, validate, or render command does not approve

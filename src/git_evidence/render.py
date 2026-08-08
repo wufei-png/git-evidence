@@ -123,6 +123,58 @@ def _fact_repository_id(fact: dict[str, Any]) -> str | None:
     return None
 
 
+_ASSERTION_SECTIONS = {
+    "work_item.observed.v1": "project",
+    "change_request.observed.v1": "change",
+    "change_request.merged.v1": "release",
+    "interaction.observed.v1": "project",
+    "commit.observed.v1": "change",
+    "ref_change.observed.v1": "change",
+    "release.observed.v1": "release",
+    "release.published.v1": "release",
+}
+
+
+def _renderable_claims(bundle: dict[str, Any]) -> list[dict[str, Any]]:
+    if bundle.get("schema_version") != "0.2":
+        return collection(bundle, "facts")
+    subjects: dict[str, dict[str, Any]] = {}
+    for key in (
+        "repositories",
+        "work_items",
+        "change_requests",
+        "interactions",
+        "commits",
+        "ref_changes",
+        "releases",
+    ):
+        for item in collection(bundle, key):
+            subject_id = item.get("id")
+            if isinstance(subject_id, str) and subject_id:
+                subjects[subject_id] = item
+    claims: list[dict[str, Any]] = []
+    for assertion in collection(bundle, "assertions"):
+        predicate = str(assertion.get("predicate") or "verified activity")
+        subject = subjects.get(assertion.get("subject_id"), {})
+        summary = (
+            subject.get("title")
+            or subject.get("name")
+            or subject.get("tag")
+            or subject.get("ref")
+            or subject.get("sha")
+            or predicate
+        )
+        claims.append(
+            {
+                **assertion,
+                "kind": predicate,
+                "section": _ASSERTION_SECTIONS.get(predicate, "project"),
+                "summary": summary,
+            }
+        )
+    return claims
+
+
 def _fact_line(
     fact: dict[str, Any],
     evidence: dict[str, dict[str, Any]],
@@ -217,8 +269,9 @@ def render_bundle(
         display_actor_names=display_actor_names,
         actor_labels=actor_labels,
     )
-    facts = sorted(collection(bundle, "facts"), key=_fact_sort_key)
-    window = bundle["run"]["window"]
+    facts = sorted(_renderable_claims(bundle), key=_fact_sort_key)
+    run_or_plan = bundle["plan"] if bundle.get("schema_version") == "0.2" else bundle["run"]
+    window = run_or_plan["window"]
     lines = [
         f"# {labels['title']}",
         "",

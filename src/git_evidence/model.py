@@ -30,6 +30,7 @@ COLLECTION_KEYS = (
     "evidence",
     "facts",
 )
+ALL_COLLECTION_KEYS = (*COLLECTION_KEYS, "retrievals", "assertions")
 
 
 class BundleLoadError(ValueError):
@@ -61,7 +62,7 @@ def load_bundle(source: str | Path | TextIO) -> dict[str, Any]:
         raise BundleLoadError("evidence bundle root must be a JSON object")
     entity_count = sum(
         len(value.get(key, []))
-        for key in COLLECTION_KEYS
+        for key in ALL_COLLECTION_KEYS
         if isinstance(value.get(key, []), list)
     )
     if entity_count > MAX_NORMALIZED_ENTITIES:
