@@ -12,6 +12,7 @@ import stat
 import tempfile
 import time
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -1321,122 +1322,177 @@ class UrllibTransport:
         validate_json_value_limits(value)
         return value
 
+    def begin_get(
+        self,
+        path: str,
+        params: Mapping[str, Any] | None = None,
+    ) -> UrllibRequestCursor:
+        """Create a cooperative GET whose step performs at most one HTTP attempt."""
+        return UrllibRequestCursor(self, path, params)
+
     def get(self, path: str, params: Mapping[str, Any] | None = None) -> ApiResponse:
-        url = self._url(path, params)
-        cache_key = self._cache_key(path, params) if self._cache is not None else None
-        if self._cache is not None and cache_key is not None:
-            cached = self._cache.get(cache_key, token=self.token)
-            if cached is not None:
-                self.coordinator.metrics.cache_hits += 1
-                return cached
-            self.coordinator.metrics.cache_misses += 1
+        cursor = self.begin_get(path, params)
+        while not cursor.done:
+            cursor.step()
+        return cursor.result()
+
+
+class UrllibRequestCursor:
+    """One logical GET split into cache lookup and physical request attempts."""
+
+    def __init__(
+        self,
+        transport: UrllibTransport,
+        path: str,
+        params: Mapping[str, Any] | None,
+    ) -> None:
+        self.transport = transport
+        self.path = path
+        self.params = deepcopy(dict(params or {}))
+        self.url = transport._url(path, self.params)
+        self.cache_key = (
+            transport._cache_key(path, self.params) if transport._cache is not None else None
+        )
         headers = {
             "Accept": "application/json",
             "Accept-Encoding": "identity",
             "User-Agent": "git-evidence/0.1",
         }
-        if self.token and not self.token_param:
-            headers[self.token_header] = f"{self.token_prefix} {self.token}" if self.token_prefix else self.token
-        request = Request(url, headers=headers, method="GET")
-        context = ssl.create_default_context() if self.verify_tls else ssl._create_unverified_context()
-        retryable_statuses = {429, 500, 502, 503, 504}
-        primary_error: ApiError | None = None
-        for attempt in range(1, self.max_retries + 2):
-            try:
-                self.coordinator.reserve_request()
-                with urlopen(
-                    request,
-                    timeout=self.timeout,
-                    context=context,
-                    redirect_policy=self._target_policy,
-                    token_param=self.token_param,
-                    token=self.token,
-                ) as response:
-                    raw = _read_bounded_body(response)
-                    response_headers = {key.lower(): value for key, value in response.headers.items()}
-                    result = ApiResponse(
-                        self._redact_url(url),
-                        response.status,
-                        response_headers,
-                        self._decode_body(raw),
-                    )
-                    if self._cache is not None and cache_key is not None:
-                        self._cache.put(cache_key, result, token=self.token)
-                    return result
-            except ApiError as exc:
-                if primary_error is not None:
-                    _merge_api_errors(primary_error, exc, attempts=attempt)
-                    raise primary_error from exc
-                raise
-            except HTTPError as exc:
-                raw = _read_bounded_body(exc)
-                detail = raw.decode("utf-8", errors="replace")[:300]
-                detail = self._redact_text(detail)
-                can_retry = exc.code in retryable_statuses and attempt <= self.max_retries
-                error = response_status_error(
-                    ApiResponse(
-                        self._redact_url(url),
-                        exc.code,
-                        exc.headers or {},
-                        None,
-                    ),
-                    redact_url=self._redact_url,
-                    message=f"GET {self._redact_url(url)} failed with HTTP {exc.code}: {detail}",
+        if transport.token and not transport.token_param:
+            headers[transport.token_header] = (
+                f"{transport.token_prefix} {transport.token}"
+                if transport.token_prefix
+                else transport.token
+            )
+        self.request = Request(self.url, headers=headers, method="GET")
+        self.context = (
+            ssl.create_default_context()
+            if transport.verify_tls
+            else ssl._create_unverified_context()
+        )
+        self.cache_checked = False
+        self.attempt = 0
+        self.primary_error: ApiError | None = None
+        self.response: ApiResponse | None = None
+        self.error: ApiError | None = None
+        self.done = False
+
+    def _finish_error(self, error: ApiError, *, cause: BaseException) -> None:
+        if self.primary_error is not None and error is not self.primary_error:
+            _merge_api_errors(self.primary_error, error, attempts=self.attempt)
+            self.error = self.primary_error
+        else:
+            self.error = error
+        self.done = True
+        if cause is not self.error:
+            self.error.__cause__ = cause
+
+    def _record_retry(self, error: ApiError) -> None:
+        if self.primary_error is None:
+            self.primary_error = error
+        else:
+            _merge_api_errors(self.primary_error, error, attempts=self.attempt)
+        self.transport.coordinator.record_retry()
+        self.transport.sleep_fn(
+            self.transport._retry_delay(self.attempt, error.retry_after)
+        )
+
+    def step(self) -> None:
+        if self.done:
+            raise RuntimeError("request cursor is already complete")
+        transport = self.transport
+        if not self.cache_checked:
+            self.cache_checked = True
+            if transport._cache is not None and self.cache_key is not None:
+                cached = transport._cache.get(self.cache_key, token=transport.token)
+                if cached is not None:
+                    transport.coordinator.metrics.cache_hits += 1
+                    self.response = cached
+                    self.done = True
+                    return
+                transport.coordinator.metrics.cache_misses += 1
+
+        self.attempt += 1
+        try:
+            transport.coordinator.reserve_request()
+            with urlopen(
+                self.request,
+                timeout=transport.timeout,
+                context=self.context,
+                redirect_policy=transport._target_policy,
+                token_param=transport.token_param,
+                token=transport.token,
+            ) as response:
+                raw = _read_bounded_body(response)
+                response_headers = {
+                    key.lower(): value for key, value in response.headers.items()
+                }
+                result = ApiResponse(
+                    transport._redact_url(self.url),
+                    response.status,
+                    response_headers,
+                    transport._decode_body(raw),
                 )
-                error.attempts = attempt
-                error.retryable = exc.code in retryable_statuses
-                if can_retry:
-                    if primary_error is None:
-                        primary_error = error
-                    else:
-                        _merge_api_errors(primary_error, error, attempts=attempt)
-                    self.coordinator.record_retry()
-                    self.sleep_fn(self._retry_delay(attempt, error.retry_after))
-                    continue
-                if primary_error is not None:
-                    _merge_api_errors(primary_error, error, attempts=attempt)
-                    raise primary_error from exc
-                raise error from exc
-            except URLError as exc:
-                can_retry = attempt <= self.max_retries
-                error = ApiError(
-                    f"GET {self._redact_url(url)} failed: {self._redact_text(getattr(exc, 'reason', exc))}",
-                    attempts=attempt,
-                    retryable=True,
-                    failure_class="network_error",
-                )
-                if can_retry:
-                    if primary_error is None:
-                        primary_error = error
-                    else:
-                        _merge_api_errors(primary_error, error, attempts=attempt)
-                    self.coordinator.record_retry()
-                    self.sleep_fn(self._retry_delay(attempt))
-                    continue
-                if primary_error is not None:
-                    _merge_api_errors(primary_error, error, attempts=attempt)
-                    raise primary_error from exc
-                raise error from exc
-            except (TimeoutError, OSError) as exc:
-                can_retry = attempt <= self.max_retries
-                error = ApiError(
-                    f"GET {self._redact_url(url)} failed: {self._redact_text(exc)}",
-                    attempts=attempt,
-                    retryable=True,
-                    failure_class="network_error",
-                )
-                if can_retry:
-                    if primary_error is None:
-                        primary_error = error
-                    else:
-                        _merge_api_errors(primary_error, error, attempts=attempt)
-                    self.coordinator.record_retry()
-                    self.sleep_fn(self._retry_delay(attempt))
-                    continue
-                if primary_error is not None:
-                    _merge_api_errors(primary_error, error, attempts=attempt)
-                    raise primary_error from exc
-                raise error from exc
+                if transport._cache is not None and self.cache_key is not None:
+                    transport._cache.put(self.cache_key, result, token=transport.token)
+                self.response = result
+                self.done = True
+        except ApiError as exc:
+            self._finish_error(exc, cause=exc)
+        except HTTPError as exc:
+            raw = _read_bounded_body(exc)
+            detail = transport._redact_text(raw.decode("utf-8", errors="replace")[:300])
+            error = response_status_error(
+                ApiResponse(
+                    transport._redact_url(self.url),
+                    exc.code,
+                    exc.headers or {},
+                    None,
+                ),
+                redact_url=transport._redact_url,
+                message=(
+                    f"GET {transport._redact_url(self.url)} failed with HTTP "
+                    f"{exc.code}: {detail}"
+                ),
+            )
+            error.attempts = self.attempt
+            error.retryable = exc.code in {429, 500, 502, 503, 504}
+            if error.retryable and self.attempt <= transport.max_retries:
+                self._record_retry(error)
+                return
+            self._finish_error(error, cause=exc)
+        except URLError as exc:
+            error = ApiError(
+                f"GET {transport._redact_url(self.url)} failed: "
+                f"{transport._redact_text(getattr(exc, 'reason', exc))}",
+                attempts=self.attempt,
+                retryable=True,
+                failure_class="network_error",
+            )
+            if self.attempt <= transport.max_retries:
+                self._record_retry(error)
+                return
+            self._finish_error(error, cause=exc)
+        except (TimeoutError, OSError) as exc:
+            error = ApiError(
+                f"GET {transport._redact_url(self.url)} failed: {transport._redact_text(exc)}",
+                attempts=self.attempt,
+                retryable=True,
+                failure_class="network_error",
+            )
+            if self.attempt <= transport.max_retries:
+                self._record_retry(error)
+                return
+            self._finish_error(error, cause=exc)
+
+    def result(self) -> ApiResponse:
+        if not self.done:
+            raise RuntimeError("request cursor has not completed")
+        if self.error is not None:
+            raise self.error
+        if self.response is None:
+            raise RuntimeError("request cursor completed without a response")
+        return self.response
 
 
 @dataclass
@@ -1485,53 +1541,137 @@ def _pagination_page_number(
     return None
 
 
-def paginate(
-    transport: JsonTransport,
-    path: str,
-    params: Mapping[str, Any] | None = None,
-    *,
-    per_page: int = 100,
-    max_pages: int = 100,
-) -> PageResult:
-    """Follow Link, x-next-page, or page-size pagination without silent truncation."""
-    if isinstance(per_page, bool) or not isinstance(per_page, int) or per_page < 1:
-        raise ValueError("per_page must be a positive integer")
-    if per_page > MAX_PAGE_ITEMS:
-        raise ValueError(f"per_page must be at most {MAX_PAGE_ITEMS}")
-    if isinstance(max_pages, bool) or not isinstance(max_pages, int):
-        raise ValueError("max_pages must be an integer")
-    if max_pages < 1 or max_pages > MAX_PAGES:
-        raise ValueError(f"max_pages must be in [1, {MAX_PAGES}]")
-    base_params = dict(params or {})
-    base_params.setdefault("per_page", per_page)
-    current_path = path
-    current_params: Mapping[str, Any] | None = {**base_params, "page": 1}
-    items: list[dict[str, Any]] = []
-    item_bytes = 0
-    diagnostics: dict[str, Any] = {}
-    visited_requests: set[str] = set()
-    visited_responses: set[str] = set()
-    for page_number in range(1, max_pages + 1):
-        request_identity = _pagination_request_identity(current_path, current_params)
-        if request_identity in visited_requests:
+class PaginationCursor:
+    """A resumable pagination state machine with at most one HTTP attempt per step."""
+
+    def __init__(
+        self,
+        transport: JsonTransport,
+        path: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        per_page: int = 100,
+        max_pages: int = 100,
+    ) -> None:
+        self.transport = transport
+        self.path = path
+        self.params = deepcopy(dict(params or {}))
+        self.per_page = per_page
+        self.max_pages = max_pages
+        self._validate_limits()
+        self.base_params = dict(self.params)
+        self.base_params.setdefault("per_page", per_page)
+        self.current_path = path
+        self.current_params: Mapping[str, Any] | None = {
+            **self.base_params,
+            "page": 1,
+        }
+        self.items: list[dict[str, Any]] = []
+        self.item_bytes = 0
+        self.diagnostics: dict[str, Any] = {}
+        self.visited_requests: set[str] = set()
+        self.visited_responses: set[str] = set()
+        self.pages = 0
+        self.done = False
+        self.complete = False
+        self._failure: Exception | None = None
+        self._request_cursor: Any | None = None
+
+    def _validate_limits(self) -> None:
+        per_page = self.per_page
+        max_pages = self.max_pages
+        if isinstance(per_page, bool) or not isinstance(per_page, int) or per_page < 1:
+            raise ValueError("per_page must be a positive integer")
+        if per_page > MAX_PAGE_ITEMS:
+            raise ValueError(f"per_page must be at most {MAX_PAGE_ITEMS}")
+        if isinstance(max_pages, bool) or not isinstance(max_pages, int):
+            raise ValueError("max_pages must be an integer")
+        if max_pages < 1 or max_pages > MAX_PAGES:
+            raise ValueError(f"max_pages must be in [1, {MAX_PAGES}]")
+
+    def _finish(self, *, complete: bool) -> None:
+        self.done = True
+        self.complete = complete
+        if not complete:
+            self.diagnostics["budget_exhausted"] = True
+
+    def _continue_or_exhaust(self) -> None:
+        if self.pages >= self.max_pages:
+            self._finish(complete=False)
+
+    def step(self) -> None:
+        if self._failure is not None:
+            raise self._failure
+        if self.done:
+            raise RuntimeError("pagination cursor is already complete")
+        snapshot = (
+            set(self.visited_requests),
+            set(self.visited_responses),
+            list(self.items),
+            self.item_bytes,
+            dict(self.diagnostics),
+            self.pages,
+            self.current_path,
+            deepcopy(self.current_params),
+            self.done,
+            self.complete,
+        )
+        try:
+            self._step_once()
+        except Exception as exc:  # noqa: BLE001 - terminalize arbitrary transport failures
+            (
+                self.visited_requests,
+                self.visited_responses,
+                self.items,
+                self.item_bytes,
+                self.diagnostics,
+                self.pages,
+                self.current_path,
+                self.current_params,
+                self.done,
+                self.complete,
+            ) = snapshot
+            self._failure = exc
+            self.done = True
+            self.complete = False
+            raise
+
+    def _step_once(self) -> None:
+        request_identity = _pagination_request_identity(
+            self.current_path,
+            self.current_params,
+        )
+        if request_identity in self.visited_requests:
             raise ResponseShapeError(
                 "provider pagination repeated a request target",
                 failure_class="malformed_response",
             )
-        visited_requests.add(request_identity)
-        response = transport.get(current_path, current_params)
-        record_page = getattr(transport, "record_page", None)
+        if self._request_cursor is None:
+            begin_get = getattr(self.transport, "begin_get", None)
+            if callable(begin_get):
+                self._request_cursor = begin_get(self.current_path, self.current_params)
+        if self._request_cursor is not None:
+            self._request_cursor.step()
+            if not self._request_cursor.done:
+                return
+            response = self._request_cursor.result()
+            self._request_cursor = None
+        else:
+            response = self.transport.get(self.current_path, self.current_params)
+        self.visited_requests.add(request_identity)
+        record_page = getattr(self.transport, "record_page", None)
         if callable(record_page):
             record_page()
         if not _is_success_status(response.status_code):
-            redact_url = getattr(transport, "_redact_url", None)
+            redact_url = getattr(self.transport, "_redact_url", None)
             raise response_status_error(
                 response,
                 redact_url=redact_url if callable(redact_url) else None,
             )
+        self.pages += 1
         rate_limit = rate_limit_headers(response.headers)
         if rate_limit:
-            diagnostics["rate_limit"] = rate_limit
+            self.diagnostics["rate_limit"] = rate_limit
         if not isinstance(response.body, list):
             raise ResponseShapeError(f"expected a JSON array from {response.url}")
         if len(response.body) > MAX_PAGE_ITEMS:
@@ -1541,12 +1681,12 @@ def paginate(
             )
         if isinstance(response.url, str) and response.url:
             response_identity = _pagination_request_identity(response.url, None)
-            if response_identity in visited_responses:
+            if response_identity in self.visited_responses:
                 raise ResponseShapeError(
                     f"provider pagination repeated a response target from {response.url}",
                     failure_class="malformed_response",
                 )
-            visited_responses.add(response_identity)
+            self.visited_responses.add(response_identity)
         page_items = [item for item in response.body if isinstance(item, dict)]
         if len(page_items) != len(response.body):
             raise ResponseShapeError(f"provider returned a non-object item from {response.url}")
@@ -1562,14 +1702,14 @@ def paginate(
                 f"paginated source exceeds {MAX_PAGINATED_BYTES} bytes",
                 failure_class="limit_exceeded",
             ) from exc
-        item_bytes += page_item_bytes
-        if item_bytes > MAX_PAGINATED_BYTES:
+        self.item_bytes += page_item_bytes
+        if self.item_bytes > MAX_PAGINATED_BYTES:
             raise ResponseShapeError(
                 f"paginated source exceeds {MAX_PAGINATED_BYTES} bytes",
                 failure_class="limit_exceeded",
             )
-        items.extend(page_items)
-        if len(items) > MAX_PAGINATED_ITEMS:
+        self.items.extend(page_items)
+        if len(self.items) > MAX_PAGINATED_ITEMS:
             raise ResponseShapeError(
                 f"paginated source exceeds {MAX_PAGINATED_ITEMS} items",
                 failure_class="limit_exceeded",
@@ -1587,9 +1727,12 @@ def paginate(
         )
         if next_url:
             next_identity = _pagination_request_identity(next_url, None)
-            current_page = _pagination_page_number(current_path, current_params) or page_number
+            current_page = (
+                _pagination_page_number(self.current_path, self.current_params)
+                or self.pages
+            )
             next_page_from_url = _pagination_page_number(next_url, None)
-            if next_identity in visited_requests or next_identity in visited_responses:
+            if next_identity in self.visited_requests or next_identity in self.visited_responses:
                 raise ResponseShapeError(
                     f"provider pagination cycle detected from {response.url}",
                     failure_class="malformed_response",
@@ -1599,31 +1742,74 @@ def paginate(
                     f"provider pagination page regressed from {response.url}",
                     failure_class="malformed_response",
                 )
-            current_path = next_url
-            current_params = None
-            continue
+            self.current_path = next_url
+            self.current_params = None
+            self._continue_or_exhaust()
+            return
         if next_page:
             try:
                 next_page_number = int(next_page)
             except ValueError as exc:
                 raise ResponseShapeError(f"invalid x-next-page header from {response.url}") from exc
             if next_page_number <= 0:
-                return PageResult(items, page_number, True, diagnostics or None)
-            current_page = _pagination_page_number(current_path, current_params) or page_number
+                self._finish(complete=True)
+                return
+            current_page = (
+                _pagination_page_number(self.current_path, self.current_params)
+                or self.pages
+            )
             if next_page_number <= current_page:
                 raise ResponseShapeError(
                     f"provider pagination page regressed from {response.url}",
                     failure_class="malformed_response",
                 )
-            current_path = path
-            current_params = {**base_params, "page": next_page_number}
-            continue
-        if len(page_items) < per_page:
-            return PageResult(items, page_number, True, diagnostics or None)
-        current_path = path
-        current_params = {**base_params, "page": page_number + 1}
-    diagnostics["budget_exhausted"] = True
-    return PageResult(items, max_pages, False, diagnostics or None)
+            self.current_path = self.path
+            self.current_params = {**self.base_params, "page": next_page_number}
+            self._continue_or_exhaust()
+            return
+        if len(page_items) < self.per_page:
+            self._finish(complete=True)
+            return
+        current_page = _pagination_page_number(self.current_path, self.current_params)
+        self.current_path = self.path
+        self.current_params = {
+            **self.base_params,
+            "page": (current_page + 1) if current_page is not None else self.pages + 1,
+        }
+        self._continue_or_exhaust()
+
+    def result(self) -> PageResult:
+        if self._failure is not None:
+            raise self._failure
+        if not self.done:
+            raise RuntimeError("pagination cursor has not completed")
+        return PageResult(
+            list(self.items),
+            self.pages,
+            self.complete,
+            dict(self.diagnostics) if self.diagnostics else None,
+        )
+
+
+def paginate(
+    transport: JsonTransport,
+    path: str,
+    params: Mapping[str, Any] | None = None,
+    *,
+    per_page: int = 100,
+    max_pages: int = 100,
+) -> PageResult:
+    """Follow Link, x-next-page, or page-size pagination without silent truncation."""
+    cursor = PaginationCursor(
+        transport,
+        path,
+        params,
+        per_page=per_page,
+        max_pages=max_pages,
+    )
+    while not cursor.done:
+        cursor.step()
+    return cursor.result()
 
 
 class MappingTransport:

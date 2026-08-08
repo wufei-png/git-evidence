@@ -12,6 +12,9 @@ repository—one root plus the first work-item, change-request, commit, and
 release page—so an infeasible plan fails before sending a request with a typed
 `plan_budget_infeasible` configuration error.
 
+The runtime fairness unit is one physical HTTP attempt; retry attempts re-enter
+the queue instead of running invisibly inside one repository's turn. Cache hits
+consume no request budget and may therefore complete without an HTTP attempt.
 After roots, top-level sources are queued by page depth, canonical repository
 ID, and the fixed source order `work_items`, `change_requests`, `commits`,
 `releases`. Interaction requests discovered from those lists are queued by
