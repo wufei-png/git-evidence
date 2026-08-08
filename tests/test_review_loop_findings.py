@@ -963,7 +963,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
         with self.assertRaises(PrivacyError):
             sanitize_public_payload({"X-API-Key": "secret"})
 
-    def test_inline_credentials_are_rejected_recursively_without_rejecting_business_fields(self) -> None:
+    def test_inline_credentials_and_unknown_provider_fields_are_rejected(self) -> None:
         base = {
             "window": {"start": WINDOW_START, "end": WINDOW_END, "timezone": "UTC"},
             "scope": {
@@ -973,9 +973,13 @@ class ReviewLoopFindingTests(unittest.TestCase):
             },
             "providers": {"github": {"token_env": "GITHUB_TOKEN"}},
         }
-        safe = deepcopy(base)
-        safe["providers"]["github"]["business"] = {"author": "synthetic", "tokenized_name": "safe"}
-        validate_collection_config(safe)
+        unknown = deepcopy(base)
+        unknown["providers"]["github"]["business"] = {
+            "author": "synthetic",
+            "tokenized_name": "safe",
+        }
+        with self.assertRaisesRegex(ConfigError, "unknown key"):
+            validate_collection_config(unknown)
         for secret_key in ("github_token", "clientSecret", "X-API-Key", "authHeader"):
             unsafe = deepcopy(base)
             unsafe["providers"]["github"]["nested"] = {secret_key: "secret"}
@@ -1084,6 +1088,38 @@ class ReviewLoopFindingTests(unittest.TestCase):
             ("rate_limited", "malformed_response"),
         )
         self.assertEqual(caught.exception.attempts, 2)
+
+    def test_malformed_later_pagination_target_keeps_accepted_page(self) -> None:
+        transport = github_transport()
+        issues_path = "/repos/example/project/issues"
+        next_url = "https://api.github.com/repos/example/project/issues?page=2"
+        first = transport.responses[issues_path][0]
+        transport.responses[issues_path] = [
+            ApiResponse(
+                "https://api.github.com/repos/example/project/issues?page=1",
+                200,
+                {"Link": f'<{next_url}>; rel="next"'},
+                first.body,
+            )
+        ]
+        transport.responses[next_url] = [
+            ApiResponse(
+                "https://api.github.com/repos/example/project/issues?page=%FF",
+                200,
+                {},
+                [],
+            )
+        ]
+
+        bundle = GitHubProvider(transport).collect(request_for("github", "github.com"))
+        self.assertEqual(len(bundle["work_items"]), 1)
+        observation = next(
+            item
+            for item in bundle["coverage"]["observations"]
+            if item["source"] == "work_items"
+        )
+        self.assertEqual(observation["status"], "incomplete")
+        self.assertIn("malformed_response", json.dumps(observation["diagnostics"]))
 
     def test_commit_association_rejects_bad_candidates_and_keeps_valid_siblings(self) -> None:
         github = github_transport()

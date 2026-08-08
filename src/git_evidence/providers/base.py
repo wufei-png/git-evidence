@@ -1,10 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import ipaddress
 import math
-from typing import Any, Mapping, Protocol
-from urllib.parse import urlsplit
+import posixpath
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any, Protocol
+from urllib.parse import quote, unquote, urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import idna
 
 from ..limits import (
     MAX_PAGES,
@@ -73,6 +79,88 @@ UNVERIFIABLE_SHA_SENTINELS = frozenset(
         "unavailable",
     }
 )
+_INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_ENCODED_PATH_SEPARATOR = re.compile(r"(?i)%(?:2f|5c)")
+_URI_SCHEME = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):")
+
+
+def contains_url_control(value: str) -> bool:
+    """Return whether text contains a C0, DEL, or C1 control character."""
+    return any(
+        ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F for character in value
+    )
+
+
+def _is_legacy_numeric_host(hostname: str) -> bool:
+    labels = hostname.removesuffix(".").split(".")
+    return bool(labels) and all(
+        re.fullmatch(r"(?:[0-9]+|0[xX][0-9A-Fa-f]+)", label) for label in labels
+    )
+
+
+def canonicalize_hostname(hostname: str | None, *, field: str) -> str:
+    """Return one strict IDNA2008/IP spelling for an authority host."""
+    if not hostname:
+        raise ValueError(f"{field} must contain a host")
+    try:
+        return ipaddress.ip_address(hostname).compressed.lower()
+    except ValueError:
+        pass
+    if _is_legacy_numeric_host(hostname):
+        raise ValueError(f"{field} uses a non-canonical numeric address")
+    try:
+        canonical = (
+            idna.encode(
+                hostname,
+                uts46=True,
+                transitional=False,
+                std3_rules=True,
+            )
+            .decode("ascii")
+            .lower()
+        )
+    except idna.IDNAError as exc:
+        raise ValueError(f"{field} is not valid IDNA") from exc
+    canonical = canonical.removesuffix(".")
+    if not canonical:
+        raise ValueError(f"{field} must contain a host")
+    try:
+        ipaddress.ip_address(canonical)
+    except ValueError:
+        if _is_legacy_numeric_host(canonical):
+            raise ValueError(f"{field} uses a non-canonical numeric address")
+    else:
+        raise ValueError(f"{field} uses a non-canonical numeric address")
+    return canonical
+
+
+def canonicalize_base_path(
+    path: str,
+    *,
+    field: str,
+    allow_first_level_encoded_separators: bool = False,
+) -> str:
+    """Decode a URL path to a bounded fixed point and reject ambiguous forms."""
+    encoded = path or "/"
+    if _INVALID_PERCENT_ESCAPE.search(encoded):
+        raise ValueError(f"{field} contains invalid percent encoding")
+    if (
+        _ENCODED_PATH_SEPARATOR.search(encoded)
+        and not allow_first_level_encoded_separators
+    ):
+        raise ValueError(f"{field} must not encode path separators")
+    try:
+        decoded = unquote(encoded, errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{field} contains invalid encoding") from exc
+    if "%" in decoded:
+        raise ValueError(f"{field} must not contain nested percent encoding")
+    if "\\" in decoded or contains_url_control(decoded):
+        raise ValueError(f"{field} contains unsafe characters")
+    if any(segment in {".", ".."} for segment in decoded.split("/")):
+        raise ValueError(f"{field} must not contain dot segments")
+    normalized = posixpath.normpath("/" + decoded.lstrip("/"))
+    return normalized if normalized.startswith("/") else f"/{normalized}"
 
 
 def is_verifiable_sha(value: Any) -> bool:
@@ -91,7 +179,9 @@ def _coverage_failure_classes(value: Any) -> set[str]:
             classes.add(failure_class)
         failure_classes = value.get("failure_classes")
         if isinstance(failure_classes, (list, tuple, set)):
-            classes.update(item for item in failure_classes if isinstance(item, str) and item)
+            classes.update(
+                item for item in failure_classes if isinstance(item, str) and item
+            )
         for child in value.values():
             classes.update(_coverage_failure_classes(child))
     elif isinstance(value, (list, tuple, set)):
@@ -159,14 +249,19 @@ def merge_optional_coverage_warning(
         if status in OPTIONAL_STATUS_PRIORITY
     ]
     for existing in warnings:
-        if not isinstance(existing, dict) or tuple(existing.get(field) for field in fields) != key:
+        if (
+            not isinstance(existing, dict)
+            or tuple(existing.get(field) for field in fields) != key
+        ):
             continue
         existing_status = existing.get("status")
         if existing_status in OPTIONAL_STATUS_PRIORITY:
             statuses.append(existing_status)
         if statuses:
             existing["status"] = max(statuses, key=OPTIONAL_STATUS_PRIORITY.__getitem__)
-        failure_classes = _coverage_failure_classes(existing) | _coverage_failure_classes(warning)
+        failure_classes = _coverage_failure_classes(
+            existing
+        ) | _coverage_failure_classes(warning)
         if len(failure_classes) == 1:
             existing["failure_class"] = next(iter(failure_classes))
             existing.pop("failure_classes", None)
@@ -189,7 +284,9 @@ def merge_optional_coverage_warning(
                 for observation in observations:
                     if (
                         isinstance(observation, dict)
-                        and tuple(observation.get(field) for field in observation_fields)
+                        and tuple(
+                            observation.get(field) for field in observation_fields
+                        )
                         == key[1:]
                         and observation.get("status") in OPTIONAL_STATUS_PRIORITY
                     ):
@@ -242,26 +339,54 @@ class RepositoryTarget:
     name: str
 
     def __post_init__(self) -> None:
-        validate_instance(self.instance)
+        object.__setattr__(self, "instance", validate_instance(self.instance))
+        owner_segments = (
+            self.owner.split("/") if self.provider_kind == "gitlab" else [self.owner]
+        )
+        for index, segment in enumerate(owner_segments):
+            _validate_repository_segment(segment, f"owner segment {index}")
+        _validate_repository_segment(self.name, "repository name")
 
     @property
     def canonical_id(self) -> str:
         return f"repo:{self.provider_kind}:{self.instance}:{self.owner}/{self.name}"
 
 
+def _validate_repository_segment(value: Any, field: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be a non-empty string")
+    if value in {".", ".."} or not all(
+        character.isalnum() or character in {".", "_", "-"} for character in value
+    ):
+        raise ValueError(f"{field} must be one safe repository path segment")
+
+
 def validate_instance(instance: Any) -> str:
-    """Validate an instance authority while allowing a safe base path."""
+    """Validate and canonicalize an instance authority plus optional base path."""
     if not isinstance(instance, str) or not instance or instance != instance.strip():
         raise ValueError("instance must be a non-empty URL host or http(s) base")
-    if any(character.isspace() or ord(character) < 0x20 for character in instance):
+    if any(character.isspace() for character in instance) or contains_url_control(
+        instance
+    ):
         raise ValueError("instance must not contain whitespace or control characters")
     if "?" in instance or "#" in instance:
         raise ValueError("instance must not contain a query or fragment")
-    candidate = instance if instance.startswith(("http://", "https://")) else f"//{instance}"
+    scheme_match = _URI_SCHEME.match(instance)
+    explicit_scheme = False
+    if scheme_match:
+        scheme_name = scheme_match.group(1).lower()
+        suffix = instance[scheme_match.end() :]
+        if scheme_name in {"http", "https"}:
+            if re.match(r"(?i)^https?://", instance) is None:
+                raise ValueError("instance must use an http or https URL")
+            explicit_scheme = True
+        elif not suffix.split("/", 1)[0].isdigit():
+            raise ValueError("instance must use an http or https URL")
+    candidate = instance if explicit_scheme else f"//{instance}"
     try:
         parts = urlsplit(candidate)
         hostname = parts.hostname
-        parts.port
+        port = parts.port
     except ValueError as exc:
         raise ValueError("instance is not a valid URL authority") from exc
     if parts.scheme and parts.scheme not in {"http", "https"}:
@@ -272,13 +397,40 @@ def validate_instance(instance: Any) -> str:
         raise ValueError("instance must not contain URL userinfo")
     if parts.query or parts.fragment:
         raise ValueError("instance must not contain a query or fragment")
-    return instance
+    assert hostname is not None
+    canonical_host = canonicalize_hostname(hostname, field="instance host")
+    host_text = f"[{canonical_host}]" if ":" in canonical_host else canonical_host
+    scheme = parts.scheme.lower() if explicit_scheme else "https"
+    default_port = {"http": 80, "https": 443}[scheme]
+    authority = host_text if port in {None, default_port} else f"{host_text}:{port}"
+    normalized_path = canonicalize_base_path(parts.path, field="instance base path")
+    normalized_path = (
+        ""
+        if normalized_path == "/"
+        else quote(normalized_path.rstrip("/"), safe="/:@-._~!$&'()*+,;=")
+    )
+    if scheme == "https" and not normalized_path and port in {None, 443}:
+        return authority
+    return f"{scheme}://{authority}{normalized_path}"
+
+
+def validate_timezone(timezone: Any) -> str:
+    """Require an explicit IANA timezone identifier without changing instants."""
+    if not isinstance(timezone, str) or not timezone or timezone != timezone.strip():
+        raise ValueError("timezone must be a non-empty IANA identifier")
+    try:
+        ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError("timezone must be a valid IANA identifier") from exc
+    return timezone
 
 
 def is_loopback_instance(instance: str) -> bool:
     """Return whether an already validated instance targets loopback only."""
-    validate_instance(instance)
-    candidate = instance if instance.startswith(("http://", "https://")) else f"//{instance}"
+    instance = validate_instance(instance)
+    candidate = (
+        instance if instance.startswith(("http://", "https://")) else f"//{instance}"
+    )
     hostname = urlsplit(candidate).hostname
     if not hostname:
         return False
@@ -292,8 +444,7 @@ def is_loopback_instance(instance: str) -> bool:
 
 def instance_web_base(instance: str) -> str:
     """Return an HTTPS-or-explicit-scheme web base for a provider instance."""
-    validate_instance(instance)
-    value = instance.rstrip("/")
+    value = validate_instance(instance)
     if value.startswith(("http://", "https://")):
         return value
     return f"https://{value}"
@@ -317,15 +468,28 @@ class CollectionRequest:
     retry_after_max_seconds: float = 60.0
 
     def __post_init__(self) -> None:
-        validate_instance(self.instance)
+        object.__setattr__(self, "instance", validate_instance(self.instance))
+        object.__setattr__(self, "timezone", validate_timezone(self.timezone))
         if not self.repositories:
             raise ValueError("repositories must be a non-empty allowlist")
         for target in self.repositories:
             if not isinstance(target, RepositoryTarget):
                 raise ValueError("repositories must contain RepositoryTarget values")
-            if target.provider_kind != self.provider_kind or target.instance != self.instance:
-                raise ValueError("repository target provider and instance must match the request")
-        ordered_repositories = tuple(sorted(self.repositories, key=lambda item: item.canonical_id))
+            if (
+                target.provider_kind != self.provider_kind
+                or target.instance != self.instance
+            ):
+                raise ValueError(
+                    "repository target provider and instance must match the request"
+                )
+        canonical_ids = [target.canonical_id for target in self.repositories]
+        if len(canonical_ids) != len(set(canonical_ids)):
+            raise ValueError(
+                "repositories must not contain duplicate canonical targets"
+            )
+        ordered_repositories = tuple(
+            sorted(self.repositories, key=lambda item: item.canonical_id)
+        )
         object.__setattr__(self, "repositories", ordered_repositories)
         if (
             isinstance(self.timeout_seconds, bool)
@@ -342,7 +506,12 @@ class CollectionRequest:
             ("max_pages", self.max_pages, MAX_PAGES, 1),
             ("max_requests", self.max_requests, MAX_REQUESTS, 1),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < minimum or value > maximum:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < minimum
+                or value > maximum
+            ):
                 raise ValueError(f"{name} must be in [{minimum}, {maximum}]")
         minimum_core_budget = MIN_CORE_REQUESTS_PER_REPOSITORY * len(self.repositories)
         if self.max_requests < minimum_core_budget:
@@ -357,7 +526,9 @@ class CollectionRequest:
             or self.retry_jitter_seconds < 0
             or self.retry_jitter_seconds > MAX_RETRY_JITTER_SECONDS
         ):
-            raise ValueError(f"retry_jitter_seconds must be finite and in [0, {MAX_RETRY_JITTER_SECONDS}]")
+            raise ValueError(
+                f"retry_jitter_seconds must be finite and in [0, {MAX_RETRY_JITTER_SECONDS}]"
+            )
         if (
             isinstance(self.retry_after_max_seconds, bool)
             or not isinstance(self.retry_after_max_seconds, (int, float))
@@ -391,7 +562,11 @@ class Provider(Protocol):
 def validate_descriptor(descriptor: ProviderDescriptor) -> None:
     if not descriptor.kind or not descriptor.display_name:
         raise ValueError("provider descriptor requires kind and display_name")
-    if descriptor.implementation_status not in {"contract-only", "experimental", "stable"}:
+    if descriptor.implementation_status not in {
+        "contract-only",
+        "experimental",
+        "stable",
+    }:
         raise ValueError("invalid provider implementation_status")
     for source in (*descriptor.resource_sources, *descriptor.activity_sources):
         if not source:

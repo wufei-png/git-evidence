@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 from .base import (
     RESOURCE_SOURCES,
@@ -90,7 +91,7 @@ class GiteeProvider(ResourceProvider):
 
     @staticmethod
     def _repo_path(target: RepositoryTarget) -> str:
-        return f"/repos/{target.owner}/{target.name}"
+        return f"/repos/{quote(target.owner, safe='')}/{quote(target.name, safe='')}"
 
     @staticmethod
     def _id(target: RepositoryTarget, kind: str, native_id: Any) -> str:
@@ -114,7 +115,7 @@ class GiteeProvider(ResourceProvider):
             "full_name": raw.get("full_name"),
             "name": raw.get("name"),
             "web_url": raw.get("html_url")
-            or f"{instance_web_base(target.instance)}/{target.owner}/{target.name}",
+            or f"{instance_web_base(target.instance)}/{quote(target.owner, safe='')}/{quote(target.name, safe='')}",
         }
 
     def _scheduled_top_level_requests(
@@ -227,7 +228,8 @@ class GiteeProvider(ResourceProvider):
             "provider_id": f"provider:gitee:{target.instance}",
             "full_name": raw.get("full_name"),
             "name": raw.get("name"),
-            "web_url": raw.get("html_url") or f"{instance_web_base(target.instance)}/{target.owner}/{target.name}",
+            "web_url": raw.get("html_url")
+            or f"{instance_web_base(target.instance)}/{quote(target.owner, safe='')}/{quote(target.name, safe='')}",
         }
         issue_result = self._safe_page(
             "work_items",
