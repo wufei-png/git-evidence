@@ -5,6 +5,9 @@ date: 2026-08-02
 
 # Provider registry, configuration domains, and public privacy defaults
 
+Terminology note: per ADR-0017, a Bundle or report passing the deterministic
+gate is render-eligible, not approved for disclosure.
+
 ## Decision
 
 The provider catalog is a fail-closed registry. Each registered kind owns one
@@ -27,11 +30,11 @@ The public privacy default is anonymous actors, no inline tokens or credentials,
 and no display of provider-supplied actor names. A display name is possible only
 through an explicit actor-ID-to-label map. Source URLs remain valid evidence,
 but auth query parameters and URL userinfo are removed at collection/render
-boundaries; an unsafe URL or sensitive payload field blocks publication.
+boundaries; an unsafe URL or sensitive payload field blocks rendering.
 
 ## Consequences
 
 Offline registry, fixture, schema, semantic, and renderer tests prove the
 deterministic contract only. They do not prove live provider behavior. A live
 canary must use an explicit repository allowlist and environment/CI secrets;
-until it succeeds, its bundle or report must not be described as publishable.
+until it succeeds, its bundle must not be described as render-eligible.

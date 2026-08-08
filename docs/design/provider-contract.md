@@ -2,7 +2,7 @@
 
 Providers are responsible for translating native platform resources into the
 canonical bundle. They do not render prose and they do not decide whether an
-incomplete run is publishable by themselves.
+incomplete run is render-eligible by themselves.
 
 ## Required resource operations
 
@@ -37,7 +37,7 @@ interactions, commits, or releases. If they are disabled or unavailable, the
 provider must emit `unavailable`, `unsupported`, or `incomplete` coverage and
 the report must not claim complete push/ref coverage. Each non-supported
 activity/ref observation must also emit a matching `coverage.warnings[]`
-entry; this warning does not close the publication gate when the core resource
+entry; this warning does not close the render gate when the core resource
 sources are complete.
 
 ## Pagination and failure rules
@@ -70,7 +70,7 @@ sources are complete.
 - Every coverage observation is keyed by registered provider, allowlisted
   repository, and source. Repeated canonical IDs are not silently accepted:
   valid siblings remain, while the source becomes `incomplete` with
-  `malformed_response` diagnostics and the publication gate remains closed.
+  `malformed_response` diagnostics and the render gate remains closed.
 
 ## Three provider targets
 

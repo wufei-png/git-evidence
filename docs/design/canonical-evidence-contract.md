@@ -66,7 +66,7 @@ allowlist/coverage invariants that JSON Schema alone cannot express.
   is invalid.
 - Every required source has a coverage observation for every in-scope
   provider/repository combination.
-- `allow_publish` is true only when every core resource source is complete and
+- The legacy `allow_publish` field is true only when every core resource source is complete and
   verifiable. A core permission failure, unverifiable resource, or inconsistent
   commit SHA closes the gate; missing evidence references also remain fatal.
 - Activity/ref sources are optional supplements. Their `unsupported`,
@@ -107,7 +107,8 @@ allowlist/coverage invariants that JSON Schema alone cannot express.
   `ambiguous`, and any unresolved SHA keeps the result `unknown`.
 - A canonical commit must preserve the same SHA in its native identity,
   canonical ID, and `sha` field. A mismatch is a malformed core resource and
-  blocks publication.
+  blocks rendering. Per ADR-0017, this field expresses render eligibility and
+  never authorizes disclosure.
 
 ## Minimum entity vocabulary
 

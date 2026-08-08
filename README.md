@@ -7,7 +7,7 @@ and renders reproducible engineering activity reports with source-linked
 evidence and explicit coverage boundaries.
 
 It is not an engineering productivity scoring system or a generic AI
-summarizer: every publishable claim must remain tied to source evidence and an
+summarizer: every render-eligible activity claim must remain tied to source evidence and an
 explicit coverage boundary.
 
 This project is in the implementation and contract-hardening stage. Its
@@ -29,8 +29,10 @@ report can answer:
 
 The project therefore fails closed when core resource evidence is incomplete or
 unverifiable. It may leave an evidence bundle and diagnostics for repair, while
-an otherwise complete core report may still publish with explicit warnings for
-optional activity/ref gaps.
+an otherwise complete core report may remain render-eligible with explicit
+warnings for optional activity/ref gaps. Render eligibility is not permission
+to disclose the sensitive Bundle or its report; visibility approval is an
+external operator decision.
 
 ## Current decisions
 
@@ -72,6 +74,10 @@ PYTHONPATH=src python3 -m git_evidence render fixtures/example_bundle.json \
   --config config.example.yml --profile project-first --output report.md
 ```
 
+The v0.1 CLI status word `publishable` is legacy wording for render eligibility
+only. A successful collect, validate, or render command does not approve
+disclosure of the sensitive Bundle or its report.
+
 The example configuration names `GITHUB_TOKEN`; set that environment variable
 before `collect`, or remove `token_env` for an intentionally anonymous public
 run.
@@ -87,7 +93,7 @@ advertised as production-complete yet. A collection with incomplete core
 resources still writes its bundle when `--output` is provided, but exits
 non-zero so diagnostics can be repaired before rendering. Ordinary optional
 activity/ref malformed, typed, transport, and capability failures remain
-publishable and appear in `coverage.warnings` and the rendered coverage
+render-eligible and appear in `coverage.warnings` and the rendered coverage
 section; an optional `privacy_violation` remains fail-closed with a fatal
 ledger entry.
 
@@ -108,12 +114,12 @@ that optional surface. No provider is allowed to turn these observations into
 a complete push/ref claim, and every non-supported optional observation carries
 an `optional_coverage_warning` entry. Ordinary optional warnings do not close a
 complete core gate; a privacy violation is the explicit security exception and
-does close publication.
+does close render eligibility.
 
 ## Status
 
 The P2 contract slice includes the provider registry, collection/report config
-split, fail-closed privacy publication gate, provenance-linked coverage
+split, fail-closed privacy render gate, provenance-linked coverage
 failures, private cache replay, strict cache status/header handling, duplicate
 record diagnostics, and bounded transport budgets. No provider is advertised
 as production-complete: this checkout's offline fixtures and renderer tests do

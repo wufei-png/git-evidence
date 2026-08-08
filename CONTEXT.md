@@ -50,23 +50,63 @@ evidence that it had no activity.
 
 ## Evidence and publication
 
-**Canonical fact**:
-A platform-neutral statement about an observed engineering change, work item,
-interaction, release, or ref update that the renderer is allowed to present.
+**Assertion**:
+A typed, platform-neutral statement about an observed engineering object or
+event that a renderer may present. It names its subject and predicate and is
+supported by explicit evidence.
+_Avoid_: Canonical fact, Fact, summary
 
 **Evidence**:
 A stable reference to the source object, API observation, or commit that
-supports a canonical fact. A summary without evidence is not publishable.
+supports an assertion. An assertion without evidence is not render-eligible.
+
+**Retrieval**:
+The record of one provider response or cache replay from which source objects
+were observed. It captures when and how data was obtained; it does not claim
+that a requested source was completely covered.
+_Avoid_: Coverage observation, evidence
+
+**Evidence bundle**:
+The canonical, provenance-preserving audit artifact exchanged between
+collection, validation, and rendering. It is sensitive by default even after
+credentials are removed and is not itself an anonymous or public artifact.
+_Avoid_: Public bundle, anonymous bundle
 
 **Coverage manifest**:
 The record of what the run was asked to inspect, what each provider actually
 covered, and which limits, failures, or unknown associations remain.
 
 **Publishable report**:
-A rendered report produced only after the evidence and core coverage checks
-pass. An incomplete core run cannot be published; an incomplete optional
-activity/ref source may remain publishable when it carries a machine-readable
-coverage warning.
+A rendered report whose evidence and core coverage checks pass and whose
+visibility has been explicitly approved by its operator. An incomplete core
+run cannot produce a candidate report; an incomplete optional activity/ref
+source may remain eligible when it carries a machine-readable coverage
+warning. Visibility approval is an external workflow action, not a property of
+the evidence bundle.
+
+**Render eligibility**:
+The validation result that an evidence bundle has sufficient evidence and core
+coverage for deterministic rendering. It is not approval to disclose the
+bundle or the resulting report to an audience, and successful validation or
+rendering never grants that approval.
+_Avoid_: Publishable bundle, public-safe bundle
+
+**Collection plan identity**:
+A stable digest of the normalized, non-secret collection configuration that
+affects scope, source selection, and collection semantics. It groups repeated
+executions of the same intent but does not identify an execution or artifact.
+_Avoid_: Run ID, invocation ID
+
+**Collection invocation**:
+One actual execution of a collection plan, identified independently of its
+configuration and output. Repeating the same plan creates a new invocation.
+_Avoid_: Run ID, plan ID
+
+**Bundle digest**:
+A content digest of one canonical evidence bundle, used to identify the exact
+artifact and detect modification. It is neither a plan identity nor an
+execution identity.
+_Avoid_: Run ID, config hash
 
 **Change association**:
 The confidence state connecting a commit or ref change to a change request:
@@ -98,9 +138,10 @@ their respective domains.
 
 **Privacy default**:
 Actors are anonymous unless an explicit actor-ID-to-label map is supplied.
-Tokens, credentials, and auth headers are never part of a public bundle. Source
-URLs may remain evidence after auth query/userinfo redaction, while an unsafe
-URL or sensitive payload field blocks publication.
+Tokens, credentials, and auth headers are never part of an evidence bundle.
+Source URLs may remain evidence after auth query/userinfo redaction, while an
+unsafe URL or sensitive payload field blocks render eligibility. The bundle
+remains sensitive even when these checks pass.
 
 **Actor identity**:
 The provider-qualified identity used to attribute an observation. Its stable

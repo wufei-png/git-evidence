@@ -16,9 +16,10 @@ run all of the following gates:
    is evidence of live API compatibility.
 2. **Schema gate** — validate `fixtures/example_bundle.json` against the
    versioned bundle schema, including the privacy policy shape.
-3. **Semantic/publication gate** — exercise required-source coverage,
+3. **Semantic/render gate** — exercise required-source coverage,
    evidence references, timestamps, scope ownership, failure classes, and the
-   fail-closed `allow_publish` decision.
+   fail-closed legacy `allow_publish` decision. Per ADR-0017, this means render
+   eligibility and never grants disclosure approval.
 4. **Renderer/privacy gate** — render valid bundles offline, keep actors
    anonymous by default, accept only explicit actor labels, and reject or
    sanitize auth-bearing source URLs and sensitive fields.
@@ -77,7 +78,7 @@ PYTHONPATH=src python -m git_evidence render /tmp/live-bundle.json \
 
 The collection exit status, schema/semantic validation, required-source
 coverage, privacy gate, and offline render must all succeed before a canary is
-eligible for any publication workflow. A core provider group failure,
+eligible to enter an operator-controlled publication workflow. A core provider group failure,
 incomplete required source, unsafe URL/payload, missing secret, or validation
 error is a failed canary. An ordinary optional activity/ref malformed, typed,
 transport, or capability failure is not by itself a failed canary when the
@@ -85,7 +86,7 @@ core resources are complete, but its `coverage.warnings[]` entry must remain
 visible. An optional `privacy_violation` is fail-closed and is a failed
 canary even when core resources are complete. A diagnostic bundle with a
 core failure may be retained outside the repository, but it must keep
-`coverage.allow_publish: false` and never be described as publishable. A
+`coverage.allow_publish: false` and never be described as render-eligible. A
 canary that was not executed is simply **unverified**; offline CI cannot
 substitute for it.
 

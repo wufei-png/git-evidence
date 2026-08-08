@@ -72,9 +72,10 @@ PYTHONPATH=src python3 -m git_evidence render \
 
 The acceptance checks are:
 
-1. `collect` writes a bundle even when publication is blocked, so the failure
+1. `collect` writes a bundle even when rendering is blocked, so the failure
    can be inspected.
-2. `validate` returns `VALIDATION: none` for a publishable replay.
+2. `validate` returns `VALIDATION: none` for a render-eligible replay. This is
+   not approval to disclose the Bundle or report.
 3. `render` succeeds offline and makes no provider request.
 4. Every allowlisted resource has a coverage observation.
 5. Activity/ref coverage is reported as `incomplete` or `unsupported` unless a

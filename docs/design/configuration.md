@@ -81,7 +81,7 @@ Rules:
   1000 total HTTP requests, 0.5-second exponential backoff with at most
   0.25 seconds of jitter, and a 60-second `Retry-After` cap. GET retries are
   idempotent; exhausted limits remain visible in collection metrics and block
-  publication for affected required sources.
+  rendering for affected required sources.
 - The hard caps are 300 seconds for timeout, 10 retries, 1000 pages, 10000
   requests, 60 seconds each for backoff/jitter, 300 seconds for the
   `Retry-After` cap, 86400 seconds for cache TTL, and 10000 cache entries.
@@ -116,13 +116,13 @@ provider, instance, repository, source, and `failure_class`, and is linked to
 the matching observation (and to a structured fatal entry for required
 sources). Other groups remain in the bundle for diagnosis. A core resource
 group failure forces `allow_publish: false`; ordinary optional activity/ref
-malformed, typed, transport, or capability failures remain publishable with a
+malformed, typed, transport, or capability failures remain render-eligible with a
 structured coverage warning. An optional `privacy_violation` is the security
 exception: it requires a fatal ledger entry and keeps `allow_publish: false`.
 Configuration and missing-token errors are preflight failures and return CLI
 status 2; a bundle with one or more failed core provider groups returns status
 3, while an optional-only non-privacy failure returns status 0 with coverage
-warnings; ordinary schema or semantic publication failures return status 1.
+warnings; ordinary schema or semantic render-gate failures return status 1.
 
 `git-evidence render --config config.yml bundle.json` applies the report
 profile, language, actor display flag, and explicit `actor_labels` map without
@@ -139,11 +139,11 @@ releases remain the primary collection surface.
 
 The transport retries bounded transient `429` and `5xx` failures and records
 safe rate-limit diagnostics in coverage observations. Required resource
-failures still block publication after retries are exhausted. Every normalized
+failures still block rendering after retries are exhausted. Every normalized
 resource and activity/ref source rejects missing native identity, repository
 identity, or required timestamp fields item-by-item; valid siblings are kept,
 while the source is marked `incomplete` with `malformed_response` and a
 `dropped_count`. The same source-level status applies to duplicate canonical
 IDs: the first valid record and other valid siblings remain, but the collision
-is recorded and required publication is blocked. Coverage matching includes
+is recorded and required rendering is blocked. Coverage matching includes
 the registered provider identity as well as repository and source.

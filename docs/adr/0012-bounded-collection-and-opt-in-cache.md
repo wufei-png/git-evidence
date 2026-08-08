@@ -5,9 +5,13 @@ date: 2026-08-02
 
 # Bounded collection and opt-in cache
 
+Terminology note: per ADR-0017, “publication” and the v0.1
+`coverage.allow_publish` field in this ADR mean render eligibility, not approval
+to disclose an artifact.
+
 Each provider/instance collection group is isolated: successful groups remain
 available as diagnostics while a failed core resource group contributes
-explicit coverage failure and prevents publication. Ordinary failed optional
+explicit coverage failure and prevents rendering. Ordinary failed optional
 activity/ref collection—including malformed responses, typed provider errors,
 and transport/capability failures—contributes `coverage.group_failures` and a
 visible `coverage.warnings` entry, but does not close an otherwise complete
@@ -45,10 +49,10 @@ collection starts, a failed `(provider, instance)` group produces structured
 coverage observations and `coverage.group_failures` for every affected
 repository/source. Successful groups remain in the merged diagnostic bundle,
 but any failed core resource source keeps `allow_publish: false`; ordinary
-optional activity/ref failures remain publishable with warnings, while
+optional activity/ref failures remain render-eligible with warnings, while
 optional privacy violations remain fail-closed. The CLI reserves
 status 3 for a partial core-group failure, status 2 for preflight config
-failure, and status 1 for ordinary validation/publication failure.
+failure, and status 1 for ordinary validation/render-gate failure.
 
 Coverage observations are provenance-qualified: every observation declares a
 registered `provider_id` and an allowlisted `repository_id`, and the
@@ -70,6 +74,6 @@ as misses so replay cannot claim complete pagination.
 
 The normalizer keeps valid siblings when a source repeats a canonical ID, but
 records the collision as `incomplete` with `malformed_response` diagnostics
-and blocks publication for required resource sources. Direct library calls to
+and blocks rendering for required resource sources. Direct library calls to
 `collect_config` run the same collection validator as the CLI before any
 provider factory is invoked.
