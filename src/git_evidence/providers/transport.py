@@ -34,11 +34,20 @@ from urllib.request import (
     build_opener,
 )
 
+from ..bounds import InputLimitError, json_size_with_limit, read_bounded_bytes
+from ..bounds import validate_json_value_limits as _validate_json_value_limits
 from ..limits import (
     MAX_CACHE_ENTRIES,
+    MAX_CACHE_FILE_BYTES,
     MAX_CACHE_TTL_SECONDS,
+    MAX_JSON_DEPTH,
+    MAX_JSON_STRING_CHARS,
+    MAX_PAGE_ITEMS,
     MAX_PAGES,
+    MAX_PAGINATED_BYTES,
+    MAX_PAGINATED_ITEMS,
     MAX_REQUESTS,
+    MAX_RESPONSE_BYTES,
     MAX_RETRIES,
     MAX_RETRY_AFTER_SECONDS,
     MAX_RETRY_BACKOFF_SECONDS,
@@ -497,10 +506,18 @@ class LocalResponseCache:
             return {"entries": {}}
         try:
             raw = json.loads(
-                self.path.read_text(encoding="utf-8"),
+                read_bounded_bytes(self.path, max_bytes=MAX_CACHE_FILE_BYTES),
                 parse_constant=_reject_json_constant,
             )
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            validate_json_value_limits(raw)
+        except (
+            OSError,
+            json.JSONDecodeError,
+            RecursionError,
+            ResponseShapeError,
+            TypeError,
+            ValueError,
+        ):
             return {"entries": {}}
         if not isinstance(raw, dict) or not isinstance(raw.get("entries"), dict):
             return {"entries": {}}
@@ -623,6 +640,16 @@ class LocalResponseCache:
             self.credential_query_names,
         ):
             return None
+        try:
+            validate_json_value_limits(body)
+            json_size_with_limit(
+                body,
+                max_bytes=MAX_RESPONSE_BYTES,
+                ensure_ascii=False,
+                indent=None,
+            )
+        except (InputLimitError, ResponseShapeError, TypeError, ValueError):
+            return None
         return ApiResponse(url, status_code, headers, body)
 
     def put(self, key: str, response: ApiResponse, *, token: str | None) -> None:
@@ -656,8 +683,16 @@ class LocalResponseCache:
         if safe_headers is None:
             return
         try:
-            json.dumps(response.body, ensure_ascii=True, allow_nan=False)
-        except (TypeError, ValueError):
+            validate_json_value_limits(response.body)
+            encoded_body = json.dumps(
+                response.body,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (ResponseShapeError, TypeError, ValueError):
+            return
+        if len(encoded_body) > MAX_RESPONSE_BYTES:
             return
         payload = self._read()
         entries = payload["entries"]
@@ -687,6 +722,16 @@ class LocalResponseCache:
         )[: self.max_entries]
         payload = {"version": 1, "entries": dict(ordered)}
         try:
+            serialized_payload = json.dumps(
+                payload,
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            return
+        if len(serialized_payload.encode("utf-8")) > MAX_CACHE_FILE_BYTES:
+            return
+        try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             file_descriptor, temporary_name = tempfile.mkstemp(
                 prefix=f"{self.path.name}.", suffix=".tmp", dir=str(self.path.parent)
@@ -695,7 +740,7 @@ class LocalResponseCache:
             try:
                 os.fchmod(file_descriptor, 0o600)
                 with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
-                    handle.write(json.dumps(payload, ensure_ascii=True, allow_nan=False))
+                    handle.write(serialized_payload)
                 os.replace(temporary, self.path)
                 os.chmod(self.path, 0o600)
             except Exception:
@@ -805,6 +850,53 @@ class ApiError(RuntimeError):
 
 class ResponseShapeError(ApiError):
     """The provider returned a successful response with an unexpected shape."""
+
+
+def validate_json_value_limits(value: Any) -> None:
+    """Reject JSON-compatible values that exceed structural or string limits."""
+    try:
+        _validate_json_value_limits(
+            value,
+            max_depth=MAX_JSON_DEPTH,
+            max_string_chars=MAX_JSON_STRING_CHARS,
+        )
+    except InputLimitError as exc:
+        raise ResponseShapeError(str(exc), failure_class="limit_exceeded") from exc
+
+
+def _read_bounded_body(response: Any) -> bytes:
+    headers = getattr(response, "headers", {})
+    content_encoding = _header_get(headers, "content-encoding")
+    if isinstance(content_encoding, str) and content_encoding.strip().lower() not in {
+        "",
+        "identity",
+    }:
+        raise ResponseShapeError(
+            "compressed provider responses are not accepted",
+            failure_class="limit_exceeded",
+        )
+    content_length = _header_get(headers, "content-length")
+    if content_length not in (None, ""):
+        try:
+            declared_length = int(content_length)
+        except (TypeError, ValueError) as exc:
+            raise ResponseShapeError("provider returned an invalid Content-Length") from exc
+        if declared_length < 0:
+            raise ResponseShapeError("provider returned an invalid Content-Length")
+        if declared_length > MAX_RESPONSE_BYTES:
+            raise ResponseShapeError(
+                f"provider response exceeds {MAX_RESPONSE_BYTES} bytes",
+                failure_class="limit_exceeded",
+            )
+    raw = response.read(MAX_RESPONSE_BYTES + 1)
+    if not isinstance(raw, bytes):
+        raise ResponseShapeError("provider response body must be bytes")
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise ResponseShapeError(
+            f"provider response exceeds {MAX_RESPONSE_BYTES} bytes",
+            failure_class="limit_exceeded",
+        )
+    return raw
 
 
 def _append_query_value(url: str, name: str, value: str) -> str:
@@ -1218,9 +1310,16 @@ class UrllibTransport:
         if not raw.strip():
             return None
         try:
-            return json.loads(raw.decode("utf-8"))
+            value = json.loads(raw.decode("utf-8"))
+        except RecursionError as exc:
+            raise ResponseShapeError(
+                f"provider JSON nesting exceeds {MAX_JSON_DEPTH}",
+                failure_class="limit_exceeded",
+            ) from exc
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ResponseShapeError("provider returned invalid JSON") from exc
+        validate_json_value_limits(value)
+        return value
 
     def get(self, path: str, params: Mapping[str, Any] | None = None) -> ApiResponse:
         url = self._url(path, params)
@@ -1233,6 +1332,7 @@ class UrllibTransport:
             self.coordinator.metrics.cache_misses += 1
         headers = {
             "Accept": "application/json",
+            "Accept-Encoding": "identity",
             "User-Agent": "git-evidence/0.1",
         }
         if self.token and not self.token_param:
@@ -1252,7 +1352,7 @@ class UrllibTransport:
                     token_param=self.token_param,
                     token=self.token,
                 ) as response:
-                    raw = response.read()
+                    raw = _read_bounded_body(response)
                     response_headers = {key.lower(): value for key, value in response.headers.items()}
                     result = ApiResponse(
                         self._redact_url(url),
@@ -1269,7 +1369,7 @@ class UrllibTransport:
                     raise primary_error from exc
                 raise
             except HTTPError as exc:
-                raw = exc.read()
+                raw = _read_bounded_body(exc)
                 detail = raw.decode("utf-8", errors="replace")[:300]
                 detail = self._redact_text(detail)
                 can_retry = exc.code in retryable_statuses and attempt <= self.max_retries
@@ -1396,6 +1496,8 @@ def paginate(
     """Follow Link, x-next-page, or page-size pagination without silent truncation."""
     if isinstance(per_page, bool) or not isinstance(per_page, int) or per_page < 1:
         raise ValueError("per_page must be a positive integer")
+    if per_page > MAX_PAGE_ITEMS:
+        raise ValueError(f"per_page must be at most {MAX_PAGE_ITEMS}")
     if isinstance(max_pages, bool) or not isinstance(max_pages, int):
         raise ValueError("max_pages must be an integer")
     if max_pages < 1 or max_pages > MAX_PAGES:
@@ -1405,6 +1507,7 @@ def paginate(
     current_path = path
     current_params: Mapping[str, Any] | None = {**base_params, "page": 1}
     items: list[dict[str, Any]] = []
+    item_bytes = 0
     diagnostics: dict[str, Any] = {}
     visited_requests: set[str] = set()
     visited_responses: set[str] = set()
@@ -1431,6 +1534,11 @@ def paginate(
             diagnostics["rate_limit"] = rate_limit
         if not isinstance(response.body, list):
             raise ResponseShapeError(f"expected a JSON array from {response.url}")
+        if len(response.body) > MAX_PAGE_ITEMS:
+            raise ResponseShapeError(
+                f"provider page exceeds {MAX_PAGE_ITEMS} items",
+                failure_class="limit_exceeded",
+            )
         if isinstance(response.url, str) and response.url:
             response_identity = _pagination_request_identity(response.url, None)
             if response_identity in visited_responses:
@@ -1442,7 +1550,30 @@ def paginate(
         page_items = [item for item in response.body if isinstance(item, dict)]
         if len(page_items) != len(response.body):
             raise ResponseShapeError(f"provider returned a non-object item from {response.url}")
+        try:
+            page_item_bytes = json_size_with_limit(
+                page_items,
+                max_bytes=MAX_PAGINATED_BYTES,
+                ensure_ascii=False,
+                indent=None,
+            )
+        except (InputLimitError, TypeError, ValueError) as exc:
+            raise ResponseShapeError(
+                f"paginated source exceeds {MAX_PAGINATED_BYTES} bytes",
+                failure_class="limit_exceeded",
+            ) from exc
+        item_bytes += page_item_bytes
+        if item_bytes > MAX_PAGINATED_BYTES:
+            raise ResponseShapeError(
+                f"paginated source exceeds {MAX_PAGINATED_BYTES} bytes",
+                failure_class="limit_exceeded",
+            )
         items.extend(page_items)
+        if len(items) > MAX_PAGINATED_ITEMS:
+            raise ResponseShapeError(
+                f"paginated source exceeds {MAX_PAGINATED_ITEMS} items",
+                failure_class="limit_exceeded",
+            )
 
         headers = response.headers if callable(getattr(response.headers, "get", None)) else {}
         link_header = _header_get(headers, "link") or ""

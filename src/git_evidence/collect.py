@@ -4,13 +4,20 @@ import hashlib
 import json
 import os
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 
+from .bounds import (
+    InputLimitError,
+    indented_json_growth_upper_bound,
+    json_size_with_limit,
+)
 from .config import provider_runtime_options, validate_collection_config
+from .limits import MAX_BUNDLE_BYTES, MAX_NORMALIZED_ENTITIES
 from .model import COLLECTION_KEYS
 from .privacy import PrivacyError, sanitize_public_payload
-from .providers import CollectionRequest, PROVIDER_REGISTRY, RepositoryTarget
+from .providers import PROVIDER_REGISTRY, CollectionRequest, RepositoryTarget
 from .providers.base import (
     ACTIVITY_SOURCES,
     RESOURCE_SOURCES,
@@ -108,7 +115,7 @@ def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
         issue
         for issue in validation_issues
         if not issue.code.startswith("coverage.")
-        and issue.code != "collection.insecure_transport"
+        and issue.code not in {"collection.insecure_transport", "collection.limit_exceeded"}
         and not (issue.code == "scope.repository_missing" and group_failures)
     ]
     if hard_issues:
@@ -419,6 +426,11 @@ def _merge_bundles(
     )
     seen: dict[str, set[str]] = {key: set() for key in collection_keys}
     provider_gate_blocked = False
+    aggregate_limit_exceeded = False
+    estimated_size = json_size_with_limit(
+        merged,
+        max_bytes=MAX_BUNDLE_BYTES - 1,
+    ) + 1
     for bundle in bundles:
         coverage = bundle.get("coverage") or {}
         if not _provider_bundle_has_complete_core_coverage(bundle):
@@ -430,17 +442,6 @@ def _merge_bundles(
             for item in coverage["warnings"]:
                 if isinstance(item, dict):
                     merge_optional_coverage_warning(merged["coverage"], item)
-        for key in collection_keys:
-            for item in bundle.get(key, []):
-                entity_id = item.get("id") if isinstance(item, dict) else None
-                if not isinstance(entity_id, str) or not entity_id.strip():
-                    _record_merge_failure(merged, bundle, key, item, "record is missing a non-empty id")
-                    continue
-                if entity_id in seen[key]:
-                    _record_merge_failure(merged, bundle, key, item, f"duplicate record id: {entity_id}")
-                    continue
-                seen[key].add(entity_id)
-                merged[key].append(item)
         collection = bundle.get("collection") or {}
         if isinstance(collection, dict):
             group = collection.get("group")
@@ -469,6 +470,55 @@ def _merge_bundles(
                     aggregate["insecure_transport"]
                     or incoming_metrics.get("insecure_transport", False)
                 )
+        try:
+            estimated_size = json_size_with_limit(
+                merged,
+                max_bytes=MAX_BUNDLE_BYTES - 1,
+            ) + 1
+        except (InputLimitError, TypeError, ValueError):
+            aggregate_limit_exceeded = True
+        for key in collection_keys:
+            for item in bundle.get(key, []):
+                if aggregate_limit_exceeded:
+                    continue
+                entity_id = item.get("id") if isinstance(item, dict) else None
+                if not isinstance(entity_id, str) or not entity_id.strip():
+                    _record_merge_failure(merged, bundle, key, item, "record is missing a non-empty id")
+                    try:
+                        estimated_size = json_size_with_limit(
+                            merged,
+                            max_bytes=MAX_BUNDLE_BYTES - 1,
+                        ) + 1
+                    except (InputLimitError, TypeError, ValueError):
+                        aggregate_limit_exceeded = True
+                    continue
+                if entity_id in seen[key]:
+                    _record_merge_failure(merged, bundle, key, item, f"duplicate record id: {entity_id}")
+                    try:
+                        estimated_size = json_size_with_limit(
+                            merged,
+                            max_bytes=MAX_BUNDLE_BYTES - 1,
+                        ) + 1
+                    except (InputLimitError, TypeError, ValueError):
+                        aggregate_limit_exceeded = True
+                    continue
+                if sum(len(merged[name]) for name in collection_keys) >= MAX_NORMALIZED_ENTITIES:
+                    aggregate_limit_exceeded = True
+                    continue
+                seen[key].add(entity_id)
+                merged[key].append(item)
+                estimated_size += indented_json_growth_upper_bound(item, base_indent=4)
+                if estimated_size <= MAX_BUNDLE_BYTES:
+                    continue
+                try:
+                    estimated_size = json_size_with_limit(
+                        merged,
+                        max_bytes=MAX_BUNDLE_BYTES - 1,
+                    ) + 1
+                except (InputLimitError, TypeError, ValueError):
+                    merged[key].pop()
+                    seen[key].remove(entity_id)
+                    aggregate_limit_exceeded = True
     for observation in merged["coverage"]["observations"]:
         if isinstance(observation, dict):
             append_optional_coverage_warning(merged["coverage"], observation)
@@ -480,6 +530,23 @@ def _merge_bundles(
             provider_ids_by_repository=_provider_ids_by_repository(merged, repository_ids),
         )
     )
+    try:
+        json_size_with_limit(merged, max_bytes=MAX_BUNDLE_BYTES - 1)
+    except (InputLimitError, TypeError, ValueError):
+        aggregate_limit_exceeded = True
+    if aggregate_limit_exceeded:
+        for key in collection_keys:
+            if key != "providers":
+                merged[key] = []
+        merged["collection"]["group_status"] = "failed"
+        merged["collection"]["failure_class"] = "limit_exceeded"
+        merged["coverage"]["allow_publish"] = False
+        try:
+            json_size_with_limit(merged, max_bytes=MAX_BUNDLE_BYTES - 1)
+        except (InputLimitError, TypeError, ValueError) as exc:
+            raise CollectionError(
+                "aggregate limit diagnostic exceeds the final bundle size limit"
+            ) from exc
     return merged
 
 

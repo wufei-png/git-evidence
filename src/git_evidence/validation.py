@@ -43,6 +43,7 @@ FAILURE_CLASSES = {
     "unexpected_normalizer_error",
     "budget_exhausted",
     "insecure_transport",
+    "limit_exceeded",
     "privacy_violation",
 }
 KNOWN_COVERAGE_SOURCES = frozenset((*RESOURCE_SOURCES, *ACTIVITY_SOURCES))
@@ -1424,6 +1425,13 @@ def _validate_collection_transport(bundle: dict[str, Any], issues: list[Validati
             continue
         seen.add(identity)
         metrics = group.get("metrics")
+        if group.get("failure_class") == "limit_exceeded":
+            _issue(
+                issues,
+                "collection.limit_exceeded",
+                "limit diagnostic bundles are not render eligible",
+            )
+            return
         if group.get("group_status") == "diagnostic_insecure_transport" or (
             isinstance(metrics, dict) and metrics.get("insecure_transport") is True
         ):

@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from ..limits import MAX_PAGES
+from ..bounds import (
+    InputLimitError,
+    indented_json_growth_upper_bound,
+    json_size_with_limit,
+)
+from ..limits import MAX_BUNDLE_BYTES, MAX_NORMALIZED_ENTITIES, MAX_PAGES
 from ..privacy import PrivacyError, sanitize_public_payload
 from .base import (
     ACTIVITY_SOURCES,
@@ -28,6 +34,7 @@ from .transport import (
     ResponseShapeError,
     failure_class_for_status,
     transport_metrics,
+    validate_json_value_limits,
 )
 
 
@@ -639,6 +646,29 @@ class BundleBuilder:
         self._commit_ids_by_sha: dict[tuple[str, str], set[str]] = {}
         self._change_request_ids_by_sha: dict[tuple[str, str], set[str]] = {}
         self._duplicate_counts: dict[tuple[str, str], int] = {}
+        self._entity_count = 1
+        self._bundle_size_estimate = json_size_with_limit(
+            self.bundle,
+            max_bytes=MAX_BUNDLE_BYTES - 1,
+        ) + 1
+
+    def _account_bundle_growth(self, value: Any, *, base_indent: int) -> None:
+        self._bundle_size_estimate += indented_json_growth_upper_bound(
+            value,
+            base_indent=base_indent,
+        )
+        if self._bundle_size_estimate <= MAX_BUNDLE_BYTES:
+            return
+        try:
+            self._bundle_size_estimate = json_size_with_limit(
+                self.bundle,
+                max_bytes=MAX_BUNDLE_BYTES - 1,
+            ) + 1
+        except (InputLimitError, TypeError, ValueError) as exc:
+            raise ResponseShapeError(
+                f"evidence bundle exceeds {MAX_BUNDLE_BYTES} bytes",
+                failure_class="limit_exceeded",
+            ) from exc
 
     @staticmethod
     def _failure_classes(diagnostics: dict[str, Any]) -> set[str]:
@@ -661,6 +691,11 @@ class BundleBuilder:
         return values
 
     def add_coverage(self, source: str, target: RepositoryTarget, result: SourceResult) -> None:
+        ledgers = self.bundle["coverage"]
+        starting_lengths = {
+            key: len(ledgers[key])
+            for key in ("observations", "fatal", "group_failures", "warnings")
+        }
         diagnostics = dict(result.diagnostics)
         metrics = transport_metrics(self.transport)
         if metrics["retry_count"] or metrics["budget_exhausted"] or metrics["cache_hits"] or metrics["cache_misses"]:
@@ -707,6 +742,12 @@ class BundleBuilder:
                 f"{target.canonical_id}:{source}:{result.status}:{result.note}"
             )
         self._apply_duplicate_coverage(source, target.canonical_id)
+        growth = {
+            key: ledgers[key][starting_lengths[key] :]
+            for key in starting_lengths
+            if len(ledgers[key]) > starting_lengths[key]
+        }
+        self._account_bundle_growth(growth, base_indent=6)
 
     def record_optional_failure(
         self,
@@ -962,6 +1003,10 @@ class BundleBuilder:
         key = (source, repository_id)
         self._duplicate_counts[key] = self._duplicate_counts.get(key, 0) + 1
         self._apply_duplicate_coverage(source, repository_id)
+        self._account_bundle_growth(
+            {"source": source, "repository_id": repository_id, "duplicate_count": 1},
+            base_indent=6,
+        )
 
     def _apply_duplicate_coverage(self, source: str, repository_id: str) -> None:
         duplicate_count = self._duplicate_counts.get((source, repository_id), 0)
@@ -1004,6 +1049,7 @@ class BundleBuilder:
         repository_id: str | None = None,
     ) -> bool:
         record = sanitize_public_payload(record)
+        validate_json_value_limits(record)
         entity_id = record.get("id")
         if not isinstance(entity_id, str) or not entity_id:
             return False
@@ -1015,8 +1061,15 @@ class BundleBuilder:
             if duplicate_source is not None:
                 self._record_duplicate(duplicate_source, duplicate_repository)
             return False
+        if self._entity_count >= MAX_NORMALIZED_ENTITIES:
+            raise ResponseShapeError(
+                f"normalized entity count exceeds {MAX_NORMALIZED_ENTITIES}",
+                failure_class="limit_exceeded",
+            )
         self._seen[category].add(entity_id)
         self.bundle[category].append(record)
+        self._entity_count += 1
+        self._account_bundle_growth(record, base_indent=4)
         return True
 
     def finish(self) -> dict[str, Any]:
@@ -1058,6 +1111,16 @@ class BundleBuilder:
         for observation in self.bundle["coverage"]["observations"]:
             if isinstance(observation, dict):
                 append_optional_coverage_warning(self.bundle["coverage"], observation)
+        try:
+            json_size_with_limit(
+                self.bundle,
+                max_bytes=MAX_BUNDLE_BYTES - 1,
+            )
+        except (InputLimitError, TypeError, ValueError) as exc:
+            raise ResponseShapeError(
+                f"evidence bundle exceeds {MAX_BUNDLE_BYTES} bytes",
+                failure_class="limit_exceeded",
+            ) from exc
         return self.bundle
 
 

@@ -1059,8 +1059,9 @@ class ReviewLoopFindingTests(unittest.TestCase):
             def __exit__(self, *args: object) -> None:
                 return None
 
-            def read(self) -> bytes:
-                return b"not-json"
+            def read(self, size: int = -1) -> bytes:
+                body = b"not-json"
+                return body if size < 0 else body[:size]
 
         transport = UrllibTransport(
             "https://example.test",

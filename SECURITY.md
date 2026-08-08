@@ -16,6 +16,9 @@ has explicitly approved their visibility.
   identify people or confidential work.
 - Do not persist raw API responses unless a user explicitly enables a bounded
   diagnostic capture.
+- Request identity encoding and reject compressed response bodies; enforce the
+  documented response, JSON structure, entity, and final bundle bounds before
+  an untrusted provider payload can become a report input.
 - Do not write tokens, cookies, authorization headers, or query credentials to
   logs.
 - Do not place real private hosts, projects, people, URLs, or evidence bundles

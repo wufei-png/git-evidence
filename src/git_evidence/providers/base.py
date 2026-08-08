@@ -53,6 +53,7 @@ OPERATIONAL_FAILURE_CLASSES = frozenset(
         "unexpected_normalizer_error",
         "budget_exhausted",
         "insecure_transport",
+        "limit_exceeded",
         "privacy_violation",
     }
 )

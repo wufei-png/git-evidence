@@ -159,3 +159,17 @@ scheme, canonical host, effective port, and API path prefix; userinfo,
 fragments, supplied authentication query fields, downgrade, path escape,
 redirect cycles, repeated pagination targets, and regressing page numbers are
 rejected before another request can carry credentials.
+
+Untrusted provider input is bounded independently of runtime configuration.
+One response may contain at most 8 MiB of identity-encoded JSON, with at most
+64 nesting levels and 256 Ki characters in any key or string value. Compressed
+responses are rejected because the client requests identity encoding. A page
+may contain at most 1000 items, a logical paginated source at most 100000
+items and 32 MiB of decoded JSON, a provider or aggregate bundle at most
+100000 normalized entities, and the final indented UTF-8 bundle at most
+64 MiB. Cache files are also limited to 64 MiB, while each replayed response
+must independently remain within the 8 MiB response bound. `limit_exceeded` is a typed
+operational failure: it makes an affected required source incomplete and
+blocks rendering. Aggregate overflow is replaced by a bounded diagnostic
+bundle that preserves prior provider/privacy failures rather than writing the
+oversized artifact or fabricating provider-source failures.
