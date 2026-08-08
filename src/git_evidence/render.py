@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from hashlib import sha256
 from html import escape as html_escape
-from typing import Any, Mapping
+from typing import Any
 from urllib.parse import quote
 
 from .model import collection
@@ -12,6 +13,7 @@ from .validation import format_issues, validate_bundle
 
 PROFILES = ("project-first", "timeline", "release-focused", "actor-summary")
 LANGUAGES = ("en", "zh-CN")
+RENDER_POLICY_VERSION = "render-policy-v1"
 
 LABELS = {
     "en": {
@@ -27,6 +29,8 @@ LABELS = {
         "coverage_warnings": "Coverage warnings",
         "validation_warnings": "Validation warnings",
         "evidence": "evidence",
+        "evidence_index": "Evidence index",
+        "report_metadata": "Report metadata",
         "anonymous": "anonymous actor",
         "actor_warning": "Actor view is informational only; it is not a productivity or performance score.",
         "no_coverage": "No coverage observations.",
@@ -45,6 +49,8 @@ LABELS = {
         "coverage_warnings": "覆盖警告",
         "validation_warnings": "校验警告",
         "evidence": "证据",
+        "evidence_index": "证据索引",
+        "report_metadata": "报告元数据",
         "anonymous": "匿名成员",
         "actor_warning": "人员视图仅用于信息回顾，不代表生产力或绩效评分。",
         "no_coverage": "没有覆盖观测。",
@@ -181,10 +187,10 @@ def _fact_line(
     actor_labels: dict[str, str],
     language: str,
     *,
+    evidence_numbers: Mapping[str, str],
     allow_source_urls: bool = True,
     include_actor: bool = True,
 ) -> str:
-    labels = LABELS[language]
     summary = _escape_text(fact.get("summary") or fact.get("title") or fact.get("kind") or "verified activity")
     actor_id = fact.get("actor_id")
     actor = actor_labels.get(actor_id) if actor_id else None
@@ -196,8 +202,13 @@ def _fact_line(
         if not item:
             continue
         url = item.get("url")
+        number = evidence_numbers.get(str(evidence_id))
+        if number is None:
+            continue
         if allow_source_urls and url:
-            links.append(_link(labels["evidence"], str(url)))
+            links.append(_link(number, str(url)))
+        else:
+            links.append(f"[{number}]")
     suffix = f" ({', '.join(links)})" if links else ""
     return f"- {summary}{suffix}"
 
@@ -212,7 +223,12 @@ def _render_coverage(bundle: dict[str, Any], language: str) -> list[str]:
         source = _escape_text(observation.get("source") or "unknown")
         status = _escape_text(observation.get("status") or "unknown")
         note = _escape_text(observation.get("note") or "")
-        lines.append(f"- {source}: **{status}**" + (f" — {note}" if note else ""))
+        provider_id = _escape_text(observation.get("provider_id") or "unknown-provider")
+        repository_id = _escape_text(observation.get("repository_id") or "unknown-repository")
+        lines.append(
+            f"- {source}: **{status}** — provider={provider_id}; repository={repository_id}"
+            + (f" — {note}" if note else "")
+        )
     if not (coverage.get("observations") or []):
         lines.append(f"- {labels['no_coverage']}")
     warnings = coverage.get("warnings") or []
@@ -240,6 +256,81 @@ def _render_coverage(bundle: dict[str, Any], language: str) -> list[str]:
     return lines
 
 
+def _render_metadata(
+    bundle: dict[str, Any], profile: str, language: str
+) -> list[str]:
+    if bundle.get("schema_version") != "0.2":
+        return []
+    invocation = bundle.get("invocation") if isinstance(bundle.get("invocation"), dict) else {}
+    generator = invocation.get("generator") if isinstance(invocation.get("generator"), dict) else {}
+    generator_text = f"{generator.get('name', 'unknown')}/{generator.get('version', 'unknown')}"
+    if generator.get("commit"):
+        generator_text += f"@{generator['commit']}"
+    return [
+        f"## {LABELS[language]['report_metadata']}",
+        "",
+        f"- plan_id: `{_escape_text(bundle.get('plan_id'))}`",
+        f"- invocation_id: `{_escape_text(invocation.get('id'))}`",
+        f"- bundle_digest: `{_escape_text(bundle.get('bundle_digest'))}`",
+        f"- generator: `{_escape_text(generator_text)}`",
+        f"- profile: `{_escape_text(profile)}`",
+        f"- language: `{_escape_text(language)}`",
+        f"- policy: `{RENDER_POLICY_VERSION}`",
+        "",
+    ]
+
+
+def _render_evidence_index(
+    bundle: dict[str, Any],
+    evidence_numbers: Mapping[str, str],
+    language: str,
+    *,
+    allow_source_urls: bool,
+) -> list[str]:
+    items = sorted(collection(bundle, "evidence"), key=lambda item: str(item.get("id", "")))
+    if not items:
+        return []
+    retrievals = {
+        item.get("id"): item
+        for item in collection(bundle, "retrievals")
+        if isinstance(item.get("id"), str)
+    }
+    lines = ["", f"## {LABELS[language]['evidence_index']}", ""]
+    for item in items:
+        evidence_id = str(item.get("id") or "")
+        number = evidence_numbers[evidence_id]
+        retrieval = retrievals.get(item.get("retrieval_id"), {})
+        native = item.get("native_identity") if isinstance(item.get("native_identity"), dict) else {}
+        native_text = native.get("value") if native.get("state") == "known" else native.get("reason", "unavailable")
+        source_ref = item.get("source_ref") or retrieval.get("target_ref") or "unavailable"
+        if not allow_source_urls and "://" in str(source_ref):
+            source_ref = "[hidden]"
+        retrieval_detail = "; ".join(
+            f"{name}={_escape_text(value)}"
+            for name, value in (
+                ("mode", retrieval.get("mode")),
+                ("endpoint", retrieval.get("endpoint_kind")),
+                ("page", retrieval.get("page")),
+                ("pagination", retrieval.get("pagination_outcome")),
+                ("fetched_at", retrieval.get("fetched_at")),
+                ("stored_at", retrieval.get("stored_at")),
+                ("replayed_at", retrieval.get("replayed_at")),
+            )
+            if value is not None
+        )
+        description = (
+            f"provider={_escape_text(item.get('provider_id'))}; "
+            f"subject={_escape_text(item.get('subject_type'))}:{_escape_text(item.get('subject_id'))}; "
+            f"source={_escape_text(item.get('source'))}; native={_escape_text(native_text)}; "
+            f"retrieval={_escape_text(item.get('retrieval_id'))}; {retrieval_detail}; "
+            f"source_ref={_escape_text(source_ref)}"
+        )
+        url = item.get("url")
+        label = _link(number, str(url)) if allow_source_urls and url else f"[{number}]"
+        lines.append(f"- {label} — {description}")
+    return lines
+
+
 def render_bundle(
     bundle: dict[str, Any],
     profile: str = "project-first",
@@ -263,6 +354,10 @@ def render_bundle(
 
     labels = LABELS[language]
     repositories, evidence = _indexes(bundle)
+    evidence_numbers = {
+        evidence_id: f"E{position}"
+        for position, evidence_id in enumerate(sorted(evidence), start=1)
+    }
     rendered_actor_labels = _actor_labels(
         bundle,
         language,
@@ -278,6 +373,7 @@ def render_bundle(
         f"{labels['window']}: `{window['start']}` → `{window['end']}` ({window['timezone']})",
         "",
     ]
+    lines.extend(_render_metadata(bundle, profile, language))
 
     if profile == "timeline":
         lines.extend([f"## {labels['timeline']}", ""])
@@ -296,6 +392,7 @@ def render_bundle(
                     evidence,
                     rendered_actor_labels,
                     language,
+                    evidence_numbers=evidence_numbers,
                     allow_source_urls=allow_source_urls,
                 )
             )
@@ -314,6 +411,7 @@ def render_bundle(
                         evidence,
                         rendered_actor_labels,
                         language,
+                        evidence_numbers=evidence_numbers,
                         allow_source_urls=allow_source_urls,
                         include_actor=False,
                     )
@@ -339,6 +437,7 @@ def render_bundle(
                         evidence,
                         rendered_actor_labels,
                         language,
+                        evidence_numbers=evidence_numbers,
                         allow_source_urls=allow_source_urls,
                     )
                 )
@@ -361,6 +460,7 @@ def render_bundle(
                         evidence,
                         rendered_actor_labels,
                         language,
+                        evidence_numbers=evidence_numbers,
                         allow_source_urls=allow_source_urls,
                     )
                 )
@@ -374,12 +474,21 @@ def render_bundle(
                         evidence,
                         rendered_actor_labels,
                         language,
+                        evidence_numbers=evidence_numbers,
                         allow_source_urls=allow_source_urls,
                     )
                 )
             lines.append("")
 
     lines.extend(_render_coverage(bundle, language))
+    lines.extend(
+        _render_evidence_index(
+            bundle,
+            evidence_numbers,
+            language,
+            allow_source_urls=allow_source_urls,
+        )
+    )
     warning_issues = [issue for issue in issues if issue.severity == "warning"]
     if warning_issues:
         lines.extend(["", f"### {labels['validation_warnings']}", ""])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 import random
@@ -10,7 +11,8 @@ import stat
 import time
 from collections.abc import Callable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -79,6 +81,7 @@ RATE_LIMIT_HEADERS = (
     "x-ratelimit-reset",
     "retry-after",
 )
+_RESPONSE_CORRELATION_IDS = itertools.count(1)
 
 CACHE_HEADER_NAMES = frozenset(
     canonicalize_field_name(name)
@@ -670,6 +673,7 @@ class LocalResponseCache:
             return None
         try:
             stored_at = _finite_cache_timestamp(entry["stored_at"])
+            fetched_at = _finite_cache_timestamp(entry["fetched_at"])
             response = entry["response"]
             url = response["url"]
             status_code = response["status_code"]
@@ -678,7 +682,7 @@ class LocalResponseCache:
         except (KeyError, TypeError, ValueError):
             # A pre-header cache entry cannot prove pagination completeness.
             return None
-        if stored_at is None:
+        if stored_at is None or fetched_at is None or fetched_at > stored_at:
             return None
         safe_headers = self._safe_headers(
             headers,
@@ -692,7 +696,7 @@ class LocalResponseCache:
         ):
             return None
         now = _finite_cache_timestamp(self.clock())
-        if now is None or now - stored_at >= self.ttl_seconds:
+        if now is None or now < stored_at or now - stored_at >= self.ttl_seconds:
             return None
         if not isinstance(url, str) or not _is_success_status(status_code):
             return None
@@ -718,12 +722,35 @@ class LocalResponseCache:
             )
         except (InputLimitError, ResponseShapeError, TypeError, ValueError):
             return None
-        return ApiResponse(url, status_code, headers, body)
+        return ApiResponse(
+            url,
+            status_code,
+            headers,
+            body,
+            {
+                "mode": "cache_replay",
+                "fetched_at": _epoch_timestamp(fetched_at),
+                "stored_at": _epoch_timestamp(stored_at),
+                "replayed_at": _epoch_timestamp(now),
+                "cache_age_seconds": now - stored_at,
+                "cache_ttl_seconds": float(self.ttl_seconds),
+                **_safe_validator_provenance(headers),
+            },
+        )
 
     def put(self, key: str, response: ApiResponse, *, token: str | None) -> None:
         stored_at = _finite_cache_timestamp(self.clock())
+        provenance = response.provenance if isinstance(response.provenance, Mapping) else {}
+        fetched_at = (
+            stored_at
+            if not provenance
+            else _timestamp_epoch(provenance.get("fetched_at"))
+        )
         if (
             stored_at is None
+            or (provenance and provenance.get("mode") != "live")
+            or fetched_at is None
+            or fetched_at > stored_at
             or not _is_success_status(response.status_code)
             or (
                 has_auth_material(
@@ -765,6 +792,7 @@ class LocalResponseCache:
         entries = payload["entries"]
         entries[key] = {
             "stored_at": stored_at,
+            "fetched_at": fetched_at,
             "response": {
                 "url": response.url,
                 "status_code": response.status_code,
@@ -1094,6 +1122,68 @@ class ApiResponse:
     status_code: int
     headers: Mapping[str, str]
     body: Any
+    provenance: Mapping[str, Any] | None = None
+
+
+def _epoch_timestamp(value: float) -> str:
+    return datetime.fromtimestamp(value, timezone.utc).isoformat(
+        timespec="microseconds"
+    ).replace("+00:00", "Z")
+
+
+def _timestamp_epoch(value: Any) -> float | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return _finite_cache_timestamp(parsed.timestamp())
+
+
+def _safe_validator_provenance(headers: Mapping[str, Any] | None) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for header, field in (("etag", "etag"), ("last-modified", "last_modified")):
+        value = _header_get(headers, header)
+        if isinstance(value, str) and value and not has_auth_material(value):
+            result[field] = value
+    return result
+
+
+def response_retrieval_provenance(
+    response: ApiResponse,
+    *,
+    key: str,
+    page: int | None = None,
+    pagination_outcome: str | None = None,
+    target_ref: str | None = None,
+    endpoint_kind: str | None = None,
+) -> dict[str, Any]:
+    """Return safe in-memory provenance later bound to a source and repository."""
+    provenance = (
+        dict(response.provenance)
+        if isinstance(response.provenance, Mapping)
+        else {
+            "mode": "recorded_replay",
+            "replayed_at": _epoch_timestamp(time.time()),
+        }
+    )
+    provenance["_key"] = key
+    provenance["target_ref"] = response.url or target_ref or "unknown_target"
+    if endpoint_kind:
+        provenance["endpoint_kind"] = endpoint_kind
+    if page is not None:
+        provenance["page"] = page
+    if pagination_outcome is not None:
+        provenance["pagination_outcome"] = pagination_outcome
+    return provenance
+
+
+def new_response_correlation_key() -> str:
+    """Allocate a process-unique opaque key that never depends on object addresses."""
+    return f"response:{next(_RESPONSE_CORRELATION_IDS)}"
 
 
 def _retry_after_from_headers(headers: Mapping[str, Any] | None) -> float | None:
@@ -1533,6 +1623,11 @@ class UrllibRequestCursor:
                     response.status,
                     response_headers,
                     transport._decode_body(raw),
+                    {
+                        "mode": "live",
+                        "fetched_at": _epoch_timestamp(time.time()),
+                        **_safe_validator_provenance(response_headers),
+                    },
                 )
                 if transport._cache is not None and self.cache_key is not None:
                     transport._cache.put(self.cache_key, result, token=transport.token)
@@ -1602,6 +1697,8 @@ class PageResult:
     pages: int
     complete: bool
     diagnostics: dict[str, Any] | None = None
+    retrievals: list[dict[str, Any]] = field(default_factory=list, compare=False)
+    item_retrieval_keys: list[str] = field(default_factory=list, compare=False)
 
 
 @dataclass(frozen=True)
@@ -1818,6 +1915,8 @@ class PaginationCursor:
             "page": 1,
         }
         self.items: list[dict[str, Any]] = []
+        self.retrievals: list[dict[str, Any]] = []
+        self.item_retrieval_keys: list[str] = []
         self.item_bytes = 0
         self.diagnostics: dict[str, Any] = {}
         self.visited_requests: set[str] = set()
@@ -1863,6 +1962,8 @@ class PaginationCursor:
             set(self.visited_requests),
             set(self.visited_responses),
             list(self.items),
+            deepcopy(self.retrievals),
+            list(self.item_retrieval_keys),
             self.item_bytes,
             dict(self.diagnostics),
             self.pages,
@@ -1878,6 +1979,8 @@ class PaginationCursor:
                 self.visited_requests,
                 self.visited_responses,
                 self.items,
+                self.retrievals,
+                self.item_retrieval_keys,
                 self.item_bytes,
                 self.diagnostics,
                 self.pages,
@@ -1944,7 +2047,7 @@ class PaginationCursor:
                     pagination_outcome="cycle_detected",
                 )
             self.visited_responses.add(response_identity)
-        page_items = [item for item in response.body if isinstance(item, dict)]
+        page_items = [dict(item) for item in response.body if isinstance(item, dict)]
         if len(page_items) != len(response.body):
             raise ResponseShapeError(
                 f"provider returned a non-object item from {response.url}"
@@ -1967,18 +2070,32 @@ class PaginationCursor:
                 f"paginated source exceeds {MAX_PAGINATED_BYTES} bytes",
                 failure_class="limit_exceeded",
             )
-        self.items.extend(page_items)
-        if len(self.items) > MAX_PAGINATED_ITEMS:
-            raise ResponseShapeError(
-                f"paginated source exceeds {MAX_PAGINATED_ITEMS} items",
-                failure_class="limit_exceeded",
-            )
-
         decision = self.strategy.decide(
             response,
             page_size=len(page_items),
             per_page=self.per_page,
         )
+        outcome = (
+            decision.outcome or "documented_short_page"
+            if decision.complete
+            else "max_pages_reached" if self.pages >= self.max_pages else None
+        )
+        retrieval_key = new_response_correlation_key()
+        retrieval = response_retrieval_provenance(
+            response,
+            key=retrieval_key,
+            page=self.pages,
+            pagination_outcome=outcome,
+            target_ref=self.current_path,
+        )
+        self.retrievals.append(retrieval)
+        self.items.extend(page_items)
+        self.item_retrieval_keys.extend([retrieval_key] * len(page_items))
+        if len(self.items) > MAX_PAGINATED_ITEMS:
+            raise ResponseShapeError(
+                f"paginated source exceeds {MAX_PAGINATED_ITEMS} items",
+                failure_class="limit_exceeded",
+            )
         if decision.complete:
             self._finish(
                 complete=True,
@@ -2043,6 +2160,8 @@ class PaginationCursor:
             self.pages,
             self.complete,
             dict(self.diagnostics) if self.diagnostics else None,
+            deepcopy(self.retrievals),
+            list(self.item_retrieval_keys),
         )
 
 
@@ -2096,6 +2215,15 @@ class MappingTransport:
             raise ApiError(
                 f"no recorded response for {path}", failure_class="fixture_missing"
             )
-        if len(queue) > 1:
-            return queue.pop(0)
-        return queue[0]
+        response = queue.pop(0) if len(queue) > 1 else queue[0]
+        return ApiResponse(
+            response.url,
+            response.status_code,
+            response.headers,
+            response.body,
+            {
+                "mode": "recorded_replay",
+                "replayed_at": _epoch_timestamp(time.time()),
+                **_safe_validator_provenance(response.headers),
+            },
+        )

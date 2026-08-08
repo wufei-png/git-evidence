@@ -269,7 +269,7 @@
       "required": ["id", "provider_id", "mode", "endpoint_kind", "target_ref"],
       "properties": {
         "id": {"$ref": "#/$defs/id"}, "provider_id": {"$ref": "#/$defs/id"},
-        "mode": {"enum": ["live", "cache_replay", "legacy_import"]}, "endpoint_kind": {"$ref": "#/$defs/id"},
+        "mode": {"enum": ["live", "cache_replay", "recorded_replay", "legacy_import"]}, "endpoint_kind": {"$ref": "#/$defs/id"},
         "target_ref": {"$ref": "#/$defs/id"}, "repository_id": {"$ref": "#/$defs/id"}, "fetched_at": {"$ref": "#/$defs/timestamp"},
         "replayed_at": {"$ref": "#/$defs/timestamp"}, "stored_at": {"$ref": "#/$defs/timestamp"},
         "cache_age_seconds": {"type": "number", "minimum": 0}, "cache_ttl_seconds": {"type": "number", "minimum": 0},
@@ -282,6 +282,7 @@
       "allOf": [
         {"if": {"properties": {"mode": {"const": "live"}}}, "then": {"required": ["repository_id", "fetched_at"]}},
         {"if": {"properties": {"mode": {"const": "cache_replay"}}}, "then": {"required": ["repository_id", "fetched_at", "stored_at", "replayed_at", "cache_age_seconds", "cache_ttl_seconds"]}},
+        {"if": {"properties": {"mode": {"const": "recorded_replay"}}}, "then": {"required": ["repository_id", "replayed_at"]}},
         {"if": {"properties": {"mode": {"const": "legacy_import"}}}, "then": {"required": ["source_artifact_digest"]}}
       ]
     },
@@ -375,7 +376,7 @@
           "type": "object", "additionalProperties": false,
           "properties": {"x-ratelimit-limit": {"type": "string"}, "x-ratelimit-remaining": {"type": "string"}, "x-ratelimit-reset": {"type": "string"}, "retry-after": {"type": "string"}}
         },
-        "metrics": {"$ref": "#/$defs/metrics"}, "dependency": {"$ref": "#/$defs/coverage_diagnostics"},
+        "metrics": {"$ref": "#/$defs/metrics"}, "dependency_source": {"$ref": "#/$defs/source_name"}, "dependency": {"$ref": "#/$defs/coverage_diagnostics"},
         "child_diagnostics": {"type": "array", "items": {"$ref": "#/$defs/coverage_diagnostics"}},
         "commit_association": {"$ref": "#/$defs/commit_association_diagnostics"},
         "extensions": {"$ref": "#/$defs/extensions"}

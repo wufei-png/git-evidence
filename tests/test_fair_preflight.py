@@ -133,7 +133,7 @@ class FairPreflightTests(unittest.TestCase):
                     "repo:github:github.com:a-/a",
                     "repo:github:github.com:a/z",
                 ]
-                self.assertEqual(bundle["run"]["scope"]["repositories"], expected_ids)
+                self.assertEqual(bundle["plan"]["scope"]["repositories"], expected_ids)
                 diagnostic_order = list(
                     dict.fromkeys(
                         failure["repository"]

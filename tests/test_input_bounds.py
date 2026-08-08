@@ -322,7 +322,7 @@ class PageAndEntityBoundTests(unittest.TestCase):
             config,
             provider_factory=lambda *args: OverflowProvider(),
         )
-        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertFalse(bundle["coverage"]["render_eligible"])
         self.assertEqual(
             {failure["failure_class"] for failure in bundle["coverage"]["group_failures"]},
             {"limit_exceeded"},

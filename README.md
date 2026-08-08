@@ -87,9 +87,12 @@ configuration/input/I/O failure, and `3` a core provider-group collection
 failure. Bundle, report, and cache files use atomic replacement and mode
 `0600`; stdout remains available when no output path is supplied.
 
-Schema 0.1 remains readable for one compatibility window. Migration to the
-strict 0.2 contract is always explicit and records the source artifact digest;
-see the [0.1 to 0.2 migration guide](docs/migration/0.1-to-0.2.md).
+`collect` emits the strict Schema 0.2 contract directly, including its retained
+plan, unique invocation, response-level Retrieval records, typed Assertions,
+and recomputable Bundle digest. Schema 0.1 remains readable for one
+compatibility window; converting a stored 0.1 artifact is always an explicit
+migration that records the source artifact digest. See the
+[0.1 to 0.2 migration guide](docs/migration/0.1-to-0.2.md).
 
 The v0.1 CLI status word `publishable` is legacy wording for render eligibility
 only. A successful collect, validate, or render command does not approve

@@ -6,7 +6,7 @@ from typing import Self
 from unittest.mock import patch
 from urllib.request import Request
 
-from git_evidence.collect import _merge_bundles, _validate_provider_bundle_shape
+from git_evidence.collect import _merge_bundles
 from git_evidence.config import ConfigError, validate_collection_config
 from git_evidence.model import load_bundle
 from git_evidence.providers import GiteeProvider, GitHubProvider, GitLabProvider
@@ -253,7 +253,9 @@ class RequestTargetPolicyTests(unittest.TestCase):
             "group_status": "diagnostic_insecure_transport",
             "metrics": {"insecure_transport": True},
         }
-        validated = _validate_provider_bundle_shape(bundle)
+        # This legacy fixture predates response-level Retrieval provenance;
+        # exercise the aggregate metric fold without presenting it as provider output.
+        validated = bundle
         self.assertEqual(
             validated["collection"]["group_status"],
             "diagnostic_insecure_transport",

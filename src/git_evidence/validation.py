@@ -2165,6 +2165,7 @@ def _validate_v02_identity_and_retrievals(
             "live": common_fields | {"fetched_at"},
             "cache_replay": common_fields
             | {"fetched_at", "stored_at", "replayed_at", "cache_age_seconds", "cache_ttl_seconds"},
+            "recorded_replay": common_fields | {"replayed_at"},
             "legacy_import": {
                 "id", "provider_id", "mode", "endpoint_kind", "target_ref",
                 "source_artifact_digest", "extensions",

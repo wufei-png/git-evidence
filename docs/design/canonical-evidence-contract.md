@@ -10,7 +10,8 @@ the executable validator additionally checks cross-record references,
 canonical identities and digests, and allowlist/coverage invariants that JSON
 Schema alone cannot express. Schema 0.1 is read-only compatibility; Schema 0.2
 is strict, contains unknown provider data only under namespaced `extensions`,
-and is the migration target.
+and is both the direct collection format and the explicit legacy-migration
+target.
 
 ## Schema 0.2 identity envelope
 
@@ -32,9 +33,15 @@ into a native-ID field.
 
 ```json
 {
-  "schema_version": "0.1",
-  "run": {
-    "run_id": "run:example",
+  "schema_version": "0.2",
+  "canonicalization": {
+    "algorithm": "RFC8785",
+    "version": "v1",
+    "unicode_normalization": "NFC"
+  },
+  "plan_id": "plan:sha256:<digest>",
+  "plan": {
+    "origin": "collection",
     "window": {
       "start": "2026-07-27T00:00:00Z",
       "end": "2026-08-03T00:00:00Z",
@@ -43,8 +50,20 @@ into a native-ID field.
     "scope": {
       "repositories": ["repo:github:github.com:example/project"],
       "actors": []
-    }
+    },
+    "providers": [{
+      "kind": "github",
+      "instance": "github.com",
+      "selected_sources": ["repositories", "work_items", "change_requests", "interactions", "commits", "releases"]
+    }]
   },
+  "invocation": {
+    "id": "invocation:<uuid>",
+    "started_at": "2026-08-03T00:00:00Z",
+    "finished_at": "2026-08-03T00:00:01Z",
+    "generator": {"name": "git-evidence", "version": "0.2.0"}
+  },
+  "bundle_digest": "bundle:sha256:<digest>",
   "providers": [],
   "repositories": [],
   "actors": [],
@@ -54,14 +73,22 @@ into a native-ID field.
   "commits": [],
   "ref_changes": [],
   "releases": [],
+  "retrievals": [],
   "evidence": [],
-  "facts": [],
+  "assertions": [],
+  "collection": {},
+  "privacy": {
+    "actor_display": "anonymous",
+    "source_urls": "sanitized",
+    "auth_redaction": true
+  },
   "coverage": {
     "required_sources": ["repositories", "work_items", "change_requests", "interactions", "commits", "releases"],
     "observations": [],
     "fatal": [],
     "warnings": [],
-    "allow_publish": true
+    "group_failures": [],
+    "render_eligible": true
   }
 }
 ```
@@ -70,22 +97,23 @@ into a native-ID field.
 
 - Every entity ID is unique within its collection and is namespaced by
   provider/instance where the source requires it.
-- Every `fact` has at least one `evidence_id`; every evidence ID resolves to an
-  evidence record with a source URL or an explicit non-URL source reference.
-- A fact or entity outside the repository allowlist is invalid for the run.
+- Every `assertion` has at least one `evidence_id`; every evidence ID resolves
+  to Evidence with a Retrieval, honest native identity state, and a source URL
+  or explicit non-URL source reference.
+- An Assertion or Entity outside the repository allowlist is invalid for the
+  retained plan.
 - Every repository-scoped entity has a non-empty `repository_id` that belongs
-  to the run allowlist; repository entities themselves must also belong to that
+  to the plan allowlist; repository entities themselves must also belong to that
   allowlist.
-- When `run.scope.actors` is non-empty, every actor entity and every
-  `actor_id` reference belongs to that actor allowlist. Every non-empty
-  `actor_id` reference must also resolve to an actor entity; actor-neutral
-  records remain valid.
+- When `plan.scope.actors` is non-empty, every actor entity and every non-empty
+  `actor_id` reference belongs to that allowlist. Every reference must also
+  resolve to an actor entity; actor-neutral records remain valid.
 - `coverage.required_sources` is a non-empty, duplicate-free list of known
   resource or activity source names. An unknown or empty required-source list
   is invalid.
 - Every required source has a coverage observation for every in-scope
   provider/repository combination.
-- `allow_publish` is a derived compatibility field, never caller authority. The
+- `render_eligible` is a derived field, never caller authority. The
   validator computes render eligibility from all intrinsic schema, provenance,
   privacy, coverage, and reference checks; collectors overwrite the field with
   that result. A contradictory caller-supplied value is invalid.

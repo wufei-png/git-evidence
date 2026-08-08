@@ -5,17 +5,26 @@ import json
 import os
 from collections import defaultdict
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
+from .assertions import build_assertions
 from .bounds import (
     InputLimitError,
     indented_json_growth_upper_bound,
     json_size_with_limit,
 )
 from .config import provider_runtime_options, validate_collection_config
+from .identity import (
+    CANONICALIZATION,
+    compute_bundle_digest,
+    compute_plan_id,
+    invocation_record,
+    normalize_plan,
+    utc_now,
+)
 from .limits import MAX_BUNDLE_BYTES, MAX_NORMALIZED_ENTITIES
-from .model import COLLECTION_KEYS
+from .model import ALL_COLLECTION_KEYS
 from .privacy import PrivacyError, sanitize_public_payload
 from .providers import PROVIDER_REGISTRY, CollectionRequest, RepositoryTarget
 from .providers.base import (
@@ -52,9 +61,19 @@ def _timestamp_text(value: Any, field: str) -> str:
     if isinstance(value, datetime):
         if value.tzinfo is None:
             raise CollectionError(f"{field} must include a timezone")
-        return value.isoformat().replace("+00:00", "Z")
+        return value.astimezone(UTC).isoformat(
+            timespec="microseconds"
+        ).replace("+00:00", "Z")
     if isinstance(value, str) and value:
-        return value
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise CollectionError(f"{field} must be a valid timestamp") from exc
+        if parsed.tzinfo is None:
+            raise CollectionError(f"{field} must include a timezone")
+        return parsed.astimezone(UTC).isoformat(
+            timespec="microseconds"
+        ).replace("+00:00", "Z")
     raise CollectionError(f"{field} must be a non-empty timestamp")
 
 
@@ -72,7 +91,7 @@ def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
     if not isinstance(bundle, dict):
         raise ResponseShapeError("provider returned a non-object bundle")
 
-    for key in COLLECTION_KEYS:
+    for key in ALL_COLLECTION_KEYS:
         if key not in bundle:
             continue
         value = bundle[key]
@@ -109,6 +128,56 @@ def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
         for key in ("limits", "metrics", "group"):
             if key in collection and collection[key] is not None and not isinstance(collection[key], dict):
                 raise ResponseShapeError(f"provider bundle collection.{key} must be an object")
+
+    retrievals = {
+        item.get("id"): item
+        for item in bundle.get("retrievals", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    evidence_by_subject: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for evidence in bundle.get("evidence", []):
+        if not isinstance(evidence, dict):
+            continue
+        subject_type = evidence.get("subject_type")
+        subject_id = evidence.get("subject_id")
+        if isinstance(subject_type, str) and isinstance(subject_id, str):
+            evidence_by_subject[(subject_type, subject_id)].append(evidence)
+    subject_types = {
+        "work_items": "work_item",
+        "change_requests": "change_request",
+        "interactions": "interaction",
+        "commits": "commit",
+        "ref_changes": "ref_change",
+        "releases": "release",
+    }
+    for category, subject_type in subject_types.items():
+        for entity in bundle.get(category, []):
+            if not isinstance(entity, dict) or not isinstance(entity.get("occurred_at"), str):
+                # Actor-filtered structural parents intentionally carry no claim/evidence.
+                continue
+            subject_id = entity.get("id")
+            repository_id = entity.get("repository_id")
+            candidates = evidence_by_subject.get((subject_type, subject_id), [])
+            valid = False
+            for evidence in candidates:
+                retrieval = retrievals.get(evidence.get("retrieval_id"))
+                native = evidence.get("native_identity")
+                if (
+                    isinstance(retrieval, dict)
+                    and retrieval.get("provider_id") == evidence.get("provider_id")
+                    and retrieval.get("repository_id") == repository_id
+                    and isinstance(native, dict)
+                    and native.get("state") == "known"
+                    and isinstance(native.get("value"), str)
+                    and native["value"]
+                ):
+                    valid = True
+                    break
+            if not valid:
+                raise ResponseShapeError(
+                    f"provider bundle {category} entity lacks bound Retrieval/native Evidence",
+                    failure_class="malformed_response",
+                )
 
     # A provider group may legitimately be partial when its coverage ledger
     # records a failed repository. Validate all other schema/semantic
@@ -419,6 +488,7 @@ def _merge_bundles(
         "releases": [],
         "evidence": [],
         "facts": [],
+        "retrievals": [],
         "collection": {
             "groups": [],
             "metrics": empty_transport_metrics(),
@@ -449,6 +519,7 @@ def _merge_bundles(
         "releases",
         "evidence",
         "facts",
+        "retrievals",
     )
     seen: dict[str, set[str]] = {key: set() for key in collection_keys}
     provider_gate_blocked = False
@@ -577,12 +648,122 @@ def _merge_bundles(
     return merged
 
 
+def _collection_plan(
+    *,
+    window_start: str,
+    window_end: str,
+    timezone: str,
+    repository_ids: list[str],
+    actor_ids: list[str],
+    grouped: dict[tuple[str, str], list[RepositoryTarget]],
+    provider_options: dict[tuple[str, str], dict[str, Any]],
+    provider_runtime: dict[tuple[str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    providers: list[dict[str, Any]] = []
+    for kind, instance in sorted(grouped):
+        configured = provider_options[(kind, instance)]
+        runtime = provider_runtime[(kind, instance)]
+        selected_sources = list(RESOURCE_SOURCES)
+        selected_sources.extend(ACTIVITY_SOURCES)
+        providers.append(
+            {
+                "kind": kind,
+                "instance": instance,
+                "selected_sources": selected_sources,
+                "options": {
+                    "include_activity_api": bool(configured.get("include_activity_api", False)),
+                    "verify_tls": bool(configured.get("verify_tls", True)),
+                    "allow_insecure_loopback": bool(configured.get("allow_insecure_loopback", False)),
+                    **{
+                        key: runtime[key]
+                        for key in (
+                            "timeout_seconds", "max_retries", "max_pages", "max_requests",
+                            "retry_backoff_seconds", "retry_jitter_seconds",
+                            "retry_after_max_seconds", "cache_enabled",
+                            "cache_ttl_seconds", "cache_max_entries",
+                        )
+                    },
+                },
+            }
+        )
+    return normalize_plan(
+        {
+            "origin": "collection",
+            "window": {
+                "start": window_start,
+                "end": window_end,
+                "timezone": timezone,
+            },
+            "scope": {
+                "repositories": repository_ids,
+                "actors": actor_ids,
+            },
+            "providers": providers,
+        }
+    )
+
+
+def _finalize_v02(
+    merged: dict[str, Any],
+    *,
+    plan: dict[str, Any],
+    started_at: str,
+    finished_at: str,
+) -> dict[str, Any]:
+    coverage = dict(merged["coverage"])
+    coverage["render_eligible"] = bool(coverage.pop("allow_publish", False))
+    result: dict[str, Any] = {
+        "schema_version": "0.2",
+        "canonicalization": dict(CANONICALIZATION),
+        "plan_id": compute_plan_id(plan),
+        "plan": plan,
+        "invocation": invocation_record(
+            started_at=started_at,
+            finished_at=finished_at,
+        ),
+        **{
+            key: merged.get(key, [])
+            for key in (
+                "providers", "repositories", "actors", "work_items",
+                "change_requests", "interactions", "commits", "ref_changes",
+                "releases", "retrievals", "evidence",
+            )
+        },
+        "assertions": [],
+        "collection": merged.get("collection", {}),
+        "privacy": merged.get("privacy", {}),
+        "coverage": coverage,
+    }
+    result["assertions"] = build_assertions(result)
+    result["bundle_digest"] = compute_bundle_digest(result)
+    recompute_allow_publish(result)
+    blockers = [
+        issue
+        for issue in validate_bundle(result)
+        if issue.severity == "error"
+        and not issue.code.startswith("coverage.")
+        and issue.code
+        not in {
+            "scope.repository_missing",
+            "collection.insecure_transport",
+            "collection.limit_exceeded",
+        }
+    ]
+    if blockers:
+        codes = ", ".join(
+            sorted({f"{issue.code}@{issue.path}" for issue in blockers})
+        )
+        raise CollectionError(f"collector produced an invalid schema 0.2 bundle: {codes}")
+    return result
+
+
 def collect_config(
     config: dict[str, Any],
     *,
     provider_factory: ProviderFactory | None = None,
 ) -> dict[str, Any]:
     """Collect all explicitly allowlisted repositories into one canonical bundle."""
+    started_at = utc_now()
     config = validate_collection_config(config)
     window = config.get("window") or {}
     window_start = _timestamp_text(window.get("start"), "window.start")
@@ -693,11 +874,27 @@ def collect_config(
         RepositoryTarget(item["provider"], item["instance"], item["owner"], item["name"]).canonical_id
         for item in repositories
     ]
-    return _merge_bundles(
+    plan = _collection_plan(
+        window_start=window_start,
+        window_end=window_end,
+        timezone=timezone,
+        repository_ids=repository_ids,
+        actor_ids=actor_ids,
+        grouped=grouped,
+        provider_options=provider_options,
+        provider_runtime=provider_runtime,
+    )
+    merged = _merge_bundles(
         collected,
         window_start=window_start,
         window_end=window_end,
         timezone=timezone,
         repository_ids=repository_ids,
         actor_ids=actor_ids,
+    )
+    return _finalize_v02(
+        merged,
+        plan=plan,
+        started_at=started_at,
+        finished_at=utc_now(),
     )

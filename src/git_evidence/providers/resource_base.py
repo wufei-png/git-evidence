@@ -42,6 +42,8 @@ from .transport import (
     failure_class_for_status,
     is_success_status,
     response_status_error,
+    response_retrieval_provenance,
+    new_response_correlation_key,
     transport_metrics,
     validate_json_value_limits,
 )
@@ -53,12 +55,15 @@ class SourceResult:
     status: str = "supported"
     note: str = ""
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    retrievals: list[dict[str, Any]] = field(default_factory=list)
+    item_retrieval_keys: list[str] = field(default_factory=list)
 
 
 @dataclass
 class RepositorySnapshot:
     repository: dict[str, Any] | None = None
     sources: dict[str, SourceResult] = field(default_factory=dict)
+    retrievals: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -184,12 +189,14 @@ def actor_from(item: dict[str, Any], *fields: str) -> dict[str, Any] | None:
 
 def page_result_to_source(result: PageResult, source: str) -> SourceResult:
     if result.complete:
-        return SourceResult(result.items, "supported", f"{result.pages} page(s)", result.diagnostics or {})
+        return SourceResult(result.items, "supported", f"{result.pages} page(s)", result.diagnostics or {}, result.retrievals, result.item_retrieval_keys)
     return SourceResult(
         result.items,
         "incomplete",
         f"{source} pagination reached the configured page limit",
         result.diagnostics or {},
+        result.retrievals,
+        result.item_retrieval_keys,
     )
 
 
@@ -659,6 +666,7 @@ class BundleBuilder:
             "releases": [],
             "evidence": [],
             "facts": [],
+            "retrievals": [],
             "collection": {
                 "provider": descriptor.kind,
                 "instance": request.instance,
@@ -693,6 +701,8 @@ class BundleBuilder:
         self._change_request_ids_by_sha: dict[tuple[str, str], set[str]] = {}
         self._duplicate_counts: dict[tuple[str, str], int] = {}
         self._filtered_subjects: dict[str, dict[str, Any]] = {}
+        self._retrieval_ids: dict[str, str] = {}
+        self._retrieval_provenance: dict[str, dict[str, Any]] = {}
         self._entity_count = 1
         self._bundle_size_estimate = json_size_with_limit(
             self.bundle,
@@ -710,6 +720,8 @@ class BundleBuilder:
                 "change_request_ids_by_sha": self._change_request_ids_by_sha,
                 "duplicate_counts": self._duplicate_counts,
                 "filtered_subjects": self._filtered_subjects,
+                "retrieval_ids": self._retrieval_ids,
+                "retrieval_provenance": self._retrieval_provenance,
                 "entity_count": self._entity_count,
                 "bundle_size_estimate": self._bundle_size_estimate,
             }
@@ -724,6 +736,8 @@ class BundleBuilder:
         self._change_request_ids_by_sha = checkpoint["change_request_ids_by_sha"]
         self._duplicate_counts = checkpoint["duplicate_counts"]
         self._filtered_subjects = checkpoint["filtered_subjects"]
+        self._retrieval_ids = checkpoint["retrieval_ids"]
+        self._retrieval_provenance = checkpoint["retrieval_provenance"]
         self._entity_count = checkpoint["entity_count"]
         self._bundle_size_estimate = checkpoint["bundle_size_estimate"]
 
@@ -766,6 +780,7 @@ class BundleBuilder:
         return values
 
     def add_coverage(self, source: str, target: RepositoryTarget, result: SourceResult) -> None:
+        self._add_retrievals(source, target, result.retrievals)
         ledgers = self.bundle["coverage"]
         starting_lengths = {
             key: len(ledgers[key])
@@ -843,6 +858,55 @@ class BundleBuilder:
             if len(ledgers[key]) > starting_lengths[key]
         }
         self._account_bundle_growth(growth, base_indent=6)
+
+    def _add_retrievals(
+        self,
+        source: str,
+        target: RepositoryTarget,
+        retrievals: list[dict[str, Any]],
+    ) -> None:
+        for raw in retrievals:
+            if not isinstance(raw, dict):
+                continue
+            key = raw.get("_key")
+            if not isinstance(key, str) or not key:
+                continue
+            if key in self._retrieval_ids:
+                if self._retrieval_provenance.get(key) != raw:
+                    raise ResponseShapeError(
+                        "conflicting response Retrieval correlation key",
+                        failure_class="malformed_response",
+                    )
+                continue
+            retrieval_id = f"retrieval:{self.provider_id}:{len(self.bundle['retrievals']) + 1}"
+            record = {
+                field: value
+                for field, value in raw.items()
+                if field
+                in {
+                    "mode", "target_ref", "fetched_at", "replayed_at", "stored_at",
+                    "cache_age_seconds", "cache_ttl_seconds", "page",
+                    "pagination_outcome", "etag", "last_modified", "api_version",
+                }
+            }
+            record.update(
+                {
+                    "id": retrieval_id,
+                    "provider_id": self.provider_id,
+                    "endpoint_kind": (
+                        raw.get("endpoint_kind")
+                        if isinstance(raw.get("endpoint_kind"), str)
+                        and raw["endpoint_kind"]
+                        else source
+                    ),
+                    "repository_id": target.canonical_id,
+                }
+            )
+            if not isinstance(record.get("target_ref"), str) or not record["target_ref"]:
+                record["target_ref"] = source
+            self._add_entity("retrievals", sanitize_public_payload(record))
+            self._retrieval_ids[key] = retrieval_id
+            self._retrieval_provenance[key] = deepcopy(raw)
 
     def record_optional_failure(
         self,
@@ -922,6 +986,8 @@ class BundleBuilder:
         *,
         target: RepositoryTarget | None = None,
     ) -> None:
+        record = dict(record)
+        record.pop("_retrieval_key", None)
         repository = target.canonical_id if target is not None else record.get("id")
         self._add_entity(
             "repositories",
@@ -936,21 +1002,18 @@ class BundleBuilder:
         records: list[dict[str, Any]],
         *,
         target: RepositoryTarget,
-        fact_kind: str,
-        default_section: str,
         evidence_source: str = "resource_api",
     ) -> None:
         for raw in records:
             record = dict(raw)
             actor = record.pop("_actor", None)
-            summary = record.pop("_summary", None)
-            section = record.pop("_section", default_section)
             association_shas = self._unique_strings(record.pop("_association_shas", []))
             commit_shas = self._unique_strings(record.pop("_commit_shas", []))
             explicit_change_request_ids = self._unique_strings(record.pop("_change_request_ids", []))
             association_attempted = bool(record.pop("_association_attempted", False))
             association_complete = bool(record.pop("_association_complete", False))
-            record.pop("_native_id", None)
+            native_identity = record.pop("_native_id", None)
+            retrieval_key = record.pop("_retrieval_key", None)
             occurred_at = record.get("occurred_at")
             entity_id = record.get("id")
             if not isinstance(entity_id, str) or not entity_id:
@@ -1053,19 +1116,41 @@ class BundleBuilder:
                 "subject_type": category[:-1] if category.endswith("s") else category,
                 "subject_id": entity_id,
                 "source": evidence_source,
+                "retrieval_id": self._retrieval_ids.get(str(retrieval_key), ""),
+                "native_identity": {"state": "known", "value": str(native_identity)},
             }
+            if not evidence["retrieval_id"] or not is_valid_native_id(native_identity):
+                raise ResponseShapeError(
+                    "record has no response Retrieval or native identity",
+                    failure_class="malformed_response",
+                )
             if record.get("web_url"):
                 evidence["url"] = record["web_url"]
             else:
                 evidence["source_ref"] = f"{self.provider_id}:{category}:{entity_id}"
             self._add_entity("evidence", evidence)
+            fact_kind, section = {
+                "work_items": ("work_item_observed", "project"),
+                "change_requests": (
+                    "change_request_merged"
+                    if record.get("merged_at") is not None or record.get("state") == "merged"
+                    else "change_request_observed",
+                    "release"
+                    if record.get("merged_at") is not None or record.get("state") == "merged"
+                    else "change",
+                ),
+                "interactions": ("interaction_observed", "project"),
+                "commits": ("commit_observed", "change"),
+                "ref_changes": ("ref_change_observed", "change"),
+                "releases": ("release_observed", "release"),
+            }[category]
             fact = {
                 "id": f"fact:{category}:{entity_id}",
                 "kind": fact_kind,
                 "section": section,
                 "repository_id": target.canonical_id,
                 "occurred_at": occurred_at,
-                "summary": summary or record.get("title") or record.get("name") or entity_id,
+                "summary": record.get("title") or record.get("name") or entity_id,
                 "evidence_ids": [evidence_id],
             }
             if actor_id:
@@ -1342,6 +1427,7 @@ class ResourceProvider:
                         [snapshot.repository] if snapshot.repository else [],
                         "supported" if snapshot.repository else "unavailable",
                         "repository resource observed" if snapshot.repository else "repository resource unavailable",
+                        retrievals=snapshot.retrievals,
                     )
                 else:
                     result = snapshot.sources.get(
@@ -1385,8 +1471,6 @@ class ResourceProvider:
                             "ref_changes",
                             result.items,
                             target=target,
-                            fact_kind="ref_change_observed",
-                            default_section="change",
                             evidence_source="activity_api",
                         )
                     if (
@@ -1432,20 +1516,10 @@ class ResourceProvider:
                 for item in result.items:
                     builder.add_repository(item, target=target)
                 return
-            emissions = {
-                "work_items": ("work_item_observed", "project"),
-                "change_requests": ("change_request_observed", "change"),
-                "interactions": ("interaction_observed", "project"),
-                "commits": ("commit_observed", "change"),
-                "releases": ("release_observed", "release"),
-            }
-            fact_kind, section = emissions[source]
             builder.add_records(
                 source,
                 result.items,
                 target=target,
-                fact_kind=fact_kind,
-                default_section=section,
             )
         except Exception as exc:  # noqa: BLE001 - transactional source boundary
             builder.restore(checkpoint)
@@ -1621,7 +1695,19 @@ class ResourceProvider:
             repository = self._scheduled_repository(task.target, response.body)
             if not isinstance(repository, dict):
                 raise TypeError("provider returned an invalid normalized repository")
-            task.snapshot = RepositorySnapshot(repository)
+            retrieval_key = new_response_correlation_key()
+            repository["_retrieval_key"] = retrieval_key
+            task.snapshot = RepositorySnapshot(
+                repository,
+                retrievals=[
+                    response_retrieval_provenance(
+                        response,
+                        key=retrieval_key,
+                        target_ref=task.path,
+                        endpoint_kind="repositories",
+                    )
+                ],
+            )
         except Exception as exc:  # noqa: BLE001 - repository isolation boundary
             task.snapshot = self._failed_repository_snapshot(exc)
         task.done = True
@@ -1731,6 +1817,8 @@ class ResourceProvider:
                                     task.cursor.pages,
                                     False,
                                     diagnostics,
+                                    list(task.cursor.retrievals),
+                                    list(task.cursor.item_retrieval_keys),
                                 ),
                             )
                             if not isinstance(task.result, SourceResult):
@@ -1777,7 +1865,11 @@ class ResourceProvider:
                 else f"{task.source} pagination reached the configured page limit"
             ),
             diagnostics,
+            page.retrievals,
+            page.item_retrieval_keys,
         )
+        for retrieval in result.retrievals:
+            retrieval.setdefault("endpoint_kind", task.endpoint_kind or task.source)
         return self._normalize_items(
             result,
             task.source,
@@ -1791,9 +1883,13 @@ class ResourceProvider:
         records: list[dict[str, Any]] = []
         notes: list[str] = []
         diagnostics: dict[str, Any] = {}
+        retrievals: list[dict[str, Any]] = []
+        item_retrieval_keys: list[str] = []
         complete = True
         for result in results:
             records.extend(result.items)
+            retrievals.extend(result.retrievals)
+            item_retrieval_keys.extend(result.item_retrieval_keys)
             merge_diagnostics(diagnostics, result.diagnostics)
             if result.status != "supported":
                 complete = False
@@ -1804,6 +1900,8 @@ class ResourceProvider:
             "supported" if complete else "incomplete",
             "; ".join(notes),
             diagnostics,
+            retrievals,
+            item_retrieval_keys,
         )
 
     def _strict_source_result(
@@ -1821,13 +1919,16 @@ class ResourceProvider:
         valid: list[dict[str, Any]] = []
         dropped = 0
         failure_classes: set[str] = set()
-        for item in result.items:
+        valid_retrieval_keys: list[str] = []
+        for position, item in enumerate(result.items):
             try:
                 if source == "activities":
                     self._validate_activity_item(item, request)
                 else:
                     self._validate_canonical_item(item, source, target, request)
                 valid.append(item)
+                if position < len(result.item_retrieval_keys):
+                    valid_retrieval_keys.append(result.item_retrieval_keys[position])
             except PrivacyError:
                 raise
             except Exception as exc:
@@ -1838,6 +1939,7 @@ class ResourceProvider:
                     else "unexpected_normalizer_error"
                 )
         result.items = valid
+        result.item_retrieval_keys = valid_retrieval_keys
         _append_normalization_diagnostics(result, source, dropped, failure_classes)
         return result
 
@@ -1919,11 +2021,20 @@ class ResourceProvider:
         normalized: list[dict[str, Any]] = []
         dropped = 0
         failure_classes: set[str] = set()
-        for item in result.items:
+        normalized_retrieval_keys: list[str] = []
+        for position, item in enumerate(result.items):
             try:
                 if filter_item is not None and not filter_item(item):
                     continue
                 normalized_item = normalizer(item)
+                retrieval_key = (
+                    result.item_retrieval_keys[position]
+                    if position < len(result.item_retrieval_keys)
+                    else item.get("_retrieval_key")
+                )
+                if isinstance(normalized_item, dict) and isinstance(retrieval_key, str):
+                    normalized_item["_retrieval_key"] = retrieval_key
+                    normalized_retrieval_keys.append(retrieval_key)
                 if target is not None:
                     validate_native_item_repository_identity(
                         item,
@@ -1942,6 +2053,7 @@ class ResourceProvider:
                     else "unexpected_normalizer_error"
                 )
         result.items = normalized
+        result.item_retrieval_keys = normalized_retrieval_keys
         _append_normalization_diagnostics(result, source, dropped, failure_classes)
         return result
 
@@ -1956,6 +2068,8 @@ class ResourceProvider:
             diagnostics = api_error_diagnostics(exc)
             diagnostics["metrics"] = transport_metrics(self.transport)
             return SourceResult([], "incomplete", "provider request failed", diagnostics)
+        for retrieval in result.retrievals:
+            retrieval.setdefault("endpoint_kind", source)
         diagnostics = dict(result.diagnostics or {})
         metrics = transport_metrics(self.transport)
         if metrics["retry_count"] or metrics["budget_exhausted"] or metrics["cache_hits"] or metrics["cache_misses"]:
@@ -1965,6 +2079,8 @@ class ResourceProvider:
             "supported" if result.complete else "incomplete",
             f"{result.pages} page(s)" if result.complete else f"{source} pagination reached the configured page limit",
             diagnostics,
+            result.retrievals,
+            result.item_retrieval_keys,
         )
 
     def _collect_repository(

@@ -361,6 +361,7 @@ class GitHubProvider(ResourceProvider):
         association_cache: dict[str, tuple[list[str], SourceResult]] = {}
         association_summary = {"attempted": 0, "complete": 0, "failed": 0}
         association_failure_classes: set[str] = set()
+        association_retrievals: list[dict[str, Any]] = []
         repository_url = (
             f"{instance_web_base(target.instance)}/"
             f"{quote(target.owner, safe='')}/{quote(target.name, safe='')}"
@@ -388,6 +389,9 @@ class GitHubProvider(ResourceProvider):
                 for sha in commit_shas:
                     if sha not in association_cache:
                         association_cache[sha] = self._commit_change_request_candidates(target, sha)
+                        association_retrievals.extend(
+                            association_cache[sha][1].retrievals
+                        )
                     candidates, association_result = association_cache[sha]
                     association_summary["attempted"] += 1
                     change_request_ids.extend(candidates)
@@ -417,9 +421,8 @@ class GitHubProvider(ResourceProvider):
                     "_association_attempted": bool(commit_shas),
                     "_association_complete": association_complete,
                     "_native_id": event_id,
+                    "_retrieval_key": event.get("_retrieval_key"),
                     "_actor": actor_from(event, "actor"),
-                    "_summary": f"Observed push on {payload.get('ref') or 'unknown ref'}",
-                    "_section": "change",
                 }
             )
         note = (
@@ -445,12 +448,21 @@ class GitHubProvider(ResourceProvider):
                 association_diagnostics["failure_classes"] = sorted(association_failure_classes)
             ref_diagnostics["commit_association"] = association_diagnostics
         return {
-            "activities": SourceResult(events, activity_status, note, result.diagnostics or {}),
+            "activities": SourceResult(
+                events, activity_status, note, result.diagnostics or {},
+                result.retrievals, result.item_retrieval_keys,
+            ),
             "ref_changes": SourceResult(
                 ref_changes,
                 "incomplete" if result.status == "supported" else result.status,
                 note + association_note,
                 ref_diagnostics,
+                [*result.retrievals, *association_retrievals],
+                [
+                    str(item["_retrieval_key"])
+                    for item in ref_changes
+                    if isinstance(item.get("_retrieval_key"), str)
+                ],
             ),
         }
 
@@ -506,8 +518,6 @@ class GitHubProvider(ResourceProvider):
             "web_url": item.get("html_url"),
             "_native_id": number,
             "_actor": actor_from(item, "user"),
-            "_summary": item.get("title") or f"Issue #{number}",
-            "_section": "project",
         }
 
     def _normalize_pull(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
@@ -531,8 +541,6 @@ class GitHubProvider(ResourceProvider):
             "_association_shas": association_shas,
             "_native_id": number,
             "_actor": actor_from(item, "user"),
-            "_summary": item.get("title") or f"Pull request #{number}",
-            "_section": "release" if merged_at else "change",
         }
 
     def _normalize_comment(
@@ -556,8 +564,6 @@ class GitHubProvider(ResourceProvider):
             "web_url": item.get("html_url") or item.get("pull_request_url"),
             "_native_id": comment_id,
             "_actor": actor_from(item, "user", "author"),
-            "_summary": f"Observed {kind.replace('_', ' ')}",
-            "_section": "project",
         }
 
     def _collect_interactions(
@@ -673,8 +679,6 @@ class GitHubProvider(ResourceProvider):
             "web_url": item.get("html_url"),
             "_native_id": sha,
             "_actor": actor_from(item, "author", "committer"),
-            "_summary": title or f"Commit {sha}",
-            "_section": "change",
         }
 
     def _normalize_release(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
@@ -687,6 +691,4 @@ class GitHubProvider(ResourceProvider):
             "occurred_at": first_timestamp(item, "published_at", "created_at"),
             "web_url": item.get("html_url"),
             "_native_id": release_id,
-            "_summary": item.get("name") or item.get("tag_name") or "Release",
-            "_section": "release",
         }

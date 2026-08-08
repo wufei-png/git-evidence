@@ -342,8 +342,6 @@ class GiteeProvider(ResourceProvider):
             "web_url": item.get("html_url"),
             "_native_id": number,
             "_actor": actor_from(item, "user", "author"),
-            "_summary": item.get("title") or f"Issue #{number}",
-            "_section": "project",
         }
 
     def _normalize_pull(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
@@ -367,8 +365,6 @@ class GiteeProvider(ResourceProvider):
             "_association_shas": association_shas,
             "_native_id": number,
             "_actor": actor_from(item, "user", "author"),
-            "_summary": item.get("title") or f"Pull request #{number}",
-            "_section": "release" if merged_at else "change",
         }
 
     def _collect_interactions(
@@ -439,8 +435,6 @@ class GiteeProvider(ResourceProvider):
             "web_url": comment.get("html_url") or subject.get("web_url"),
             "_native_id": comment_id,
             "_actor": actor_from(comment, "user", "author"),
-            "_summary": "Observed comment",
-            "_section": "project",
         }
 
     @staticmethod
@@ -466,8 +460,6 @@ class GiteeProvider(ResourceProvider):
             "web_url": item.get("html_url"),
             "_native_id": sha,
             "_actor": actor_from(item, "author", "committer"),
-            "_summary": title,
-            "_section": "change",
         }
 
     def _normalize_release(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
@@ -480,6 +472,4 @@ class GiteeProvider(ResourceProvider):
             "occurred_at": first_timestamp(item, "published_at", "created_at"),
             "web_url": item.get("html_url"),
             "_native_id": release_id,
-            "_summary": item.get("name") or item.get("tag_name") or "Release",
-            "_section": "release",
         }

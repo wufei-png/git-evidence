@@ -1053,7 +1053,7 @@ class ContractTests(unittest.TestCase):
             return GitHubProvider(transport, instance=instance)
 
         bundle = collect_config(config, provider_factory=factory)
-        self.assertTrue(bundle["coverage"]["allow_publish"])
+        self.assertTrue(bundle["coverage"]["render_eligible"])
         self.assertEqual(validate_bundle(bundle), [])
         self.assertTrue(any(item["source"] == "ref_changes" for item in bundle["coverage"]["warnings"]))
 
@@ -1186,13 +1186,13 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(len(bundle["providers"]), 2)
         self.assertEqual(len(bundle["repositories"]), 2)
         self.assertEqual(
-            bundle["run"]["scope"]["repositories"],
+            bundle["plan"]["scope"]["repositories"],
             [
                 "repo:github:github.com:example/project",
                 "repo:gitlab:gitlab.com:example/project",
             ],
         )
-        self.assertEqual(bundle["run"]["scope"]["actors"], ["actor:github:github.com:999"])
+        self.assertEqual(bundle["plan"]["scope"]["actors"], ["actor:github:github.com:999"])
 
     def test_collect_config_contains_malformed_bundle_failure_with_successful_sibling(self) -> None:
         transports = {"github": github_transport()}
@@ -1225,7 +1225,7 @@ class ContractTests(unittest.TestCase):
             [item["id"] for item in bundle["repositories"]],
             ["repo:github:github.com:example/project"],
         )
-        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertFalse(bundle["coverage"]["render_eligible"])
         self.assertEqual(
             {failure["failure_class"] for failure in bundle["coverage"]["group_failures"]},
             {"malformed_response"},
@@ -1241,7 +1241,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(result, 3)
         self.assertIn("coverage.publish_blocked", stderr.getvalue())
         self.assertIn("one or more provider groups failed", stderr.getvalue())
-        self.assertEqual(json.loads(stdout.getvalue())["coverage"]["allow_publish"], False)
+        self.assertEqual(json.loads(stdout.getvalue())["coverage"]["render_eligible"], False)
 
     def test_pagination_does_not_call_a_full_page_complete(self) -> None:
         transport = MappingTransport({"/items": response("", [{"id": index} for index in range(100)])})
