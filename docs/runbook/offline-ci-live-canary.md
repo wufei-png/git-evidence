@@ -30,9 +30,11 @@ run all of the following gates:
 The CI commands are:
 
 ```bash
-python -m pytest -q
+python -m pytest -q --disable-socket
 python -m compileall -q src
 git diff --check
+python scripts/check_schema_sync.py
+python -m build
 ```
 
 The repository's `unittest` suite is an equivalent dependency-light test entry
@@ -93,3 +95,22 @@ substitute for it.
 The current repository validation does not execute a live canary. No GitHub,
 GitLab, or Gitee live-provider result should be inferred from the offline test
 suite.
+
+The repository provides a separate `Protected live-provider canary` manual
+workflow. Configure the `live-provider-canary` GitHub Environment with required
+reviewers, restrict its deployment branches to protected `main`, and provide
+only the selected provider's `LIVE_<PROVIDER>_CONFIG` and
+`LIVE_<PROVIDER>_TOKEN` secrets. Add a comma-separated, non-secret
+`LIVE_<PROVIDER>_INSTANCES` environment variable containing the independently
+authorized exact instances. The protected config must reference
+`token_env: LIVE_PROVIDER_TOKEN`. The workflow itself rejects non-`main` refs,
+provider/config mismatches, and instances outside that environment allowlist.
+It logs only the sanitized provider/instances/window/repository-count scope,
+does not upload the sensitive bundle or report, and removes its temporary
+config, bundle, and report at exit.
+
+After `.github/workflows/ci.yml` is present on the default branch, protect
+`main` with a branch ruleset that requires the stable `Offline contract
+required` check. The workflow cannot configure repository rulesets itself; a
+green Actions job is not a merge gate until that administrator-controlled
+setting is enabled and verified.

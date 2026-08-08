@@ -1,0 +1,135 @@
+name: Offline CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  offline-contract:
+    name: Python ${{ matrix.python-version }} offline contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install test and build tooling
+        run: python -m pip install --upgrade pip build pytest pytest-socket
+      - name: Install project
+        run: python -m pip install --editable .
+      - name: Run offline provider and contract tests
+        env:
+          GITHUB_TOKEN: ""
+          GITLAB_TOKEN: ""
+          GITEE_TOKEN: ""
+        run: python -m pytest -q --disable-socket
+      - name: Compile source and tests
+        run: python -m compileall -q src tests
+      - name: Verify Schema authority and packaged copy
+        run: python scripts/check_schema_sync.py
+      - name: Check patch whitespace
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            git diff --check "$PR_BASE_SHA...$PR_HEAD_SHA"
+          elif [[ "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
+            git diff-tree --check --root -r "$CURRENT_SHA"
+          else
+            git diff --check "$PUSH_BEFORE_SHA..$CURRENT_SHA"
+          fi
+      - name: Build sdist and wheel
+        run: python -m build
+      - name: Smoke-test the installed wheel outside the checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_WORKSPACE"
+          smoke_root="$RUNNER_TEMP/git-evidence-wheel-smoke"
+          python -m venv "$smoke_root/venv"
+          "$smoke_root/venv/bin/python" -m pip install "$repo"/dist/*.whl
+          mkdir -p "$smoke_root/run"
+          cd "$smoke_root/run"
+          "$smoke_root/venv/bin/python" - <<'PY'
+          import json
+          from importlib.resources import files
+
+          schema = files("git_evidence").joinpath(
+              "schemas/evidence-bundle-0.1.schema.json"
+          ).read_text(encoding="utf-8")
+          assert json.loads(schema)["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+          PY
+          "$smoke_root/venv/bin/git-evidence" providers > providers.json
+          "$smoke_root/venv/bin/git-evidence" doctor --config "$repo/config.example.yml"
+          "$smoke_root/venv/bin/git-evidence" validate "$repo/fixtures/example_bundle.json"
+          "$smoke_root/venv/bin/git-evidence" render \
+            "$repo/fixtures/example_bundle.json" \
+            --config "$repo/config.example.yml" \
+            --output report.md
+          test -s providers.json
+          test -s report.md
+
+  offline-contract-required:
+    name: Offline contract required
+    if: always()
+    needs: offline-contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Python matrix job
+        env:
+          MATRIX_RESULT: ${{ needs.offline-contract.result }}
+        run: test "$MATRIX_RESULT" = success
+
+  ruff-lint-debt:
+    name: Ruff lint debt (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - run: python -m pip install ruff==0.16.2
+      - run: ruff check .
+
+  ruff-format-debt:
+    name: Ruff format debt (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - run: python -m pip install ruff==0.16.2
+      - run: ruff format --check .
+
+  pyright-debt:
+    name: Pyright debt (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --editable . pyright==1.1.411
+      - run: pyright

@@ -1,0 +1,87 @@
+name: Protected live-provider canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: Provider whose protected config and token will be used
+        required: true
+        type: choice
+        options: [github, gitlab, gitee]
+
+permissions:
+  contents: read
+
+jobs:
+  authorize-ref:
+    name: Require protected main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject secret-bearing runs from other refs
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: test "$DISPATCH_REF" = refs/heads/main
+
+  github:
+    if: inputs.provider == 'github'
+    needs: authorize-ref
+    environment: live-provider-canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+          cache: pip
+      - run: python -m pip install .
+      - name: Run bounded GitHub canary
+        shell: bash
+        env:
+          LIVE_CANARY_CONFIG_CONTENT: ${{ secrets.LIVE_GITHUB_CONFIG }}
+          LIVE_PROVIDER_TOKEN: ${{ secrets.LIVE_GITHUB_TOKEN }}
+          LIVE_EXPECTED_PROVIDER: github
+          LIVE_ALLOWED_INSTANCES: ${{ vars.LIVE_GITHUB_INSTANCES }}
+        run: bash .github/workflows/run-live-canary.sh
+  gitlab:
+    if: inputs.provider == 'gitlab'
+    needs: authorize-ref
+    environment: live-provider-canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+          cache: pip
+      - run: python -m pip install .
+      - name: Run bounded GitLab canary
+        shell: bash
+        env:
+          LIVE_CANARY_CONFIG_CONTENT: ${{ secrets.LIVE_GITLAB_CONFIG }}
+          LIVE_PROVIDER_TOKEN: ${{ secrets.LIVE_GITLAB_TOKEN }}
+          LIVE_EXPECTED_PROVIDER: gitlab
+          LIVE_ALLOWED_INSTANCES: ${{ vars.LIVE_GITLAB_INSTANCES }}
+        run: bash .github/workflows/run-live-canary.sh
+  gitee:
+    if: inputs.provider == 'gitee'
+    needs: authorize-ref
+    environment: live-provider-canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+          cache: pip
+      - run: python -m pip install .
+      - name: Run bounded Gitee canary
+        shell: bash
+        env:
+          LIVE_CANARY_CONFIG_CONTENT: ${{ secrets.LIVE_GITEE_CONFIG }}
+          LIVE_PROVIDER_TOKEN: ${{ secrets.LIVE_GITEE_TOKEN }}
+          LIVE_EXPECTED_PROVIDER: gitee
+          LIVE_ALLOWED_INSTANCES: ${{ vars.LIVE_GITEE_INSTANCES }}
+        run: bash .github/workflows/run-live-canary.sh
