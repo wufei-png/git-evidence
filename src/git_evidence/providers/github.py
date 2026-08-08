@@ -11,6 +11,7 @@ from .base import (
 )
 from .catalog import PROVIDER_DESCRIPTORS
 from .resource_base import (
+    PageSourceRequest,
     RepositorySnapshot,
     ResourceProvider,
     SourceResult,
@@ -20,7 +21,6 @@ from .resource_base import (
     in_window_or_malformed,
     is_valid_native_id,
     merge_diagnostics,
-    native_id,
     validate_repository_identity,
 )
 from .transport import (
@@ -104,6 +104,129 @@ class GitHubProvider(ResourceProvider):
 
     def _page(self, path: str, params: dict[str, Any]) -> PageResult:
         return paginate(self.transport, path, params, per_page=100, max_pages=self.max_pages)
+
+    def _scheduled_root_path(self, target: RepositoryTarget) -> str:
+        return self._repo_path(target)
+
+    def _scheduled_repository(
+        self, target: RepositoryTarget, raw: dict[str, Any]
+    ) -> dict[str, Any]:
+        validate_repository_identity(raw, target, identity_field="full_name")
+        return {
+            "id": target.canonical_id,
+            "provider_id": f"provider:github:{target.instance}",
+            "full_name": raw.get("full_name"),
+            "name": raw.get("name"),
+            "web_url": raw.get("html_url")
+            or f"{instance_web_base(target.instance)}/{target.owner}/{target.name}",
+        }
+
+    def _scheduled_top_level_requests(
+        self, target: RepositoryTarget, request: CollectionRequest
+    ) -> list[PageSourceRequest]:
+        root = self._repo_path(target)
+        return [
+            PageSourceRequest(
+                target,
+                "work_items",
+                f"{root}/issues",
+                {"state": "all", "since": request.window_start},
+                lambda item: self._normalize_issue(target, item),
+                lambda item: not isinstance(item, dict)
+                or (
+                    "pull_request" not in item
+                    and in_window_or_malformed(item, request, "updated_at", "created_at")
+                ),
+            ),
+            PageSourceRequest(
+                target,
+                "change_requests",
+                f"{root}/pulls",
+                {"state": "all", "sort": "updated", "direction": "desc"},
+                lambda item: self._normalize_pull(target, item),
+                lambda item: self._change_request_in_window(item, request),
+            ),
+            PageSourceRequest(
+                target,
+                "commits",
+                f"{root}/commits",
+                {"since": request.window_start, "until": request.window_end},
+                lambda item: self._normalize_commit(target, item),
+                lambda item: self._commit_in_window(item, request),
+            ),
+            PageSourceRequest(
+                target,
+                "releases",
+                f"{root}/releases",
+                {},
+                lambda item: self._normalize_release(target, item),
+                lambda item: in_window_or_malformed(
+                    item, request, "published_at", "created_at"
+                ),
+            ),
+        ]
+
+    def _scheduled_interaction_requests(
+        self,
+        target: RepositoryTarget,
+        snapshot: RepositorySnapshot,
+        request: CollectionRequest,
+    ) -> list[PageSourceRequest]:
+        root = self._repo_path(target)
+        tasks: list[PageSourceRequest] = []
+        issues = snapshot.sources["work_items"].items
+        pulls = snapshot.sources["change_requests"].items
+        for item in [*issues, *pulls]:
+            number = item.get("number")
+            subject_type = "change_request" if item in pulls else "work_item"
+            tasks.append(
+                PageSourceRequest(
+                    target,
+                    "interactions",
+                    f"{root}/issues/{number}/comments",
+                    {},
+                    lambda comment, number=number: self._normalize_comment(
+                        target, comment, number, "issue_comment"
+                    ),
+                    lambda comment: in_window_or_malformed(
+                        comment, request, "created_at", "submitted_at", "updated_at"
+                    ),
+                    subject_type,
+                    str(number),
+                    "issue_comment",
+                )
+            )
+            if subject_type == "change_request":
+                for endpoint_kind, endpoint, timestamp_fields in (
+                    (
+                        "review",
+                        f"{root}/pulls/{number}/reviews",
+                        ("created_at", "submitted_at", "updated_at"),
+                    ),
+                    (
+                        "review_comment",
+                        f"{root}/pulls/{number}/comments",
+                        ("created_at", "submitted_at", "updated_at"),
+                    ),
+                ):
+                    tasks.append(
+                        PageSourceRequest(
+                            target,
+                            "interactions",
+                            endpoint,
+                            {},
+                            lambda comment, number=number, kind=endpoint_kind: self._normalize_comment(
+                                target, comment, number, kind
+                            ),
+                            lambda comment, fields=timestamp_fields: in_window_or_malformed(
+                                comment, request, *fields
+                            ),
+                            subject_type,
+                            str(number),
+                            endpoint_kind,
+                        )
+                    )
+        return tasks
 
     def _collect_repository(
         self, target: RepositoryTarget, request: CollectionRequest

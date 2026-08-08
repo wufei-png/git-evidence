@@ -31,8 +31,11 @@ from .transport import (
     ApiError,
     JsonTransport,
     PageResult,
+    PaginationCursor,
     ResponseShapeError,
     failure_class_for_status,
+    is_success_status,
+    response_status_error,
     transport_metrics,
     validate_json_value_limits,
 )
@@ -50,6 +53,32 @@ class SourceResult:
 class RepositorySnapshot:
     repository: dict[str, Any] | None = None
     sources: dict[str, SourceResult] = field(default_factory=dict)
+
+
+@dataclass
+class PageSourceRequest:
+    """Provider-owned description of one independently schedulable page source."""
+
+    target: RepositoryTarget
+    source: str
+    path: str
+    params: dict[str, Any]
+    normalizer: Callable[[dict[str, Any]], dict[str, Any]]
+    filter_item: Callable[[Any], bool] | None = None
+    subject_type: str = ""
+    subject_id: str = ""
+    endpoint_kind: str = ""
+    cursor: PaginationCursor | None = None
+    result: SourceResult | None = None
+
+
+@dataclass
+class _RootRequest:
+    target: RepositoryTarget
+    path: str
+    request_cursor: Any | None = None
+    snapshot: RepositorySnapshot | None = None
+    done: bool = False
 
 
 class StrictNormalizationError(ResponseShapeError):
@@ -1165,8 +1194,9 @@ class ResourceProvider:
             raise ValueError(f"request.max_pages must be in [1, {MAX_PAGES}]")
         self.max_pages = request.max_pages
         builder = BundleBuilder(request, self.descriptor, self.transport)
+        snapshots = self._collect_core_fair(request)
         for target in request.repositories:
-            snapshot = self._collect_repository(target, request)
+            snapshot = snapshots[target.canonical_id]
             for source in RESOURCE_SOURCES:
                 if source == "repositories" and source not in snapshot.sources:
                     result = SourceResult(
@@ -1194,6 +1224,8 @@ class ResourceProvider:
                     builder.add_records("commits", result.items, target=target, fact_kind="commit_observed", default_section="change")
                 elif source == "releases":
                     builder.add_records("releases", result.items, target=target, fact_kind="release_observed", default_section="release")
+        # Optional activity/ref work starts only after every repository's core queue.
+        for target in request.repositories:
             if request.include_activity_api:
                 activity_boundary_error: Exception | None = None
                 try:
@@ -1254,6 +1286,229 @@ class ResourceProvider:
                         fail_closed=True,
                     )
         return builder.finish()
+
+    def _collect_core_fair(
+        self,
+        request: CollectionRequest,
+    ) -> dict[str, RepositorySnapshot]:
+        """Collect roots, top-level pages, then interactions in deterministic rounds."""
+        targets = sorted(request.repositories, key=lambda target: target.canonical_id)
+        roots = [
+            _RootRequest(target, self._scheduled_root_path(target))
+            for target in targets
+        ]
+        snapshots: dict[str, RepositorySnapshot] = {}
+        while any(not task.done for task in roots):
+            for task in roots:
+                if task.done:
+                    continue
+                self._step_root_request(task)
+                if task.done and task.snapshot is not None:
+                    snapshots[task.target.canonical_id] = task.snapshot
+
+        top_level: list[PageSourceRequest] = []
+        for target in targets:
+            snapshot = snapshots[target.canonical_id]
+            if snapshot.repository is not None:
+                top_level.extend(self._scheduled_top_level_requests(target, request))
+        self._run_page_rounds(top_level, interaction_rounds=False)
+        for task in top_level:
+            snapshots[task.target.canonical_id].sources[task.source] = task.result or SourceResult(
+                [], "incomplete", "scheduled source did not produce a result"
+            )
+
+        interactions: list[PageSourceRequest] = []
+        for target in targets:
+            snapshot = snapshots[target.canonical_id]
+            if snapshot.repository is not None:
+                interactions.extend(
+                    self._scheduled_interaction_requests(target, snapshot, request)
+                )
+        self._run_page_rounds(interactions, interaction_rounds=True)
+        by_repository: dict[str, list[SourceResult]] = {
+            target.canonical_id: [] for target in targets
+        }
+        for target in targets:
+            snapshot = snapshots[target.canonical_id]
+            if snapshot.repository is None:
+                continue
+            for parent_source in ("work_items", "change_requests"):
+                parent = snapshot.sources[parent_source]
+                if parent.status != "supported":
+                    by_repository[target.canonical_id].append(
+                        SourceResult(
+                            [],
+                            "incomplete",
+                            (
+                                "interaction discovery is incomplete because "
+                                f"{parent_source} coverage is {parent.status}"
+                            ),
+                            {
+                                "dependency_source": parent_source,
+                                "dependency": dict(parent.diagnostics),
+                            },
+                        )
+                    )
+        for task in interactions:
+            if task.result is not None:
+                by_repository[task.target.canonical_id].append(task.result)
+        for target in targets:
+            snapshot = snapshots[target.canonical_id]
+            if snapshot.repository is None:
+                continue
+            snapshot.sources["interactions"] = self._merge_scheduled_sources(
+                by_repository[target.canonical_id]
+            )
+        return snapshots
+
+    def _step_root_request(self, task: _RootRequest) -> None:
+        try:
+            if task.request_cursor is None:
+                begin_get = getattr(self.transport, "begin_get", None)
+                if callable(begin_get):
+                    task.request_cursor = begin_get(task.path, None)
+            if task.request_cursor is not None:
+                task.request_cursor.step()
+                if not task.request_cursor.done:
+                    return
+                response = task.request_cursor.result()
+            else:
+                response = self.transport.get(task.path)
+            if not is_success_status(response.status_code):
+                raise response_status_error(
+                    response,
+                    redact_url=getattr(self.transport, "_redact_url", None),
+                )
+            if not isinstance(response.body, dict):
+                raise ResponseShapeError(f"expected repository object from {response.url}")
+            task.snapshot = RepositorySnapshot(
+                self._scheduled_repository(task.target, response.body)
+            )
+        except ApiError as exc:
+            failed = {
+                source: SourceResult([], "incomplete", str(exc), api_error_diagnostics(exc))
+                for source in RESOURCE_SOURCES
+            }
+            task.snapshot = RepositorySnapshot(None, failed)
+        task.done = True
+
+    def _run_page_rounds(
+        self,
+        tasks: list[PageSourceRequest],
+        *,
+        interaction_rounds: bool,
+    ) -> None:
+        source_order = {source: index for index, source in enumerate(
+            ("work_items", "change_requests", "commits", "releases")
+        )}
+        for task in tasks:
+            task.cursor = PaginationCursor(
+                self.transport,
+                task.path,
+                task.params,
+                per_page=100,
+                max_pages=self.max_pages,
+            )
+        while any(task.result is None for task in tasks):
+            active = [task for task in tasks if task.result is None]
+            if interaction_rounds:
+                active.sort(
+                    key=lambda task: (
+                        task.target.canonical_id,
+                        task.subject_type,
+                        task.subject_id,
+                        task.endpoint_kind,
+                    )
+                )
+                selected: list[PageSourceRequest] = []
+                seen_repositories: set[str] = set()
+                for task in active:
+                    if task.target.canonical_id not in seen_repositories:
+                        seen_repositories.add(task.target.canonical_id)
+                        selected.append(task)
+            else:
+                selected = sorted(
+                    active,
+                    key=lambda task: (
+                        (task.cursor.pages if task.cursor is not None else 0) + 1,
+                        task.target.canonical_id,
+                        source_order[task.source],
+                    ),
+                )
+            for task in selected:
+                assert task.cursor is not None
+                try:
+                    task.cursor.step()
+                    if not task.cursor.done:
+                        continue
+                    task.result = self._normalize_scheduled_page(task, task.cursor.result())
+                except ApiError as exc:
+                    diagnostics = api_error_diagnostics(exc)
+                    diagnostics["metrics"] = transport_metrics(self.transport)
+                    task.result = self._normalize_scheduled_page(
+                        task,
+                        PageResult(
+                            list(task.cursor.items),
+                            task.cursor.pages,
+                            False,
+                            diagnostics,
+                        ),
+                    )
+                    task.result.note = (
+                        f"provider request failed after {task.cursor.pages} accepted page(s)"
+                    )
+
+    def _normalize_scheduled_page(
+        self,
+        task: PageSourceRequest,
+        page: PageResult,
+    ) -> SourceResult:
+        diagnostics = dict(page.diagnostics or {})
+        metrics = transport_metrics(self.transport)
+        if (
+            metrics["retry_count"]
+            or metrics["budget_exhausted"]
+            or metrics["cache_hits"]
+            or metrics["cache_misses"]
+        ):
+            diagnostics.setdefault("metrics", metrics)
+        result = SourceResult(
+            page.items,
+            "supported" if page.complete else "incomplete",
+            (
+                f"{page.pages} page(s)"
+                if page.complete
+                else f"{task.source} pagination reached the configured page limit"
+            ),
+            diagnostics,
+        )
+        return self._normalize_items(
+            result,
+            task.source,
+            task.normalizer,
+            target=task.target,
+            filter_item=task.filter_item,
+        )
+
+    @staticmethod
+    def _merge_scheduled_sources(results: list[SourceResult]) -> SourceResult:
+        records: list[dict[str, Any]] = []
+        notes: list[str] = []
+        diagnostics: dict[str, Any] = {}
+        complete = True
+        for result in results:
+            records.extend(result.items)
+            merge_diagnostics(diagnostics, result.diagnostics)
+            if result.status != "supported":
+                complete = False
+                if result.note:
+                    notes.append(result.note)
+        return SourceResult(
+            records,
+            "supported" if complete else "incomplete",
+            "; ".join(notes),
+            diagnostics,
+        )
 
     def _strict_source_result(
         self,
@@ -1403,6 +1658,31 @@ class ResourceProvider:
         self, target: RepositoryTarget, request: CollectionRequest
     ) -> RepositorySnapshot:
         raise ProviderNotReady(f"{self.descriptor.kind} resource collector is not implemented")
+
+    def _scheduled_root_path(self, target: RepositoryTarget) -> str:
+        raise ProviderNotReady(f"{self.descriptor.kind} root scheduling is not implemented")
+
+    def _scheduled_repository(
+        self,
+        target: RepositoryTarget,
+        raw: dict[str, Any],
+    ) -> dict[str, Any]:
+        raise ProviderNotReady(f"{self.descriptor.kind} root normalization is not implemented")
+
+    def _scheduled_top_level_requests(
+        self,
+        target: RepositoryTarget,
+        request: CollectionRequest,
+    ) -> list[PageSourceRequest]:
+        raise ProviderNotReady(f"{self.descriptor.kind} source scheduling is not implemented")
+
+    def _scheduled_interaction_requests(
+        self,
+        target: RepositoryTarget,
+        snapshot: RepositorySnapshot,
+        request: CollectionRequest,
+    ) -> list[PageSourceRequest]:
+        raise ProviderNotReady(f"{self.descriptor.kind} interaction scheduling is not implemented")
 
     def _collect_activity(
         self, target: RepositoryTarget, request: CollectionRequest

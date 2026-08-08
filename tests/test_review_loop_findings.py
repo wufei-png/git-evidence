@@ -294,16 +294,17 @@ class ReviewLoopFindingTests(unittest.TestCase):
 
     def test_supported_core_operational_diagnostics_close_gate_during_collection(self) -> None:
         provider = GitHubProvider(github_transport())
-        original_collect_repository = provider._collect_repository
+        original_normalize_page = provider._normalize_scheduled_page
 
-        def collect_repository(target: RepositoryTarget, request: CollectionRequest) -> object:
-            snapshot = original_collect_repository(target, request)
-            snapshot.sources["commits"].diagnostics = {
-                "child_diagnostics": [{"failure_classes": ["permission_denied"]}],
-            }
-            return snapshot
+        def normalize_page(task: object, page: object) -> object:
+            result = original_normalize_page(task, page)
+            if task.source == "commits":
+                result.diagnostics = {
+                    "child_diagnostics": [{"failure_classes": ["permission_denied"]}],
+                }
+            return result
 
-        with patch.object(provider, "_collect_repository", side_effect=collect_repository):
+        with patch.object(provider, "_normalize_scheduled_page", side_effect=normalize_page):
             bundle = provider.collect(request_for("github", "github.com"))
         commits = next(
             item for item in bundle["coverage"]["observations"] if item["source"] == "commits"
