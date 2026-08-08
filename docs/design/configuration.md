@@ -106,6 +106,13 @@ Rules:
   unredacted, unsafe, or old entries without headers are cache misses. A cache
   hit follows the same normalizer and coverage gate and never upgrades
   capability.
+- A collection plan must reserve at least five requests per repository in each
+  `(provider, instance)` group: one repository root and the first work-item,
+  change-request, commit, and release page attempts. An infeasible group raises
+  the typed `plan_budget_infeasible` configuration error before provider
+  construction or network I/O. Repository targets are canonically ordered by
+  provider, instance, owner, and name; configuration position is not an
+  execution priority.
 
 `git-evidence collect` groups the allowlist by `(provider, instance)`, invokes
 each provider adapter, and merges the results into one canonical bundle. The

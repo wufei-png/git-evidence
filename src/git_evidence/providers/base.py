@@ -13,6 +13,7 @@ from ..limits import (
     MAX_RETRY_AFTER_SECONDS,
     MAX_RETRY_JITTER_SECONDS,
     MAX_TIMEOUT_SECONDS,
+    MIN_CORE_REQUESTS_PER_REPOSITORY,
     MIN_RETRY_AFTER_SECONDS,
     MIN_TIMEOUT_SECONDS,
 )
@@ -317,11 +318,15 @@ class CollectionRequest:
 
     def __post_init__(self) -> None:
         validate_instance(self.instance)
+        if not self.repositories:
+            raise ValueError("repositories must be a non-empty allowlist")
         for target in self.repositories:
             if not isinstance(target, RepositoryTarget):
                 raise ValueError("repositories must contain RepositoryTarget values")
             if target.provider_kind != self.provider_kind or target.instance != self.instance:
                 raise ValueError("repository target provider and instance must match the request")
+        ordered_repositories = tuple(sorted(self.repositories, key=lambda item: item.canonical_id))
+        object.__setattr__(self, "repositories", ordered_repositories)
         if (
             isinstance(self.timeout_seconds, bool)
             or not isinstance(self.timeout_seconds, (int, float))
@@ -339,6 +344,12 @@ class CollectionRequest:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < minimum or value > maximum:
                 raise ValueError(f"{name} must be in [{minimum}, {maximum}]")
+        minimum_core_budget = MIN_CORE_REQUESTS_PER_REPOSITORY * len(self.repositories)
+        if self.max_requests < minimum_core_budget:
+            raise ValueError(
+                "plan_budget_infeasible: max_requests must be at least "
+                f"{minimum_core_budget} for {len(self.repositories)} repositories"
+            )
         if (
             isinstance(self.retry_jitter_seconds, bool)
             or not isinstance(self.retry_jitter_seconds, (int, float))

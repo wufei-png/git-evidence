@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
 
-from .providers.base import is_loopback_instance, validate_instance
+from .providers.base import RepositoryTarget, is_loopback_instance, validate_instance
 from .providers.catalog import PROVIDER_REGISTRY
 from .limits import (
     MAX_CACHE_ENTRIES,
@@ -19,6 +20,7 @@ from .limits import (
     MAX_RETRY_BACKOFF_SECONDS,
     MAX_RETRY_JITTER_SECONDS,
     MAX_TIMEOUT_SECONDS,
+    MIN_CORE_REQUESTS_PER_REPOSITORY,
     MIN_RETRY_AFTER_SECONDS,
     MIN_TIMEOUT_SECONDS,
 )
@@ -28,6 +30,12 @@ from .render import LANGUAGES, PROFILES
 
 class ConfigError(ValueError):
     """Configuration is unsafe or insufficient for a collection or report."""
+
+
+class PlanBudgetInfeasibleConfigError(ConfigError):
+    """A provider-instance group cannot attempt its minimum required core work."""
+
+    code = "plan_budget_infeasible"
 
 
 DEFAULT_REPORT_PROFILE = "project-first"
@@ -267,6 +275,19 @@ def _validate_collection_mapping(raw: Mapping[str, Any]) -> None:
         raise ConfigError(
             "missing provider configuration: " + ", ".join(missing_provider_config)
         )
+    group_counts = Counter(
+        (repository["provider"], repository["instance"])
+        for repository in repositories
+    )
+    for (provider_kind, instance), repository_count in sorted(group_counts.items()):
+        runtime = provider_runtime_options(provider_kind, providers[provider_kind])
+        minimum_core_budget = MIN_CORE_REQUESTS_PER_REPOSITORY * repository_count
+        if runtime["max_requests"] < minimum_core_budget:
+            raise PlanBudgetInfeasibleConfigError(
+                f"plan_budget_infeasible: providers.{provider_kind}.max_requests="
+                f"{runtime['max_requests']} cannot cover {repository_count} repositories "
+                f"at {instance}; minimum is {minimum_core_budget}"
+            )
     for index, repository in enumerate(repositories):
         provider_kind = repository["provider"]
         provider_config = providers[provider_kind]
@@ -360,7 +381,19 @@ def validate_collection_config(config: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(config, Mapping):
         raise ConfigError("configuration root must be an object")
     _validate_collection_mapping(config)
-    return dict(config)
+    validated = dict(config)
+    scope = dict(config["scope"])
+    scope["repositories"] = sorted(
+        (dict(repository) for repository in scope["repositories"]),
+        key=lambda repository: RepositoryTarget(
+            repository["provider"],
+            repository["instance"],
+            repository["owner"],
+            repository["name"],
+        ).canonical_id,
+    )
+    validated["scope"] = scope
+    return validated
 
 
 def load_collection_config(path: str | Path) -> dict[str, Any]:
