@@ -138,6 +138,7 @@
             "unexpected_error",
             "unexpected_normalizer_error",
             "budget_exhausted",
+            "insecure_transport",
             "privacy_violation"
           ]
         },
@@ -160,6 +161,7 @@
             "unexpected_error",
             "unexpected_normalizer_error",
             "budget_exhausted",
+            "insecure_transport",
             "privacy_violation"
             ]
           }
@@ -207,6 +209,7 @@
             "unexpected_error",
             "unexpected_normalizer_error",
             "budget_exhausted",
+            "insecure_transport",
             "privacy_violation"
           ]
         },
@@ -229,6 +232,7 @@
               "unexpected_error",
               "unexpected_normalizer_error",
               "budget_exhausted",
+              "insecure_transport",
               "privacy_violation"
             ]
           }
@@ -251,7 +255,7 @@
       "properties": {
         "provider": {"type": "string", "minLength": 1},
         "instance": {"type": "string", "minLength": 1},
-        "group_status": {"enum": ["completed", "failed"]},
+        "group_status": {"enum": ["completed", "failed", "diagnostic_insecure_transport"]},
         "failure_class": {"type": "string", "minLength": 1},
         "groups": {"type": "array", "items": {"type": "object"}},
         "limits": {"type": "object"},
@@ -264,7 +268,8 @@
             "budget_exhausted": {"type": "boolean"},
             "cache_hits": {"type": "integer", "minimum": 0},
             "cache_misses": {"type": "integer", "minimum": 0},
-            "cache_enabled": {"type": "boolean"}
+            "cache_enabled": {"type": "boolean"},
+            "insecure_transport": {"type": "boolean"}
           },
           "additionalProperties": true
         }
@@ -338,6 +343,7 @@
                   "unexpected_error",
                   "unexpected_normalizer_error",
                   "budget_exhausted",
+                  "insecure_transport",
                   "privacy_violation"
                 ]
               }

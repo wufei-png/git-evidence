@@ -77,11 +77,13 @@ class ProviderRegistry:
         """Create an adapter only through a validated registration."""
         registration = self.registration(kind)
         verify_tls = provider_config.get("verify_tls", True)
+        allow_insecure_loopback = provider_config.get("allow_insecure_loopback", False)
         options = dict(runtime_options)
         return registration.factory(
             instance=instance,
             token=token,
             verify_tls=verify_tls,
+            allow_insecure_loopback=allow_insecure_loopback,
             **options,
         )
 

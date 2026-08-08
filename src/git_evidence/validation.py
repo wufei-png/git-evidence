@@ -42,6 +42,7 @@ FAILURE_CLASSES = {
     "unexpected_error",
     "unexpected_normalizer_error",
     "budget_exhausted",
+    "insecure_transport",
     "privacy_violation",
 }
 KNOWN_COVERAGE_SOURCES = frozenset((*RESOURCE_SOURCES, *ACTIVITY_SOURCES))
@@ -1409,6 +1410,37 @@ def _validate_privacy(bundle: dict[str, Any], issues: list[ValidationIssue]) -> 
         _issue(issues, "privacy.auth_redaction", "bundle auth redaction must be enabled")
 
 
+def _validate_collection_transport(bundle: dict[str, Any], issues: list[ValidationIssue]) -> None:
+    collection_data = bundle.get("collection")
+    if not isinstance(collection_data, dict):
+        return
+
+    pending = [collection_data]
+    seen: set[int] = set()
+    while pending:
+        group = pending.pop()
+        identity = id(group)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        metrics = group.get("metrics")
+        if group.get("group_status") == "diagnostic_insecure_transport" or (
+            isinstance(metrics, dict) and metrics.get("insecure_transport") is True
+        ):
+            _issue(
+                issues,
+                "collection.insecure_transport",
+                "diagnostic insecure-transport bundles are not render eligible",
+            )
+            return
+        nested_group = group.get("group")
+        if isinstance(nested_group, dict):
+            pending.append(nested_group)
+        nested_groups = group.get("groups")
+        if isinstance(nested_groups, list):
+            pending.extend(item for item in nested_groups if isinstance(item, dict))
+
+
 def validate_bundle(
     bundle: dict[str, Any],
     *,
@@ -1427,6 +1459,7 @@ def validate_bundle(
     _validate_scope(indexes, scope_repository_ids, scope_actor_ids, issues)
     _validate_evidence(indexes, issues)
     _validate_privacy(bundle, issues)
+    _validate_collection_transport(bundle, issues)
     contract = (
         tuple(RESOURCE_SOURCES)
         if required_sources_contract is None

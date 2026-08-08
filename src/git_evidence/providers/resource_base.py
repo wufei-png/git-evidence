@@ -1020,7 +1020,41 @@ class BundleBuilder:
         return True
 
     def finish(self) -> dict[str, Any]:
-        self.bundle["collection"]["metrics"] = transport_metrics(self.transport)
+        metrics = transport_metrics(self.transport)
+        self.bundle["collection"]["metrics"] = metrics
+        if metrics["insecure_transport"]:
+            self.bundle["collection"]["group_status"] = "diagnostic_insecure_transport"
+            self.bundle["coverage"]["allow_publish"] = False
+            seen_failures: set[tuple[str, str]] = set()
+            for observation in self.bundle["coverage"]["observations"]:
+                if not isinstance(observation, dict):
+                    continue
+                source = observation.get("source")
+                repository_id = observation.get("repository_id")
+                if not isinstance(source, str) or not isinstance(repository_id, str):
+                    continue
+                observation["status"] = "incomplete"
+                diagnostics = observation.setdefault("diagnostics", {})
+                if isinstance(diagnostics, dict):
+                    diagnostics["failure_class"] = "insecure_transport"
+                    diagnostics["group_failure"] = True
+                self.bundle["providers"][0]["capabilities"][source] = "incomplete"
+                key = (repository_id, source)
+                if key in seen_failures:
+                    continue
+                seen_failures.add(key)
+                failure = {
+                    "provider": self.descriptor.kind,
+                    "instance": self.request.instance,
+                    "repository": repository_id,
+                    "source": source,
+                    "failure_class": "insecure_transport",
+                }
+                self.bundle["coverage"]["group_failures"].append(failure)
+                if source in RESOURCE_SOURCES:
+                    self.bundle["coverage"]["fatal"].append(failure)
+                else:
+                    append_optional_coverage_warning(self.bundle["coverage"], observation)
         for observation in self.bundle["coverage"]["observations"]:
             if isinstance(observation, dict):
                 append_optional_coverage_warning(self.bundle["coverage"], observation)

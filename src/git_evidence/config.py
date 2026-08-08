@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 import yaml
 
-from .providers.base import validate_instance
+from .providers.base import is_loopback_instance, validate_instance
 from .providers.catalog import PROVIDER_REGISTRY
 from .limits import (
     MAX_CACHE_ENTRIES,
@@ -252,6 +252,12 @@ def _validate_collection_mapping(raw: Mapping[str, Any]) -> None:
             raise ConfigError(f"providers.{provider_kind}.include_activity_api must be boolean")
         if "verify_tls" in provider_config and not isinstance(provider_config["verify_tls"], bool):
             raise ConfigError(f"providers.{provider_kind}.verify_tls must be boolean")
+        if "allow_insecure_loopback" in provider_config and not isinstance(
+            provider_config["allow_insecure_loopback"], bool
+        ):
+            raise ConfigError(
+                f"providers.{provider_kind}.allow_insecure_loopback must be boolean"
+            )
         provider_runtime_options(provider_kind, provider_config)
     configured_providers = set(providers)
     missing_provider_config = sorted(
@@ -261,6 +267,27 @@ def _validate_collection_mapping(raw: Mapping[str, Any]) -> None:
         raise ConfigError(
             "missing provider configuration: " + ", ".join(missing_provider_config)
         )
+    for index, repository in enumerate(repositories):
+        provider_kind = repository["provider"]
+        provider_config = providers[provider_kind]
+        instance = repository["instance"]
+        token_env = provider_config.get("token_env")
+        verify_tls = provider_config.get("verify_tls", True)
+        allow_insecure_loopback = provider_config.get("allow_insecure_loopback", False)
+        explicit_http = instance.lower().startswith("http://")
+        insecure_transport = explicit_http or verify_tls is False
+        if token_env and insecure_transport:
+            raise ConfigError(
+                f"scope.repositories[{index}] authenticated requests require HTTPS "
+                "with TLS verification"
+            )
+        if insecure_transport and not (
+            allow_insecure_loopback and is_loopback_instance(instance) and not token_env
+        ):
+            raise ConfigError(
+                f"scope.repositories[{index}] insecure transport requires explicit "
+                "credentialless loopback development mode"
+            )
 
 
 def _report_mapping(raw: Mapping[str, Any]) -> Mapping[str, Any]:

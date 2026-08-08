@@ -108,6 +108,7 @@ def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
         issue
         for issue in validation_issues
         if not issue.code.startswith("coverage.")
+        and issue.code != "collection.insecure_transport"
         and not (issue.code == "scope.repository_missing" and group_failures)
     ]
     if hard_issues:
@@ -463,6 +464,10 @@ def _merge_bundles(
                 )
                 aggregate["cache_enabled"] = bool(
                     aggregate["cache_enabled"] or incoming_metrics.get("cache_enabled", False)
+                )
+                aggregate["insecure_transport"] = bool(
+                    aggregate["insecure_transport"]
+                    or incoming_metrics.get("insecure_transport", False)
                 )
     for observation in merged["coverage"]["observations"]:
         if isinstance(observation, dict):

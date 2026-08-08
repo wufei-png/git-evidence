@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ipaddress
 import math
 from typing import Any, Mapping, Protocol
 from urllib.parse import urlsplit
@@ -51,6 +52,7 @@ OPERATIONAL_FAILURE_CLASSES = frozenset(
         "unexpected_error",
         "unexpected_normalizer_error",
         "budget_exhausted",
+        "insecure_transport",
         "privacy_violation",
     }
 )
@@ -269,6 +271,21 @@ def validate_instance(instance: Any) -> str:
     if parts.query or parts.fragment:
         raise ValueError("instance must not contain a query or fragment")
     return instance
+
+
+def is_loopback_instance(instance: str) -> bool:
+    """Return whether an already validated instance targets loopback only."""
+    validate_instance(instance)
+    candidate = instance if instance.startswith(("http://", "https://")) else f"//{instance}"
+    hostname = urlsplit(candidate).hostname
+    if not hostname:
+        return False
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def instance_web_base(instance: str) -> str:

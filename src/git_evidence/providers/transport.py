@@ -1,22 +1,38 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import math
 import os
-from pathlib import Path
+import posixpath
 import random
 import re
 import ssl
 import stat
 import tempfile
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import Any, Callable, Mapping, Protocol
+from pathlib import Path
+from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urljoin
-from urllib.request import Request, urlopen
+from urllib.parse import (
+    parse_qsl,
+    quote,
+    unquote,
+    urlencode,
+    urljoin,
+    urlsplit,
+    urlunsplit,
+)
+from urllib.request import (
+    HTTPHandler,
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    Request,
+    build_opener,
+)
 
 from ..limits import (
     MAX_CACHE_ENTRIES,
@@ -39,8 +55,7 @@ from ..privacy import (
     is_url_field,
     redact_public_url,
 )
-from .base import validate_instance
-
+from .base import is_loopback_instance, validate_instance
 
 RATE_LIMIT_HEADERS = (
     "x-ratelimit-limit",
@@ -73,6 +88,165 @@ _LINK_ENTRY_PATTERN = re.compile(
     r"(?:\s*;\s*[^,]+)*\s*"
 )
 _URL_CANDIDATE_PATTERN = re.compile(r"(?:https?://|/)[^\s<>\"']+")
+_INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_MAX_PATH_DECODE_PASSES = 8
+
+
+def _effective_port(scheme: str, port: int | None) -> int | None:
+    return port if port is not None else {"http": 80, "https": 443}.get(scheme)
+
+
+def _canonical_hostname(hostname: str | None) -> str:
+    if not hostname:
+        raise ValueError("request target must contain a host")
+    try:
+        return hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise ValueError("request target host is not valid IDNA") from exc
+
+
+def _authority_text(scheme: str, hostname: str, port: int | None) -> str:
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    if port != _effective_port(scheme, None):
+        return f"{host}:{port}"
+    return host
+
+
+def _decoded_safe_path(path: str) -> str:
+    decoded = path or "/"
+    for _ in range(_MAX_PATH_DECODE_PASSES):
+        if _INVALID_PERCENT_ESCAPE.search(decoded):
+            raise ValueError("request target path contains invalid percent encoding")
+        try:
+            next_value = unquote(decoded, errors="strict")
+        except UnicodeDecodeError as exc:
+            raise ValueError("request target path contains invalid encoding") from exc
+        if next_value == decoded:
+            break
+        decoded = next_value
+    else:
+        raise ValueError("request target path contains excessive nested encoding")
+    if "\\" in decoded or any(ord(character) < 0x20 for character in decoded):
+        raise ValueError("request target path contains unsafe characters")
+    if any(segment in {".", ".."} for segment in decoded.split("/")):
+        raise ValueError("request target path contains a dot segment")
+    normalized = posixpath.normpath("/" + decoded.lstrip("/"))
+    return normalized if normalized.startswith("/") else f"/{normalized}"
+
+
+@dataclass(frozen=True)
+class AllowedApiTarget:
+    """Canonical origin and path boundary for one provider transport."""
+
+    scheme: str
+    hostname: str
+    port: int | None
+    path_prefix: str
+    credential_query_names: tuple[str, ...] = ()
+
+    @classmethod
+    def from_base_url(
+        cls,
+        base_url: str,
+        *,
+        credential_query_names: tuple[str, ...] = (),
+    ) -> AllowedApiTarget:
+        parts = urlsplit(base_url)
+        scheme = parts.scheme.lower()
+        if scheme not in {"http", "https"}:
+            raise ValueError("request target must use http or https")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("request target must not contain URL userinfo")
+        if parts.query or parts.fragment:
+            raise ValueError("request target base must not contain query or fragment")
+        prefix = _decoded_safe_path(parts.path)
+        if prefix != "/":
+            prefix = prefix.rstrip("/")
+        return cls(
+            scheme=scheme,
+            hostname=_canonical_hostname(parts.hostname),
+            port=_effective_port(scheme, parts.port),
+            path_prefix=prefix,
+            credential_query_names=credential_query_names,
+        )
+
+    def validate(self, candidate: str) -> str:
+        try:
+            parts = urlsplit(candidate)
+            scheme = parts.scheme.lower()
+            hostname = _canonical_hostname(parts.hostname)
+            port = _effective_port(scheme, parts.port)
+        except ValueError as exc:
+            raise ApiError(
+                f"request target rejected: {exc}",
+                attempts=0,
+                failure_class="request_rejected",
+            ) from exc
+        if scheme not in {"http", "https"}:
+            raise ApiError(
+                "request target rejected: unsupported scheme",
+                attempts=0,
+                failure_class="request_rejected",
+            )
+        if parts.username is not None or parts.password is not None:
+            raise ApiError(
+                "request target rejected: URL userinfo is forbidden",
+                attempts=0,
+                failure_class="request_rejected",
+            )
+        if parts.fragment:
+            raise ApiError(
+                "request target rejected: fragments are forbidden",
+                attempts=0,
+                failure_class="request_rejected",
+            )
+        if (scheme, hostname, port) != (self.scheme, self.hostname, self.port):
+            raise ApiError(
+                "request target rejected: target is outside the configured API origin",
+                attempts=0,
+                failure_class="request_rejected",
+            )
+        try:
+            path = _decoded_safe_path(parts.path)
+        except ValueError as exc:
+            raise ApiError(
+                f"request target rejected: {exc}",
+                attempts=0,
+                failure_class="request_rejected",
+            ) from exc
+        if self.path_prefix != "/" and not (
+            path == self.path_prefix or path.startswith(f"{self.path_prefix}/")
+        ):
+            raise ApiError(
+                "request target rejected: target escaped the configured API path",
+                attempts=0,
+                failure_class="request_rejected",
+            )
+        if has_auth_material(
+            candidate,
+            additional_query_names=self.credential_query_names,
+        ):
+            raise ApiError(
+                "request target rejected: target supplied authentication material",
+                attempts=0,
+                failure_class="request_rejected",
+            )
+        return candidate
+
+    def identity(self, candidate: str) -> str:
+        validated = self.validate(candidate)
+        parts = urlsplit(validated)
+        query = urlencode(sorted(parse_qsl(parts.query, keep_blank_values=True)))
+        authority = _authority_text(self.scheme, self.hostname, self.port)
+        return urlunsplit(
+            (
+                self.scheme,
+                authority,
+                _decoded_safe_path(parts.path),
+                query,
+                "",
+            )
+        )
 
 TRANSPORT_METRIC_KEYS = (
     "request_count",
@@ -82,6 +256,7 @@ TRANSPORT_METRIC_KEYS = (
     "cache_hits",
     "cache_misses",
     "cache_enabled",
+    "insecure_transport",
 )
 
 
@@ -94,6 +269,7 @@ def empty_transport_metrics(*, cache_enabled: bool = False) -> dict[str, Any]:
         "cache_hits": 0,
         "cache_misses": 0,
         "cache_enabled": cache_enabled,
+        "insecure_transport": False,
     }
 
 
@@ -550,7 +726,7 @@ def transport_metrics(transport: Any) -> dict[str, Any]:
     for key in TRANSPORT_METRIC_KEYS:
         if key == "cache_enabled":
             continue
-        if key == "budget_exhausted":
+        if key in {"budget_exhausted", "insecure_transport"}:
             result[key] = bool(value.get(key, False))
         else:
             candidate = value.get(key, 0)
@@ -629,6 +805,97 @@ class ApiError(RuntimeError):
 
 class ResponseShapeError(ApiError):
     """The provider returned a successful response with an unexpected shape."""
+
+
+def _append_query_value(url: str, name: str, value: str) -> str:
+    parts = urlsplit(url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    query.append((name, value))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+
+
+class _PolicyRedirectHandler(HTTPRedirectHandler):
+    """Follow redirects only inside one validated API boundary."""
+
+    def __init__(
+        self,
+        policy: AllowedApiTarget,
+        initial_url: str,
+        *,
+        token_param: str | None = None,
+        token: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.policy = policy
+        self.visited = {self._identity_without_own_token(initial_url, token_param, token)}
+        self.token_param = token_param
+        self.token = token
+
+    @staticmethod
+    def _without_own_token(url: str, token_param: str | None, token: str | None) -> str:
+        if not token_param or token is None:
+            return url
+        parts = urlsplit(url)
+        query = [
+            (key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            if not (key == token_param and value == token)
+        ]
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+
+    def _identity_without_own_token(
+        self,
+        url: str,
+        token_param: str | None,
+        token: str | None,
+    ) -> str:
+        return self.policy.identity(self._without_own_token(url, token_param, token))
+
+    def redirect_request(
+        self,
+        req: Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Mapping[str, str],
+        newurl: str,
+    ) -> Request | None:
+        del fp
+        validated = self.policy.validate(newurl)
+        identity = self.policy.identity(validated)
+        if identity in self.visited:
+            raise ApiError(
+                "request target rejected: redirect cycle detected",
+                attempts=1,
+                failure_class="request_rejected",
+            )
+        self.visited.add(identity)
+        if self.token_param and self.token is not None:
+            validated = _append_query_value(validated, self.token_param, self.token)
+        return super().redirect_request(req, None, code, msg, headers, validated)
+
+
+def urlopen(
+    request: Request,
+    *,
+    timeout: float,
+    context: ssl.SSLContext,
+    redirect_policy: AllowedApiTarget,
+    token_param: str | None = None,
+    token: str | None = None,
+) -> Any:
+    """Policy-bound opener kept as a seam for deterministic transport tests."""
+    opener = build_opener(
+        HTTPHandler(),
+        HTTPSHandler(context=context),
+        _PolicyRedirectHandler(
+            redirect_policy,
+            request.full_url,
+            token_param=token_param,
+            token=token,
+        ),
+    )
+    return opener.open(request, timeout=timeout)
 
 
 def failure_class_for_status(status_code: int) -> str:
@@ -740,6 +1007,7 @@ class UrllibTransport:
         token_prefix: str = "Bearer",
         token_param: str | None = None,
         verify_tls: bool = True,
+        allow_insecure_loopback: bool = False,
         timeout: float = 30.0,
         max_retries: int = 2,
         retry_backoff: float = 0.5,
@@ -756,6 +1024,10 @@ class UrllibTransport:
         random_fn: Callable[[float, float], float] = random.uniform,
     ) -> None:
         base_url = validate_instance(base_url)
+        if not isinstance(verify_tls, bool):
+            raise TypeError("verify_tls must be boolean")
+        if not isinstance(allow_insecure_loopback, bool):
+            raise TypeError("allow_insecure_loopback must be boolean")
         if token_param is not None and (
             not isinstance(token_param, str) or not token_param.strip()
         ):
@@ -813,12 +1085,29 @@ class UrllibTransport:
             raise ValueError(f"cache_max_entries must be in [1, {MAX_CACHE_ENTRIES}]")
         if cache_enabled and not cache_path:
             raise ValueError("cache_path is required when cache_enabled is true")
+        credential_query_names = (token_param,) if token_param else ()
+        target_policy = AllowedApiTarget.from_base_url(
+            base_url,
+            credential_query_names=credential_query_names,
+        )
+        if token and (target_policy.scheme != "https" or not verify_tls):
+            raise ValueError("authenticated requests require HTTPS with TLS verification")
+        insecure_transport = target_policy.scheme == "http" or not verify_tls
+        if insecure_transport and not (
+            allow_insecure_loopback and is_loopback_instance(base_url) and not token
+        ):
+            raise ValueError(
+                "insecure transport requires explicit credentialless loopback development mode"
+            )
         self.base_url = base_url.rstrip("/") + "/"
         self.token = token
         self.token_header = token_header
         self.token_prefix = token_prefix
         self.token_param = token_param
         self.verify_tls = verify_tls
+        self.allow_insecure_loopback = allow_insecure_loopback
+        self.insecure_transport = insecure_transport
+        self._target_policy = target_policy
         self.timeout = timeout
         self.max_retries = max(0, max_retries)
         self.retry_backoff = max(0.0, retry_backoff)
@@ -841,7 +1130,7 @@ class UrllibTransport:
                 cache_path or "",
                 ttl_seconds=cache_ttl_seconds,
                 max_entries=cache_max_entries,
-                credential_query_names=(token_param,) if token_param else (),
+                credential_query_names=credential_query_names,
             )
             if cache_enabled
             else None
@@ -849,20 +1138,26 @@ class UrllibTransport:
         self.random_fn = random_fn
 
     def _url(self, path: str, params: Mapping[str, Any] | None) -> str:
-        url = path if path.startswith(("http://", "https://")) else urljoin(self.base_url, path.lstrip("/"))
-        query: list[tuple[str, Any]] = []
+        url = (
+            path
+            if path.startswith(("http://", "https://"))
+            else urljoin(self.base_url, path.lstrip("/"))
+        )
+        parts = urlsplit(url)
+        query: list[tuple[str, Any]] = list(parse_qsl(parts.query, keep_blank_values=True))
         if params:
             for key, value in params.items():
                 if isinstance(value, (list, tuple)):
                     query.extend((key, item) for item in value)
                 elif value is not None:
                     query.append((key, value))
+        candidate = urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+        )
+        self._target_policy.validate(candidate)
         if self.token and self.token_param:
-            query.append((self.token_param, self.token))
-        if not query:
-            return url
-        separator = "&" if "?" in url else "?"
-        return url + separator + urlencode(query)
+            candidate = _append_query_value(candidate, self.token_param, self.token)
+        return candidate
 
     def _redact_url(self, url: str) -> str:
         return redact_public_url(
@@ -899,7 +1194,9 @@ class UrllibTransport:
         ).hexdigest()
 
     def metrics(self) -> dict[str, Any]:
-        return self.coordinator.snapshot()
+        metrics = self.coordinator.snapshot()
+        metrics["insecure_transport"] = self.insecure_transport
+        return metrics
 
     def record_page(self) -> None:
         self.coordinator.record_page()
@@ -947,7 +1244,14 @@ class UrllibTransport:
         for attempt in range(1, self.max_retries + 2):
             try:
                 self.coordinator.reserve_request()
-                with urlopen(request, timeout=self.timeout, context=context) as response:
+                with urlopen(
+                    request,
+                    timeout=self.timeout,
+                    context=context,
+                    redirect_policy=self._target_policy,
+                    token_param=self.token_param,
+                    token=self.token,
+                ) as response:
                     raw = response.read()
                     response_headers = {key.lower(): value for key, value in response.headers.items()}
                     result = ApiResponse(
@@ -1043,6 +1347,44 @@ class PageResult:
     diagnostics: dict[str, Any] | None = None
 
 
+def _pagination_request_identity(
+    path: str,
+    params: Mapping[str, Any] | None,
+) -> str:
+    parts = urlsplit(path)
+    query = list(parse_qsl(parts.query, keep_blank_values=True))
+    for key, value in (params or {}).items():
+        if isinstance(value, (list, tuple)):
+            query.extend((str(key), str(item)) for item in value)
+        elif value is not None:
+            query.append((str(key), str(value)))
+    encoded_query = urlencode(sorted(query))
+    if parts.scheme and parts.netloc:
+        scheme = parts.scheme.lower()
+        hostname = _canonical_hostname(parts.hostname)
+        port = _effective_port(scheme, parts.port)
+        authority = _authority_text(scheme, hostname, port)
+        return urlunsplit((scheme, authority, _decoded_safe_path(parts.path), encoded_query, ""))
+    return f"relative:{parts.path}?{encoded_query}"
+
+
+def _pagination_page_number(
+    path: str,
+    params: Mapping[str, Any] | None,
+) -> int | None:
+    values: list[Any] = []
+    if params and "page" in params:
+        values.append(params["page"])
+    values.extend(value for key, value in parse_qsl(urlsplit(path).query) if key == "page")
+    for value in reversed(values):
+        try:
+            page = int(value)
+        except (TypeError, ValueError):
+            continue
+        return page
+    return None
+
+
 def paginate(
     transport: JsonTransport,
     path: str,
@@ -1060,12 +1402,20 @@ def paginate(
         raise ValueError(f"max_pages must be in [1, {MAX_PAGES}]")
     base_params = dict(params or {})
     base_params.setdefault("per_page", per_page)
-    page = 1
     current_path = path
-    current_params: Mapping[str, Any] | None = {**base_params, "page": page}
+    current_params: Mapping[str, Any] | None = {**base_params, "page": 1}
     items: list[dict[str, Any]] = []
     diagnostics: dict[str, Any] = {}
+    visited_requests: set[str] = set()
+    visited_responses: set[str] = set()
     for page_number in range(1, max_pages + 1):
+        request_identity = _pagination_request_identity(current_path, current_params)
+        if request_identity in visited_requests:
+            raise ResponseShapeError(
+                "provider pagination repeated a request target",
+                failure_class="malformed_response",
+            )
+        visited_requests.add(request_identity)
         response = transport.get(current_path, current_params)
         record_page = getattr(transport, "record_page", None)
         if callable(record_page):
@@ -1081,6 +1431,14 @@ def paginate(
             diagnostics["rate_limit"] = rate_limit
         if not isinstance(response.body, list):
             raise ResponseShapeError(f"expected a JSON array from {response.url}")
+        if isinstance(response.url, str) and response.url:
+            response_identity = _pagination_request_identity(response.url, None)
+            if response_identity in visited_responses:
+                raise ResponseShapeError(
+                    f"provider pagination repeated a response target from {response.url}",
+                    failure_class="malformed_response",
+                )
+            visited_responses.add(response_identity)
         page_items = [item for item in response.body if isinstance(item, dict)]
         if len(page_items) != len(response.body):
             raise ResponseShapeError(f"provider returned a non-object item from {response.url}")
@@ -1097,6 +1455,19 @@ def paginate(
             "x-next-page-number",
         )
         if next_url:
+            next_identity = _pagination_request_identity(next_url, None)
+            current_page = _pagination_page_number(current_path, current_params) or page_number
+            next_page_from_url = _pagination_page_number(next_url, None)
+            if next_identity in visited_requests or next_identity in visited_responses:
+                raise ResponseShapeError(
+                    f"provider pagination cycle detected from {response.url}",
+                    failure_class="malformed_response",
+                )
+            if next_page_from_url is not None and next_page_from_url <= current_page:
+                raise ResponseShapeError(
+                    f"provider pagination page regressed from {response.url}",
+                    failure_class="malformed_response",
+                )
             current_path = next_url
             current_params = None
             continue
@@ -1107,6 +1478,12 @@ def paginate(
                 raise ResponseShapeError(f"invalid x-next-page header from {response.url}") from exc
             if next_page_number <= 0:
                 return PageResult(items, page_number, True, diagnostics or None)
+            current_page = _pagination_page_number(current_path, current_params) or page_number
+            if next_page_number <= current_page:
+                raise ResponseShapeError(
+                    f"provider pagination page regressed from {response.url}",
+                    failure_class="malformed_response",
+                )
             current_path = path
             current_params = {**base_params, "page": next_page_number}
             continue

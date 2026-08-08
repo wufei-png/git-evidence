@@ -16,6 +16,7 @@ providers:
     token_env: GITHUB_TOKEN
     include_activity_api: false
     verify_tls: true
+    allow_insecure_loopback: false
     timeout_seconds: 30
     max_retries: 2
     max_pages: 100

@@ -7,6 +7,9 @@ has explicitly approved their visibility.
 ## Defaults
 
 - Use the smallest read-only token scope available.
+- Send credentials only over HTTPS with TLS verification. Custom deployments
+  must install their private CA into the runtime trust store rather than disable
+  verification.
 - Load credentials from environment variables, keyrings, or CI secret stores;
   never from tracked configuration or command-line arguments.
 - Keep comment bodies disabled by default. Metadata and source links can still

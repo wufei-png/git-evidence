@@ -22,6 +22,7 @@ providers:
     token_env: GITHUB_TOKEN
     include_activity_api: false
     verify_tls: true
+    allow_insecure_loopback: false
     timeout_seconds: 30
     max_retries: 2
     max_pages: 100
@@ -56,6 +57,10 @@ Rules:
 - `window` is a timezone-aware half-open interval `[start, end)`.
 - Tokens come from environment variables, a keyring, or a CI secret; they are
   never stored in this file or passed as a command-line value.
+- Authenticated collection requires HTTPS with `verify_tls: true` and has no
+  bypass. Credentialless HTTP or disabled TLS verification is accepted only
+  with `allow_insecure_loopback: true` on a loopback instance; its output is
+  diagnostic and cannot pass the render gate.
 - `include_activity_api: false` is honest: resource-backed facts remain
   available, but push/ref completeness is unavailable.
 - `display_actor_names` defaults to false. Names are rendered only when it is
@@ -147,3 +152,10 @@ while the source is marked `incomplete` with `malformed_response` and a
 IDs: the first valid record and other valid siblings remain, but the collision
 is recorded and required rendering is blocked. Coverage matching includes
 the registered provider identity as well as repository and source.
+
+Every initial, pagination, and redirect target is validated against the actual
+transport API base rather than the web instance label. Follow-ups must retain
+scheme, canonical host, effective port, and API path prefix; userinfo,
+fragments, supplied authentication query fields, downgrade, path escape,
+redirect cycles, repeated pagination targets, and regressing page numbers are
+rejected before another request can carry credentials.
