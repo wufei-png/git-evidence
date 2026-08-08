@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -681,6 +682,32 @@ class BundleBuilder:
             max_bytes=MAX_BUNDLE_BYTES - 1,
         ) + 1
 
+    def checkpoint(self) -> dict[str, Any]:
+        """Snapshot all mutable builder state for one source-level transaction."""
+        return deepcopy(
+            {
+                "bundle": self.bundle,
+                "seen": self._seen,
+                "actor_ids": self._actor_ids,
+                "commit_ids_by_sha": self._commit_ids_by_sha,
+                "change_request_ids_by_sha": self._change_request_ids_by_sha,
+                "duplicate_counts": self._duplicate_counts,
+                "entity_count": self._entity_count,
+                "bundle_size_estimate": self._bundle_size_estimate,
+            }
+        )
+
+    def restore(self, checkpoint: dict[str, Any]) -> None:
+        """Restore a checkpoint produced before an isolated source emission."""
+        self.bundle = checkpoint["bundle"]
+        self._seen = checkpoint["seen"]
+        self._actor_ids = checkpoint["actor_ids"]
+        self._commit_ids_by_sha = checkpoint["commit_ids_by_sha"]
+        self._change_request_ids_by_sha = checkpoint["change_request_ids_by_sha"]
+        self._duplicate_counts = checkpoint["duplicate_counts"]
+        self._entity_count = checkpoint["entity_count"]
+        self._bundle_size_estimate = checkpoint["bundle_size_estimate"]
+
     def _account_bundle_growth(self, value: Any, *, base_indent: int) -> None:
         self._bundle_size_estimate += indented_json_growth_upper_bound(
             value,
@@ -1209,21 +1236,9 @@ class ResourceProvider:
                         source,
                         SourceResult([], "unavailable", "provider did not return this resource source"),
                     )
-                result = self._strict_source_result(result, source, target, request)
-                builder.add_coverage(source, target, result)
-                if source == "repositories":
-                    for item in result.items:
-                        builder.add_repository(item, target=target)
-                elif source == "work_items":
-                    builder.add_records("work_items", result.items, target=target, fact_kind="work_item_observed", default_section="project")
-                elif source == "change_requests":
-                    builder.add_records("change_requests", result.items, target=target, fact_kind="change_request_observed", default_section="change")
-                elif source == "interactions":
-                    builder.add_records("interactions", result.items, target=target, fact_kind="interaction_observed", default_section="project")
-                elif source == "commits":
-                    builder.add_records("commits", result.items, target=target, fact_kind="commit_observed", default_section="change")
-                elif source == "releases":
-                    builder.add_records("releases", result.items, target=target, fact_kind="release_observed", default_section="release")
+                self._emit_core_source(
+                    builder, target, source, result, request
+                )
         # Optional activity/ref work starts only after every repository's core queue.
         for target in request.repositories:
             if request.include_activity_api:
@@ -1242,6 +1257,7 @@ class ResourceProvider:
                     for source in ACTIVITY_SOURCES
                 }
             for source in ACTIVITY_SOURCES:
+                checkpoint = builder.checkpoint()
                 try:
                     result = coerce_optional_source_result(
                         source,
@@ -1272,6 +1288,7 @@ class ResourceProvider:
                             fail_closed=True,
                         )
                 except Exception as exc:  # noqa: BLE001 - optional per-source boundary
+                    builder.restore(checkpoint)
                     builder.record_optional_failure(
                         source,
                         target,
@@ -1287,17 +1304,63 @@ class ResourceProvider:
                     )
         return builder.finish()
 
+    def _emit_core_source(
+        self,
+        builder: BundleBuilder,
+        target: RepositoryTarget,
+        source: str,
+        result: SourceResult,
+        request: CollectionRequest,
+    ) -> None:
+        checkpoint = builder.checkpoint()
+        try:
+            result = self._strict_source_result(result, source, target, request)
+            builder.add_coverage(source, target, result)
+            if source == "repositories":
+                for item in result.items:
+                    builder.add_repository(item, target=target)
+                return
+            emissions = {
+                "work_items": ("work_item_observed", "project"),
+                "change_requests": ("change_request_observed", "change"),
+                "interactions": ("interaction_observed", "project"),
+                "commits": ("commit_observed", "change"),
+                "releases": ("release_observed", "release"),
+            }
+            fact_kind, section = emissions[source]
+            builder.add_records(
+                source,
+                result.items,
+                target=target,
+                fact_kind=fact_kind,
+                default_section=section,
+            )
+        except Exception as exc:  # noqa: BLE001 - transactional source boundary
+            builder.restore(checkpoint)
+            builder.add_coverage(
+                source,
+                target,
+                SourceResult(
+                    [],
+                    "incomplete",
+                    "source emission failed",
+                    exception_diagnostics(exc),
+                ),
+            )
+
     def _collect_core_fair(
         self,
         request: CollectionRequest,
     ) -> dict[str, RepositorySnapshot]:
         """Collect roots, top-level pages, then interactions in deterministic rounds."""
         targets = sorted(request.repositories, key=lambda target: target.canonical_id)
-        roots = [
-            _RootRequest(target, self._scheduled_root_path(target))
-            for target in targets
-        ]
         snapshots: dict[str, RepositorySnapshot] = {}
+        roots: list[_RootRequest] = []
+        for target in targets:
+            try:
+                roots.append(_RootRequest(target, self._scheduled_root_path(target)))
+            except Exception as exc:  # noqa: BLE001 - repository isolation boundary
+                snapshots[target.canonical_id] = self._failed_repository_snapshot(exc)
         while any(not task.done for task in roots):
             for task in roots:
                 if task.done:
@@ -1310,7 +1373,29 @@ class ResourceProvider:
         for target in targets:
             snapshot = snapshots[target.canonical_id]
             if snapshot.repository is not None:
-                top_level.extend(self._scheduled_top_level_requests(target, request))
+                try:
+                    planned = self._scheduled_top_level_requests(target, request)
+                    self._validate_scheduled_tasks(
+                        planned, target, interaction_tasks=False
+                    )
+                    top_level.extend(planned)
+                except Exception as exc:  # noqa: BLE001 - repository isolation boundary
+                    failure = self._unexpected_source_result(
+                        exc, "top-level source planning failed"
+                    )
+                    for source in (
+                        "work_items",
+                        "change_requests",
+                        "commits",
+                        "releases",
+                        "interactions",
+                    ):
+                        snapshot.sources[source] = SourceResult(
+                            [],
+                            failure.status,
+                            failure.note,
+                            dict(failure.diagnostics),
+                        )
         self._run_page_rounds(top_level, interaction_rounds=False)
         for task in top_level:
             snapshots[task.target.canonical_id].sources[task.source] = task.result or SourceResult(
@@ -1320,17 +1405,26 @@ class ResourceProvider:
         interactions: list[PageSourceRequest] = []
         for target in targets:
             snapshot = snapshots[target.canonical_id]
-            if snapshot.repository is not None:
-                interactions.extend(
-                    self._scheduled_interaction_requests(target, snapshot, request)
-                )
+            if snapshot.repository is not None and "interactions" not in snapshot.sources:
+                try:
+                    planned = self._scheduled_interaction_requests(
+                        target, snapshot, request
+                    )
+                    self._validate_scheduled_tasks(
+                        planned, target, interaction_tasks=True
+                    )
+                    interactions.extend(planned)
+                except Exception as exc:  # noqa: BLE001 - repository isolation boundary
+                    snapshot.sources["interactions"] = self._unexpected_source_result(
+                        exc, "interaction planning failed"
+                    )
         self._run_page_rounds(interactions, interaction_rounds=True)
         by_repository: dict[str, list[SourceResult]] = {
             target.canonical_id: [] for target in targets
         }
         for target in targets:
             snapshot = snapshots[target.canonical_id]
-            if snapshot.repository is None:
+            if snapshot.repository is None or "interactions" in snapshot.sources:
                 continue
             for parent_source in ("work_items", "change_requests"):
                 parent = snapshot.sources[parent_source]
@@ -1361,6 +1455,37 @@ class ResourceProvider:
             )
         return snapshots
 
+    @staticmethod
+    def _validate_scheduled_tasks(
+        planned: Any,
+        target: RepositoryTarget,
+        *,
+        interaction_tasks: bool,
+    ) -> None:
+        if not isinstance(planned, list):
+            raise TypeError("provider returned a non-list scheduled task set")
+        required = ("work_items", "change_requests", "commits", "releases")
+        if not interaction_tasks and sorted(task.source for task in planned) != sorted(required):
+            raise ValueError("provider must return exactly one task per top-level source")
+        for task in planned:
+            if (
+                not isinstance(task, PageSourceRequest)
+                or task.target.canonical_id != target.canonical_id
+                or not isinstance(task.path, str)
+                or not task.path
+                or not isinstance(task.params, dict)
+                or not callable(task.normalizer)
+                or (task.filter_item is not None and not callable(task.filter_item))
+                or (interaction_tasks and task.source != "interactions")
+                or (not interaction_tasks and task.source not in required)
+            ):
+                raise ValueError("provider returned an invalid scheduled task")
+            if interaction_tasks and not all(
+                isinstance(value, str)
+                for value in (task.subject_type, task.subject_id, task.endpoint_kind)
+            ):
+                raise ValueError("provider returned invalid interaction ordering fields")
+
     def _step_root_request(self, task: _RootRequest) -> None:
         try:
             if task.request_cursor is None:
@@ -1381,16 +1506,35 @@ class ResourceProvider:
                 )
             if not isinstance(response.body, dict):
                 raise ResponseShapeError(f"expected repository object from {response.url}")
-            task.snapshot = RepositorySnapshot(
-                self._scheduled_repository(task.target, response.body)
-            )
-        except ApiError as exc:
-            failed = {
-                source: SourceResult([], "incomplete", str(exc), api_error_diagnostics(exc))
-                for source in RESOURCE_SOURCES
-            }
-            task.snapshot = RepositorySnapshot(None, failed)
+            repository = self._scheduled_repository(task.target, response.body)
+            if not isinstance(repository, dict):
+                raise TypeError("provider returned an invalid normalized repository")
+            task.snapshot = RepositorySnapshot(repository)
+        except Exception as exc:  # noqa: BLE001 - repository isolation boundary
+            task.snapshot = self._failed_repository_snapshot(exc)
         task.done = True
+
+    @staticmethod
+    def _unexpected_source_result(error: Exception, note: str) -> SourceResult:
+        return SourceResult([], "incomplete", note, exception_diagnostics(error))
+
+    @classmethod
+    def _failed_repository_snapshot(cls, error: Exception) -> RepositorySnapshot:
+        diagnostics = exception_diagnostics(error)
+        note = (
+            "provider request failed"
+            if isinstance(error, ApiError)
+            else "repository collection failed unexpectedly"
+        )
+        return RepositorySnapshot(
+            None,
+            {
+                source: SourceResult(
+                    [], "incomplete", note, dict(diagnostics)
+                )
+                for source in RESOURCE_SOURCES
+            },
+        )
 
     def _run_page_rounds(
         self,
@@ -1402,13 +1546,27 @@ class ResourceProvider:
             ("work_items", "change_requests", "commits", "releases")
         )}
         for task in tasks:
-            task.cursor = PaginationCursor(
-                self.transport,
-                task.path,
-                task.params,
-                per_page=100,
-                max_pages=self.max_pages,
-            )
+            try:
+                if (
+                    interaction_rounds
+                    and task.source != "interactions"
+                    or (
+                        not interaction_rounds
+                        and task.source not in source_order
+                    )
+                ):
+                    raise ValueError("provider returned an invalid scheduled source")
+                task.cursor = PaginationCursor(
+                    self.transport,
+                    task.path,
+                    task.params,
+                    per_page=100,
+                    max_pages=self.max_pages,
+                )
+            except Exception as exc:  # noqa: BLE001 - source isolation boundary
+                task.result = self._unexpected_source_result(
+                    exc, "scheduled source initialization failed"
+                )
         while any(task.result is None for task in tasks):
             active = [task for task in tasks if task.result is None]
             if interaction_rounds:
@@ -1436,27 +1594,52 @@ class ResourceProvider:
                     ),
                 )
             for task in selected:
-                assert task.cursor is not None
                 try:
+                    if task.cursor is None:
+                        raise RuntimeError("scheduled source cursor is unavailable")
                     task.cursor.step()
                     if not task.cursor.done:
                         continue
-                    task.result = self._normalize_scheduled_page(task, task.cursor.result())
-                except ApiError as exc:
-                    diagnostics = api_error_diagnostics(exc)
+                    normalized = self._normalize_scheduled_page(
+                        task, task.cursor.result()
+                    )
+                    if not isinstance(normalized, SourceResult):
+                        raise TypeError("provider returned an invalid normalized source")
+                    task.result = normalized
+                except Exception as exc:  # noqa: BLE001 - source isolation boundary
+                    diagnostics = exception_diagnostics(exc)
                     diagnostics["metrics"] = transport_metrics(self.transport)
-                    task.result = self._normalize_scheduled_page(
-                        task,
-                        PageResult(
-                            list(task.cursor.items),
-                            task.cursor.pages,
-                            False,
+                    if isinstance(exc, ApiError) and task.cursor is not None:
+                        try:
+                            task.result = self._normalize_scheduled_page(
+                                task,
+                                PageResult(
+                                    list(task.cursor.items),
+                                    task.cursor.pages,
+                                    False,
+                                    diagnostics,
+                                ),
+                            )
+                            if not isinstance(task.result, SourceResult):
+                                raise TypeError(
+                                    "provider returned an invalid normalized source"
+                                )
+                            task.result.note = (
+                                "provider request failed after "
+                                f"{task.cursor.pages} accepted page(s)"
+                            )
+                        except Exception as normalization_error:  # noqa: BLE001
+                            task.result = self._unexpected_source_result(
+                                normalization_error,
+                                "scheduled source normalization failed",
+                            )
+                    else:
+                        task.result = SourceResult(
+                            [],
+                            "incomplete",
+                            "scheduled source failed unexpectedly",
                             diagnostics,
-                        ),
-                    )
-                    task.result.note = (
-                        f"provider request failed after {task.cursor.pages} accepted page(s)"
-                    )
+                        )
 
     def _normalize_scheduled_page(
         self,
@@ -1532,6 +1715,8 @@ class ResourceProvider:
                 else:
                     self._validate_canonical_item(item, source, target, request)
                 valid.append(item)
+            except PrivacyError:
+                raise
             except Exception as exc:
                 dropped += 1
                 failure_classes.add(
@@ -1621,6 +1806,8 @@ class ResourceProvider:
                         provider_kind=self.descriptor.kind,
                     )
                 normalized.append(normalized_item)
+            except PrivacyError:
+                raise
             except Exception as exc:
                 dropped += 1
                 failure_classes.add(

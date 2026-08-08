@@ -17,7 +17,9 @@ from git_evidence.providers.base import CollectionRequest, RepositoryTarget
 from git_evidence.providers.gitee import GiteeProvider
 from git_evidence.providers.github import GitHubProvider
 from git_evidence.providers.gitlab import GitLabProvider
+from git_evidence.providers.resource_base import SourceResult
 from git_evidence.providers.transport import ApiError, ApiResponse, MappingTransport
+from git_evidence.privacy import PrivacyError
 
 
 def response(url: str, body: Any) -> ApiResponse:
@@ -144,6 +146,24 @@ class BudgetTransport(MappingTransport):
         return super().get(path, params)
 
 
+class PathFailureTransport(MappingTransport):
+    def __init__(
+        self,
+        responses: Mapping[str, list[ApiResponse] | ApiResponse],
+        path: str,
+        error: Exception,
+    ) -> None:
+        super().__init__(responses)
+        self.failure_path = path
+        self.error = error
+
+    def get(self, path: str, params: Mapping[str, Any] | None = None) -> ApiResponse:
+        if path == self.failure_path:
+            self.calls.append((path, params))
+            raise self.error
+        return super().get(path, params)
+
+
 class FairSchedulerTests(unittest.TestCase):
     def test_large_repository_page_two_waits_for_every_first_core_page(self) -> None:
         transport = large_first_page_transport()
@@ -257,6 +277,172 @@ class FairSchedulerTests(unittest.TestCase):
                     interactions["diagnostics"]["dependency"]["failure_class"],
                     "fixture_missing",
                 )
+
+    def test_unexpected_root_failure_does_not_abort_sibling_repository(self) -> None:
+        class RootFailingProvider(GitHubProvider):
+            def _scheduled_repository(
+                self, target: RepositoryTarget, raw: dict[str, Any]
+            ) -> dict[str, Any]:
+                if target.owner == "a":
+                    raise RuntimeError("synthetic secret must not enter the bundle")
+                return super()._scheduled_repository(target, raw)
+
+        bundle = RootFailingProvider(fair_transport()).collect(
+            two_repository_request()
+        )
+        self.assertEqual(
+            [item["full_name"] for item in bundle["repositories"]],
+            ["z/small"],
+        )
+        large_failures = [
+            item
+            for item in bundle["coverage"]["group_failures"]
+            if item["repository"] == "repo:github:github.com:a/large"
+        ]
+        self.assertTrue(large_failures)
+        self.assertTrue(
+            all(item["failure_class"] == "unexpected_error" for item in large_failures)
+        )
+        self.assertNotIn("synthetic secret", str(bundle))
+
+    def test_unexpected_source_failure_is_scoped_and_privacy_stays_fatal(self) -> None:
+        for error, failure_class in (
+            (RuntimeError("synthetic source failure"), "unexpected_error"),
+            (PrivacyError("synthetic private payload"), "privacy_violation"),
+        ):
+            with self.subTest(failure_class=failure_class):
+                recorded = fair_transport(with_issues=True)
+                transport = PathFailureTransport(
+                    recorded.responses,
+                    "/repos/a/large/issues",
+                    error,
+                )
+                bundle = GitHubProvider(transport).collect(two_repository_request())
+                observations = {
+                    (item["repository_id"], item["source"]): item
+                    for item in bundle["coverage"]["observations"]
+                }
+                large = "repo:github:github.com:a/large"
+                small = "repo:github:github.com:z/small"
+                self.assertEqual(observations[(large, "work_items")]["status"], "incomplete")
+                self.assertEqual(
+                    observations[(large, "work_items")]["diagnostics"]["failure_class"],
+                    failure_class,
+                )
+                self.assertEqual(observations[(small, "work_items")]["status"], "supported")
+                self.assertEqual(observations[(small, "interactions")]["status"], "supported")
+                self.assertFalse(bundle["coverage"]["allow_publish"])
+                self.assertNotIn(str(error), str(bundle))
+
+    def test_invalid_hook_returns_are_scoped_to_the_repository(self) -> None:
+        class InvalidHookProvider(GitHubProvider):
+            failure_mode = ""
+
+            def _scheduled_repository(
+                self, target: RepositoryTarget, raw: dict[str, Any]
+            ) -> dict[str, Any]:
+                if target.owner == "a" and self.failure_mode == "root":
+                    return None  # type: ignore[return-value]
+                return super()._scheduled_repository(target, raw)
+
+            def _scheduled_top_level_requests(
+                self, target: RepositoryTarget, request: CollectionRequest
+            ) -> list[Any]:
+                tasks = super()._scheduled_top_level_requests(target, request)
+                if target.owner == "a" and self.failure_mode == "plan":
+                    return tasks[:-1]
+                return tasks
+
+            def _normalize_scheduled_page(self, task: Any, page: Any) -> Any:
+                if (
+                    task.target.owner == "a"
+                    and task.source == "work_items"
+                    and self.failure_mode == "page"
+                ):
+                    return {"invalid": True}
+                return super()._normalize_scheduled_page(task, page)
+
+        for mode in ("root", "plan", "page"):
+            with self.subTest(mode=mode):
+                provider = InvalidHookProvider(fair_transport(with_issues=True))
+                provider.failure_mode = mode
+                bundle = provider.collect(two_repository_request())
+                observations = {
+                    (item["repository_id"], item["source"]): item
+                    for item in bundle["coverage"]["observations"]
+                }
+                large = "repo:github:github.com:a/large"
+                small = "repo:github:github.com:z/small"
+                failed_source = "repositories" if mode == "root" else "work_items"
+                self.assertEqual(
+                    observations[(large, failed_source)]["status"], "incomplete"
+                )
+                self.assertEqual(
+                    observations[(large, failed_source)]["diagnostics"]["failure_class"],
+                    "unexpected_error",
+                )
+                self.assertEqual(
+                    observations[(small, "work_items")]["status"], "supported"
+                )
+
+    def test_builder_privacy_failure_rolls_back_only_the_affected_source(self) -> None:
+        class SensitiveRecordProvider(GitHubProvider):
+            def _normalize_issue(
+                self, target: RepositoryTarget, item: dict[str, Any]
+            ) -> dict[str, Any]:
+                result = super()._normalize_issue(target, item)
+                if target.owner == "a":
+                    result["clientSecret"] = "must-not-leak"
+                return result
+
+        bundle = SensitiveRecordProvider(fair_transport(with_issues=True)).collect(
+            two_repository_request()
+        )
+        observations = {
+            (item["repository_id"], item["source"]): item
+            for item in bundle["coverage"]["observations"]
+        }
+        large = "repo:github:github.com:a/large"
+        small = "repo:github:github.com:z/small"
+        self.assertEqual(observations[(large, "work_items")]["status"], "incomplete")
+        self.assertEqual(
+            observations[(large, "work_items")]["diagnostics"]["failure_class"],
+            "privacy_violation",
+        )
+        self.assertEqual(observations[(small, "work_items")]["status"], "supported")
+        self.assertEqual(
+            [item["repository_id"] for item in bundle["work_items"]],
+            [small],
+        )
+        self.assertNotIn("must-not-leak", str(bundle))
+        self.assertFalse(bundle["coverage"]["allow_publish"])
+
+    def test_optional_normalizer_privacy_error_cannot_fail_open(self) -> None:
+        class OptionalPrivacyProvider(GitHubProvider):
+            def _collect_activity(
+                self, target: RepositoryTarget, request: CollectionRequest
+            ) -> dict[str, SourceResult]:
+                self._normalize_items(
+                    SourceResult([{"id": "event"}]),
+                    "activities",
+                    lambda _: (_ for _ in ()).throw(
+                        PrivacyError("must-not-leak optional payload")
+                    ),
+                    target=target,
+                )
+                raise AssertionError("privacy error should have escaped normalization")
+
+        bundle = OptionalPrivacyProvider(fair_transport()).collect(
+            two_repository_request(include_activity_api=True)
+        )
+        self.assertFalse(bundle["coverage"]["allow_publish"])
+        privacy_failures = [
+            item
+            for item in bundle["coverage"]["group_failures"]
+            if item["failure_class"] == "privacy_violation"
+        ]
+        self.assertEqual(len(privacy_failures), 4)
+        self.assertNotIn("must-not-leak", str(bundle))
 
 
 if __name__ == "__main__":
