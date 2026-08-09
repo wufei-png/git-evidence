@@ -4,7 +4,6 @@ from typing import Any
 from urllib.parse import quote
 
 from .base import (
-    CORE_RESOURCE_SOURCES,
     CollectionRequest,
     RepositoryTarget,
     instance_web_base,
@@ -17,7 +16,6 @@ from .resource_base import (
     ResourceProvider,
     SourceResult,
     actor_from,
-    api_error_diagnostics,
     first_timestamp,
     in_window_or_malformed,
     is_valid_native_id,
@@ -26,14 +24,11 @@ from .resource_base import (
 )
 from .transport import (
     LINK_PAGINATION,
-    ApiError,
     JsonTransport,
     PageResult,
     ResponseShapeError,
     UrllibTransport,
-    is_success_status,
     paginate,
-    response_status_error,
 )
 
 
@@ -250,122 +245,6 @@ class GitHubProvider(ResourceProvider):
                         )
                     )
         return tasks
-
-    def _collect_repository(
-        self, target: RepositoryTarget, request: CollectionRequest
-    ) -> RepositorySnapshot:
-        try:
-            response = self.transport.get(self._repo_path(target))
-            if not is_success_status(response.status_code):
-                raise response_status_error(
-                    response,
-                    redact_url=getattr(self.transport, "_redact_url", None),
-                )
-            if not isinstance(response.body, dict):
-                raise ResponseShapeError(
-                    f"expected repository object from {response.url}"
-                )
-            validate_repository_identity(
-                response.body, target, identity_field="full_name"
-            )
-        except ApiError as exc:
-            failed = {
-                source: SourceResult(
-                    [], "incomplete", str(exc), api_error_diagnostics(exc)
-                )
-                for source in CORE_RESOURCE_SOURCES
-            }
-            return RepositorySnapshot(None, failed)
-
-        raw = response.body
-        repository = {
-            "id": target.canonical_id,
-            "provider_id": f"provider:github:{target.instance}",
-            "full_name": raw.get("full_name"),
-            "name": raw.get("name"),
-            "web_url": raw.get("html_url")
-            or f"{instance_web_base(target.instance)}/{quote(target.owner, safe='')}/{quote(target.name, safe='')}",
-        }
-
-        work_items = self._safe_page(
-            "work_items",
-            lambda: self._page(
-                f"{self._repo_path(target)}/issues",
-                {"state": "all", "since": request.window_start},
-            ),
-        )
-        work_items = self._normalize_items(
-            work_items,
-            "work_items",
-            lambda item: self._normalize_issue(target, item),
-            target=target,
-            filter_item=lambda item: (
-                not isinstance(item, dict)
-                or (
-                    "pull_request" not in item
-                    and in_window_or_malformed(
-                        item, request, "updated_at", "created_at"
-                    )
-                )
-            ),
-        )
-
-        change_requests = self._safe_page(
-            "change_requests",
-            lambda: self._page(
-                f"{self._repo_path(target)}/pulls",
-                {"state": "all", "sort": "updated", "direction": "desc"},
-            ),
-        )
-        change_requests = self._normalize_items(
-            change_requests,
-            "change_requests",
-            lambda item: self._normalize_pull(target, item),
-            target=target,
-            filter_item=lambda item: self._change_request_in_window(item, request),
-        )
-
-        interactions = self._collect_interactions(
-            target, work_items.items, change_requests.items, request
-        )
-        commits = self._safe_page(
-            "commits",
-            lambda: self._page(
-                f"{self._repo_path(target)}/commits",
-                {"since": request.window_start, "until": request.window_end},
-            ),
-        )
-        commits = self._normalize_items(
-            commits,
-            "commits",
-            lambda item: self._normalize_commit(target, item),
-            target=target,
-            filter_item=lambda item: self._commit_in_window(item, request),
-        )
-
-        releases = self._safe_page(
-            "releases",
-            lambda: self._page(f"{self._repo_path(target)}/releases", {}),
-        )
-        releases = self._normalize_items(
-            releases,
-            "releases",
-            lambda item: self._normalize_release(target, item),
-            target=target,
-            filter_item=lambda item: in_window_or_malformed(
-                item, request, "published_at", "created_at"
-            ),
-        )
-        return RepositorySnapshot(
-            repository,
-            {
-                "work_items": work_items,
-                "change_requests": change_requests,
-                "interactions": interactions,
-                "commits": commits,
-                "releases": releases,
-            },
-        )
 
     def _collect_activity(
         self, target: RepositoryTarget, request: CollectionRequest
@@ -622,90 +501,6 @@ class GitHubProvider(ResourceProvider):
             "_native_id": comment_id,
             "_actor": actor_from(item, "user", "author"),
         }
-
-    def _collect_interactions(
-        self,
-        target: RepositoryTarget,
-        issues: list[dict[str, Any]],
-        pulls: list[dict[str, Any]],
-        request: CollectionRequest,
-    ) -> SourceResult:
-        records: list[dict[str, Any]] = []
-        complete = True
-        notes: list[str] = []
-        diagnostics: dict[str, Any] = {}
-        pull_numbers = {item.get("number") for item in pulls}
-        subjects = [
-            *(("work_item", item) for item in issues),
-            *(("change_request", item) for item in pulls),
-        ]
-        for subject_type, item in subjects:
-            number = item.get("number")
-            result = self._safe_page(
-                "interactions",
-                lambda number=number: self._page(
-                    f"{self._repo_path(target)}/issues/{number}/comments", {}
-                ),
-            )
-            result = self._normalize_items(
-                result,
-                "interactions",
-                lambda comment, number=number, subject_type=subject_type: (
-                    self._normalize_comment(
-                        target, comment, number, "issue_comment", subject_type
-                    )
-                ),
-                target=target,
-                filter_item=lambda comment: in_window_or_malformed(
-                    comment, request, "created_at", "submitted_at", "updated_at"
-                ),
-            )
-            merge_diagnostics(diagnostics, result.diagnostics)
-            if result.status != "supported":
-                complete = False
-                notes.append(result.note)
-            records.extend(result.items)
-            if number in pull_numbers:
-                for endpoint, kind, timestamp_fields in (
-                    (
-                        f"{self._repo_path(target)}/pulls/{number}/reviews",
-                        "review",
-                        ("created_at", "submitted_at", "updated_at"),
-                    ),
-                    (
-                        f"{self._repo_path(target)}/pulls/{number}/comments",
-                        "review_comment",
-                        ("created_at", "submitted_at", "updated_at"),
-                    ),
-                ):
-                    result = self._safe_page(
-                        "interactions",
-                        lambda endpoint=endpoint: self._page(endpoint, {}),
-                    )
-                    result = self._normalize_items(
-                        result,
-                        "interactions",
-                        lambda comment, number=number, kind=kind, subject_type=subject_type: (
-                            self._normalize_comment(
-                                target, comment, number, kind, subject_type
-                            )
-                        ),
-                        target=target,
-                        filter_item=lambda comment, timestamp_fields=timestamp_fields: (
-                            in_window_or_malformed(comment, request, *timestamp_fields)
-                        ),
-                    )
-                    merge_diagnostics(diagnostics, result.diagnostics)
-                    if result.status != "supported":
-                        complete = False
-                        notes.append(result.note)
-                    records.extend(result.items)
-        return SourceResult(
-            records,
-            "supported" if complete else "incomplete",
-            "; ".join(notes),
-            diagnostics,
-        )
 
     @staticmethod
     def _change_request_in_window(

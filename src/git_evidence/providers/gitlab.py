@@ -5,7 +5,6 @@ from typing import Any
 from urllib.parse import quote
 
 from .base import (
-    CORE_RESOURCE_SOURCES,
     CollectionRequest,
     RepositoryTarget,
     instance_web_base,
@@ -18,7 +17,6 @@ from .resource_base import (
     ResourceProvider,
     SourceResult,
     actor_from,
-    api_error_diagnostics,
     first_timestamp,
     in_window_or_malformed,
     is_valid_native_id,
@@ -28,14 +26,11 @@ from .resource_base import (
 )
 from .transport import (
     HEADER_CURSOR_PAGINATION,
-    ApiError,
     JsonTransport,
     PageResult,
     ResponseShapeError,
     UrllibTransport,
-    is_success_status,
     paginate,
-    response_status_error,
 )
 
 
@@ -226,131 +221,6 @@ class GitLabProvider(ResourceProvider):
                 )
             )
         return tasks
-
-    def _collect_repository(
-        self, target: RepositoryTarget, request: CollectionRequest
-    ) -> RepositorySnapshot:
-        project_path = self._project_path(target)
-        try:
-            response = self.transport.get(project_path)
-            if not is_success_status(response.status_code):
-                raise response_status_error(
-                    response,
-                    redact_url=getattr(self.transport, "_redact_url", None),
-                )
-            if not isinstance(response.body, dict):
-                raise ResponseShapeError(f"expected project object from {response.url}")
-            validate_repository_identity(
-                response.body, target, identity_field="path_with_namespace"
-            )
-        except ApiError as exc:
-            failed = {
-                source: SourceResult(
-                    [], "incomplete", str(exc), api_error_diagnostics(exc)
-                )
-                for source in CORE_RESOURCE_SOURCES
-            }
-            return RepositorySnapshot(None, failed)
-
-        raw = response.body
-        repository = {
-            "id": target.canonical_id,
-            "provider_id": f"provider:gitlab:{target.instance}",
-            "full_name": raw.get("path_with_namespace"),
-            "name": raw.get("name"),
-            "web_url": raw.get("web_url")
-            or f"{instance_web_base(target.instance)}/{target.owner}/{target.name}",
-        }
-        issue_result = self._safe_page(
-            "work_items",
-            lambda: self._page(
-                f"{project_path}/issues",
-                {
-                    "state": "all",
-                    "updated_after": request.window_start,
-                    "updated_before": request.window_end,
-                    "order_by": "updated_at",
-                    "sort": "asc",
-                },
-            ),
-        )
-        issue_result = self._normalize_items(
-            issue_result,
-            "work_items",
-            lambda item: self._normalize_issue(target, item),
-            target=target,
-            filter_item=lambda item: in_window_or_malformed(
-                item, request, "updated_at", "created_at"
-            ),
-        )
-
-        mr_result = self._safe_page(
-            "change_requests",
-            lambda: self._page(
-                f"{project_path}/merge_requests",
-                {
-                    "state": "all",
-                    "updated_after": request.window_start,
-                    "order_by": "updated_at",
-                    "sort": "asc",
-                },
-            ),
-        )
-        mr_result = self._normalize_items(
-            mr_result,
-            "change_requests",
-            lambda item: self._normalize_merge_request(target, item),
-            target=target,
-            filter_item=lambda item: self._change_request_in_window(item, request),
-        )
-
-        interactions = self._collect_interactions(
-            target, issue_result.items, mr_result.items, request
-        )
-        commit_result = self._safe_page(
-            "commits",
-            lambda: self._page(
-                f"{project_path}/repository/commits",
-                {
-                    "all": "true",
-                    "since": request.window_start,
-                    "until": request.window_end,
-                },
-            ),
-        )
-        commit_result = self._normalize_items(
-            commit_result,
-            "commits",
-            lambda item: self._normalize_commit(target, item),
-            target=target,
-            filter_item=lambda item: in_window_or_malformed(
-                item, request, "committed_date", "created_at"
-            ),
-        )
-
-        release_result = self._safe_page(
-            "releases",
-            lambda: self._page(f"{project_path}/releases", {}),
-        )
-        release_result = self._normalize_items(
-            release_result,
-            "releases",
-            lambda item: self._normalize_release(target, item),
-            target=target,
-            filter_item=lambda item: in_window_or_malformed(
-                item, request, "released_at", "created_at"
-            ),
-        )
-        return RepositorySnapshot(
-            repository,
-            {
-                "work_items": issue_result,
-                "change_requests": mr_result,
-                "interactions": interactions,
-                "commits": commit_result,
-                "releases": release_result,
-            },
-        )
 
     def _collect_activity(
         self, target: RepositoryTarget, request: CollectionRequest
@@ -610,52 +480,6 @@ class GitLabProvider(ResourceProvider):
             "_native_id": iid,
             "_actor": actor_from(item, "author"),
         }
-
-    def _collect_interactions(
-        self,
-        target: RepositoryTarget,
-        issues: list[dict[str, Any]],
-        merge_requests: list[dict[str, Any]],
-        request: CollectionRequest,
-    ) -> SourceResult:
-        records: list[dict[str, Any]] = []
-        complete = True
-        notes: list[str] = []
-        diagnostics: dict[str, Any] = {}
-        for item in [*issues, *merge_requests]:
-            number = item.get("number")
-            if item.get("kind") == "issue":
-                path = f"{self._project_path(target)}/issues/{number}/notes"
-            else:
-                path = f"{self._project_path(target)}/merge_requests/{number}/notes"
-            result = self._safe_page(
-                "interactions",
-                lambda path=path: self._page(
-                    path, {"sort": "asc", "order_by": "created_at"}
-                ),
-            )
-            result = self._normalize_items(
-                result,
-                "interactions",
-                lambda note, number=number, subject=item: self._normalize_note(
-                    target, note, number, subject
-                ),
-                target=target,
-                filter_item=lambda note: in_window_or_malformed(
-                    note, request, "created_at", "updated_at"
-                ),
-            )
-            merge_diagnostics(diagnostics, result.diagnostics)
-            if result.status != "supported":
-                complete = False
-                notes.append(result.note)
-            records.extend(result.items)
-        return SourceResult(
-            records,
-            "supported" if complete else "incomplete",
-            "; ".join(notes),
-            diagnostics,
-        )
 
     @staticmethod
     def _change_request_in_window(

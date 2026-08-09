@@ -4,7 +4,6 @@ from typing import Any
 from urllib.parse import quote
 
 from .base import (
-    CORE_RESOURCE_SOURCES,
     CollectionRequest,
     RepositoryTarget,
     instance_web_base,
@@ -17,23 +16,18 @@ from .resource_base import (
     ResourceProvider,
     SourceResult,
     actor_from,
-    api_error_diagnostics,
     first_timestamp,
     in_window_or_malformed,
     is_valid_native_id,
-    merge_diagnostics,
     validate_repository_identity,
 )
 from .transport import (
     LINK_PAGINATION,
-    ApiError,
     JsonTransport,
     PageResult,
     ResponseShapeError,
     UrllibTransport,
-    is_success_status,
     paginate,
-    response_status_error,
 )
 
 
@@ -213,122 +207,6 @@ class GiteeProvider(ResourceProvider):
             )
         return tasks
 
-    def _collect_repository(
-        self, target: RepositoryTarget, request: CollectionRequest
-    ) -> RepositorySnapshot:
-        try:
-            response = self.transport.get(self._repo_path(target))
-            if not is_success_status(response.status_code):
-                raise response_status_error(
-                    response,
-                    redact_url=getattr(self.transport, "_redact_url", None),
-                )
-            if not isinstance(response.body, dict):
-                raise ResponseShapeError(
-                    f"expected repository object from {response.url}"
-                )
-            validate_repository_identity(
-                response.body, target, identity_field="full_name"
-            )
-        except ApiError as exc:
-            failed = {
-                source: SourceResult(
-                    [], "incomplete", str(exc), api_error_diagnostics(exc)
-                )
-                for source in CORE_RESOURCE_SOURCES
-            }
-            return RepositorySnapshot(None, failed)
-
-        raw = response.body
-        repository = {
-            "id": target.canonical_id,
-            "provider_id": f"provider:gitee:{target.instance}",
-            "full_name": raw.get("full_name"),
-            "name": raw.get("name"),
-            "web_url": raw.get("html_url")
-            or f"{instance_web_base(target.instance)}/{quote(target.owner, safe='')}/{quote(target.name, safe='')}",
-        }
-        issue_result = self._safe_page(
-            "work_items",
-            lambda: self._page(
-                f"{self._repo_path(target)}/issues",
-                {"state": "all", "since": request.window_start},
-            ),
-        )
-        issue_result = self._normalize_items(
-            issue_result,
-            "work_items",
-            lambda item: self._normalize_issue(target, item),
-            target=target,
-            filter_item=lambda item: in_window_or_malformed(
-                item, request, "updated_at", "created_at"
-            ),
-        )
-        pull_result = self._safe_page(
-            "change_requests",
-            lambda: self._page(
-                f"{self._repo_path(target)}/pulls",
-                # Gitee's public v5 endpoint rejects GitHub-style
-                # ``sort=updated_at``.  The collector filters the returned
-                # resources by the explicit local window below, so the
-                # provider does not need a non-portable ordering parameter.
-                {"state": "all"},
-            ),
-        )
-        pull_result = self._normalize_items(
-            pull_result,
-            "change_requests",
-            lambda item: self._normalize_pull(target, item),
-            target=target,
-            filter_item=lambda item: self._change_request_in_window(item, request),
-        )
-        interactions = self._collect_interactions(
-            target, issue_result.items, pull_result.items, request
-        )
-        commit_result = self._safe_page(
-            "commits",
-            lambda: self._page(
-                f"{self._repo_path(target)}/commits",
-                {"since": request.window_start, "until": request.window_end},
-            ),
-        )
-        commit_result = self._normalize_items(
-            commit_result,
-            "commits",
-            lambda item: self._normalize_commit(target, item),
-            target=target,
-            filter_item=lambda item: in_window_or_malformed(
-                {"timestamp": self._commit_timestamp(item)}
-                if isinstance(item, dict)
-                else item,
-                request,
-                "timestamp",
-            ),
-        )
-        release_result = self._safe_page(
-            "releases",
-            lambda: self._page(f"{self._repo_path(target)}/releases", {}),
-        )
-        release_result = self._normalize_items(
-            release_result,
-            "releases",
-            lambda item: self._normalize_release(target, item),
-            target=target,
-            filter_item=lambda item: in_window_or_malformed(
-                item, request, "published_at", "created_at"
-            ),
-        )
-        return RepositorySnapshot(
-            repository,
-            {
-                "work_items": issue_result,
-                "change_requests": pull_result,
-                "interactions": interactions,
-                "commits": commit_result,
-                "releases": release_result,
-            },
-        )
-
     def _collect_activity(
         self, target: RepositoryTarget, request: CollectionRequest
     ) -> dict[str, SourceResult]:
@@ -388,50 +266,6 @@ class GiteeProvider(ResourceProvider):
             "_native_id": number,
             "_actor": actor_from(item, "user", "author"),
         }
-
-    def _collect_interactions(
-        self,
-        target: RepositoryTarget,
-        issues: list[dict[str, Any]],
-        pulls: list[dict[str, Any]],
-        request: CollectionRequest,
-    ) -> SourceResult:
-        records: list[dict[str, Any]] = []
-        complete = True
-        notes: list[str] = []
-        diagnostics: dict[str, Any] = {}
-        for item in [*issues, *pulls]:
-            number = item.get("number")
-            collection = "issues" if item.get("kind") == "issue" else "pulls"
-            result = self._safe_page(
-                "interactions",
-                lambda number=number, collection=collection: self._page(
-                    f"{self._repo_path(target)}/{collection}/{number}/comments",
-                    {},
-                ),
-            )
-            result = self._normalize_items(
-                result,
-                "interactions",
-                lambda comment, number=number, subject=item: self._normalize_comment(
-                    target, comment, number, subject
-                ),
-                target=target,
-                filter_item=lambda comment: in_window_or_malformed(
-                    comment, request, "created_at", "updated_at"
-                ),
-            )
-            merge_diagnostics(diagnostics, result.diagnostics)
-            if result.status != "supported":
-                complete = False
-                notes.append(result.note)
-            records.extend(result.items)
-        return SourceResult(
-            records,
-            "supported" if complete else "incomplete",
-            "; ".join(notes),
-            diagnostics,
-        )
 
     @staticmethod
     def _change_request_in_window(

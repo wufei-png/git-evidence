@@ -5,7 +5,7 @@ import subprocess
 import sys
 from typing import Any
 
-MAX_ERRORS = 94
+MAX_ERRORS = 68
 MAX_WARNINGS = 0
 COMMAND = ("pyright", "src/git_evidence", "--outputjson")
 

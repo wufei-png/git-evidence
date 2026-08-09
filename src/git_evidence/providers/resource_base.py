@@ -775,6 +775,9 @@ class BundleBuilder:
         self._filtered_subjects: dict[str, dict[str, Any]] = {}
         self._retrieval_ids: dict[str, str] = {}
         self._retrieval_provenance: dict[str, dict[str, Any]] = {}
+        self._transaction_token = 0
+        self._active_transaction: int | None = None
+        self._index_undo: list[tuple[str, str, Any, Any]] = []
         self._entity_count = 1
         self._bundle_size_estimate = (
             json_size_with_limit(
@@ -785,10 +788,16 @@ class BundleBuilder:
         )
 
     def checkpoint(self) -> dict[str, Any]:
-        """Record bounded deltas for one source-level transaction."""
+        """Start a source transaction without copying historical indexes."""
+        if self._active_transaction is not None:
+            raise RuntimeError("nested BundleBuilder transactions are not supported")
+        self._transaction_token += 1
+        self._active_transaction = self._transaction_token
+        self._index_undo.clear()
         coverage = self.bundle["coverage"]
         capabilities = self.bundle["providers"][0]["capabilities"]
         return {
+            "transaction_token": self._transaction_token,
             "collection_lengths": {
                 key: len(value)
                 for key, value in self.bundle.items()
@@ -799,25 +808,19 @@ class BundleBuilder:
                 for key in ("observations", "fatal", "group_failures", "warnings")
             },
             "capabilities": dict(capabilities),
-            "seen": {key: set(value) for key, value in self._seen.items()},
-            "actor_ids": dict(self._actor_ids),
-            "commit_ids_by_sha": {
-                key: set(value) for key, value in self._commit_ids_by_sha.items()
-            },
-            "change_request_ids_by_sha": {
-                key: set(value)
-                for key, value in self._change_request_ids_by_sha.items()
-            },
-            "duplicate_counts": dict(self._duplicate_counts),
-            "filtered_subjects": dict(self._filtered_subjects),
-            "retrieval_ids": dict(self._retrieval_ids),
-            "retrieval_provenance": dict(self._retrieval_provenance),
             "entity_count": self._entity_count,
             "bundle_size_estimate": self._bundle_size_estimate,
         }
 
+    def commit(self, checkpoint: dict[str, Any]) -> None:
+        """Accept the current source transaction and discard its undo journal."""
+        self._require_active_transaction(checkpoint)
+        self._active_transaction = None
+        self._index_undo.clear()
+
     def restore(self, checkpoint: dict[str, Any]) -> None:
         """Truncate source deltas and restore indexes after failed emission."""
+        self._require_active_transaction(checkpoint)
         for key, length in checkpoint["collection_lengths"].items():
             del self.bundle[key][length:]
         coverage = self.bundle["coverage"]
@@ -826,16 +829,56 @@ class BundleBuilder:
         capabilities = self.bundle["providers"][0]["capabilities"]
         capabilities.clear()
         capabilities.update(checkpoint["capabilities"])
-        self._seen = checkpoint["seen"]
-        self._actor_ids = checkpoint["actor_ids"]
-        self._commit_ids_by_sha = checkpoint["commit_ids_by_sha"]
-        self._change_request_ids_by_sha = checkpoint["change_request_ids_by_sha"]
-        self._duplicate_counts = checkpoint["duplicate_counts"]
-        self._filtered_subjects = checkpoint["filtered_subjects"]
-        self._retrieval_ids = checkpoint["retrieval_ids"]
-        self._retrieval_provenance = checkpoint["retrieval_provenance"]
+        for operation, mapping_name, key, value in reversed(self._index_undo):
+            mapping = getattr(self, mapping_name)
+            if operation == "discard":
+                mapping[key].discard(value)
+            elif operation == "delete":
+                mapping.pop(key, None)
+            elif operation == "restore":
+                existed, previous = value
+                if existed:
+                    mapping[key] = previous
+                else:
+                    mapping.pop(key, None)
         self._entity_count = checkpoint["entity_count"]
         self._bundle_size_estimate = checkpoint["bundle_size_estimate"]
+        self._active_transaction = None
+        self._index_undo.clear()
+
+    def _require_active_transaction(self, checkpoint: dict[str, Any]) -> None:
+        if checkpoint.get("transaction_token") != self._active_transaction:
+            raise RuntimeError("BundleBuilder transaction checkpoint is not active")
+
+    def _set_index_value(self, mapping_name: str, key: Any, value: Any) -> None:
+        mapping = getattr(self, mapping_name)
+        if self._active_transaction is not None:
+            self._index_undo.append(
+                ("restore", mapping_name, key, (key in mapping, mapping.get(key)))
+            )
+        mapping[key] = value
+
+    def _pop_index_value(self, mapping_name: str, key: Any) -> Any:
+        mapping = getattr(self, mapping_name)
+        if key not in mapping:
+            return None
+        if self._active_transaction is not None:
+            self._index_undo.append(
+                ("restore", mapping_name, key, (True, mapping[key]))
+            )
+        return mapping.pop(key)
+
+    def _add_index_member(self, mapping_name: str, key: Any, value: str) -> None:
+        mapping = getattr(self, mapping_name)
+        if key not in mapping:
+            mapping[key] = set()
+            if self._active_transaction is not None:
+                self._index_undo.append(("delete", mapping_name, key, None))
+        if value in mapping[key]:
+            return
+        mapping[key].add(value)
+        if self._active_transaction is not None:
+            self._index_undo.append(("discard", mapping_name, key, value))
 
     def _account_bundle_growth(self, value: Any, *, base_indent: int) -> None:
         self._bundle_size_estimate += indented_json_growth_upper_bound(
@@ -1031,8 +1074,8 @@ class BundleBuilder:
             ):
                 record["target_ref"] = source
             self._add_entity("retrievals", sanitize_public_payload(record))
-            self._retrieval_ids[key] = retrieval_id
-            self._retrieval_provenance[key] = deepcopy(raw)
+            self._set_index_value("_retrieval_ids", key, retrieval_id)
+            self._set_index_value("_retrieval_provenance", key, deepcopy(raw))
 
     def record_optional_failure(
         self,
@@ -1144,7 +1187,7 @@ class BundleBuilder:
             entity_id = record.get("id")
             if not isinstance(entity_id, str) or not entity_id:
                 continue
-            if entity_id in self._seen.setdefault(category, set()):
+            if entity_id in self._seen[category]:
                 for source in self._coverage_sources_for_category(category):
                     self._record_duplicate(source, target.canonical_id)
                 continue
@@ -1155,11 +1198,15 @@ class BundleBuilder:
                 and actor_id not in self.request.actor_ids
             ):
                 if category in {"work_items", "change_requests"}:
-                    self._filtered_subjects[entity_id] = {
-                        key: record[key]
-                        for key in ("id", "kind", "repository_id", "number")
-                        if key in record
-                    }
+                    self._set_index_value(
+                        "_filtered_subjects",
+                        entity_id,
+                        {
+                            key: record[key]
+                            for key in ("id", "kind", "repository_id", "number")
+                            if key in record
+                        },
+                    )
                 continue
             if category == "interactions":
                 subject_type = record.get("subject_type")
@@ -1173,8 +1220,10 @@ class BundleBuilder:
                         "interaction has no canonical subject",
                         failure_class="malformed_response",
                     )
-                if subject_id not in self._seen.setdefault(subject_collection, set()):
-                    structural_subject = self._filtered_subjects.pop(subject_id, None)
+                if subject_id not in self._seen[subject_collection]:
+                    structural_subject = self._pop_index_value(
+                        "_filtered_subjects", subject_id
+                    )
                     if structural_subject is None or not self._add_entity(
                         subject_collection,
                         structural_subject,
@@ -1186,15 +1235,19 @@ class BundleBuilder:
                         )
             if category == "change_requests":
                 for sha in association_shas:
-                    self._change_request_ids_by_sha.setdefault(
-                        (target.canonical_id, sha), set()
-                    ).add(entity_id)
+                    self._add_index_member(
+                        "_change_request_ids_by_sha",
+                        (target.canonical_id, sha),
+                        entity_id,
+                    )
             elif category == "commits":
                 sha = record.get("sha")
                 if isinstance(sha, str) and sha:
-                    self._commit_ids_by_sha.setdefault(
-                        (target.canonical_id, sha), set()
-                    ).add(entity_id)
+                    self._add_index_member(
+                        "_commit_ids_by_sha",
+                        (target.canonical_id, sha),
+                        entity_id,
+                    )
                     algorithm = git_object_id_algorithm(sha)
                     if algorithm is not None:
                         record["hash_algorithm"] = algorithm
@@ -1329,10 +1382,12 @@ class BundleBuilder:
         if actor_id is None:
             return None
         source_id = str(actor["source_id"])
-        self._actor_ids.setdefault(
-            source_id,
-            f"actor:{self.descriptor.kind}:{self.request.instance}:{source_id}",
-        )
+        if source_id not in self._actor_ids:
+            self._set_index_value(
+                "_actor_ids",
+                source_id,
+                f"actor:{self.descriptor.kind}:{self.request.instance}:{source_id}",
+            )
         if actor_id not in self._seen["actors"]:
             self._add_entity(
                 "actors",
@@ -1349,7 +1404,9 @@ class BundleBuilder:
         if not isinstance(repository_id, str) or not repository_id:
             return
         key = (source, repository_id)
-        self._duplicate_counts[key] = self._duplicate_counts.get(key, 0) + 1
+        self._set_index_value(
+            "_duplicate_counts", key, self._duplicate_counts.get(key, 0) + 1
+        )
         self._apply_duplicate_coverage(source, repository_id)
         self._account_bundle_growth(
             {"source": source, "repository_id": repository_id, "duplicate_count": 1},
@@ -1414,7 +1471,7 @@ class BundleBuilder:
         entity_id = record.get("id")
         if not isinstance(entity_id, str) or not entity_id:
             return False
-        if entity_id in self._seen.setdefault(category, set()):
+        if entity_id in self._seen[category]:
             duplicate_source = source or (
                 CHANGE_REQUEST_COVERAGE_SOURCES[0]
                 if category == "change_requests"
@@ -1433,7 +1490,7 @@ class BundleBuilder:
                 f"normalized entity count exceeds {MAX_NORMALIZED_ENTITIES}",
                 failure_class="limit_exceeded",
             )
-        self._seen[category].add(entity_id)
+        self._add_index_member("_seen", category, entity_id)
         self.bundle[category].append(record)
         self._entity_count += 1
         self._account_bundle_growth(record, base_indent=4)
@@ -1652,6 +1709,8 @@ class ResourceProvider:
                         exc,
                         fail_closed=isinstance(exc, PrivacyError),
                     )
+                else:
+                    builder.commit(checkpoint)
                 if isinstance(activity_boundary_error, PrivacyError):
                     builder.record_optional_failure(
                         source,
@@ -1676,12 +1735,14 @@ class ResourceProvider:
             if source == "repositories":
                 for item in result.items:
                     builder.add_repository(item, target=target)
+                builder.commit(checkpoint)
                 return
             builder.add_records(
                 source,
                 result.items,
                 target=target,
             )
+            builder.commit(checkpoint)
         except EXPECTED_PROVIDER_FAILURES as exc:
             builder.restore(checkpoint)
             builder.add_coverage(
@@ -1717,6 +1778,7 @@ class ResourceProvider:
                     )
                 builder.add_coverage(source, target, coverage_result)
             builder.add_records("change_requests", result.items, target=target)
+            builder.commit(checkpoint)
         except EXPECTED_PROVIDER_FAILURES as exc:
             builder.restore(checkpoint)
             for source in CHANGE_REQUEST_COVERAGE_SOURCES:
@@ -2338,13 +2400,6 @@ class ResourceProvider:
             diagnostics,
             result.retrievals,
             result.item_retrieval_keys,
-        )
-
-    def _collect_repository(
-        self, target: RepositoryTarget, request: CollectionRequest
-    ) -> RepositorySnapshot:
-        raise ProviderNotReady(
-            f"{self.descriptor.kind} resource collector is not implemented"
         )
 
     def _scheduled_root_path(self, target: RepositoryTarget) -> str:
