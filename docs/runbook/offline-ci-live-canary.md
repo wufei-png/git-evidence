@@ -53,8 +53,8 @@ replay as a live canary.
 A live canary is a separate protected/manual job. It requires all of these
 inputs before it starts:
 
-- an ephemeral `LIVE_CANARY_CONFIG` containing an explicit, non-empty
-  `scope.repositories` allowlist with provider, instance, owner, and name;
+- an ephemeral TOML `LIVE_CANARY_CONFIG` containing an explicit, non-empty
+  `scope.repositories` allowlist with provider reference, owner, and name;
 - a bounded timezone-aware window and provider runtime limits in that config;
 - only the secret required by the selected provider, supplied through the
   environment or CI secret store: `GITHUB_TOKEN`, `GITLAB_TOKEN`, or
@@ -64,7 +64,7 @@ inputs before it starts:
   the canary provider/instance/window.
 
 The config must use `token_env`; tokens, authorization headers, cookies, and
-credentials must never appear in YAML, command-line arguments, fixtures, logs,
+credentials must never appear in TOML, command-line arguments, fixtures, logs,
 or committed bundles. The allowlist is exact: provider discovery, wildcard
 repositories, and “all projects” expansion are not valid canary inputs.
 

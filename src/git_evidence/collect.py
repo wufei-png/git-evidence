@@ -14,7 +14,7 @@ from .bounds import (
     indented_json_growth_upper_bound,
     json_size_with_limit,
 )
-from .config import provider_runtime_options, validate_collection_config
+from .config import CollectionConfig, ProviderInstanceConfig, provider_runtime_options
 from .identity import (
     CANONICALIZATION,
     compute_bundle_digest,
@@ -887,64 +887,31 @@ def _finalize_v02(
 
 
 def collect_config(
-    config: dict[str, Any],
+    config: CollectionConfig,
     *,
     provider_factory: ProviderFactory | None = None,
 ) -> dict[str, Any]:
     """Collect all explicitly allowlisted repositories into one canonical bundle."""
     started_at = utc_now()
-    config = validate_collection_config(config)
-    window = config.get("window") or {}
-    window_start = _timestamp_text(window.get("start"), "window.start")
-    window_end = _timestamp_text(window.get("end"), "window.end")
-    timezone = window.get("timezone")
-    if not isinstance(timezone, str) or not timezone:
-        raise CollectionError("window.timezone must be non-empty")
-    scope = config.get("scope") or {}
-    repositories = scope.get("repositories")
-    if not isinstance(repositories, list) or not repositories:
-        raise CollectionError("scope.repositories must be a non-empty allowlist")
-    actor_ids = scope.get("actors", [])
-    if not isinstance(actor_ids, list) or not all(
-        isinstance(value, str) and value for value in actor_ids
-    ):
-        raise CollectionError("scope.actors must be an array of non-empty actor IDs")
-    if len(actor_ids) != len(set(actor_ids)):
-        raise CollectionError("scope.actors must not contain duplicate actor IDs")
-    provider_configs = config.get("providers")
-    if not isinstance(provider_configs, dict):
-        raise CollectionError("providers must be an object")
+    if not isinstance(config, CollectionConfig):
+        raise TypeError("config must be a validated CollectionConfig")
+    window_start = _timestamp_text(config.window_start, "window.start")
+    window_end = _timestamp_text(config.window_end, "window.end")
+    timezone = config.timezone
+    repositories = config.repositories
+    actor_ids = list(config.actors)
 
     grouped: dict[tuple[str, str], list[RepositoryTarget]] = defaultdict(list)
     provider_options: dict[tuple[str, str], dict[str, Any]] = {}
     provider_runtime: dict[tuple[str, str], dict[str, Any]] = {}
-    for index, item in enumerate(repositories):
-        if not isinstance(item, dict):
-            raise CollectionError(f"scope.repositories[{index}] must be an object")
-        kind = item.get("provider")
-        instance = item.get("instance")
-        owner = item.get("owner")
-        name = item.get("name")
-        if not all(
-            isinstance(value, str) and value for value in (kind, instance, owner, name)
-        ):
-            raise CollectionError(
-                f"scope.repositories[{index}] has incomplete provider target"
-            )
-        if not PROVIDER_REGISTRY.contains(kind):
-            raise CollectionError(f"unsupported provider: {kind}")
-        provider_config = provider_configs.get(kind)
-        if not isinstance(provider_config, dict):
-            raise CollectionError(f"missing provider configuration: {kind}")
-        group_key = (kind, instance)
-        grouped[group_key].append(RepositoryTarget(kind, instance, owner, name))
-        provider_options[group_key] = provider_config
-        try:
-            provider_runtime[group_key] = provider_runtime_options(
-                kind, provider_config
-            )
-        except ValueError as exc:
-            raise CollectionError(str(exc)) from exc
+    providers_by_group: dict[tuple[str, str], ProviderInstanceConfig] = {}
+    for repository in repositories:
+        provider_config = config.provider(repository.provider_ref)
+        group_key = (provider_config.kind, provider_config.instance)
+        grouped[group_key].append(repository.target)
+        providers_by_group[group_key] = provider_config
+        provider_options[group_key] = provider_config.factory_options()
+        provider_runtime[group_key] = provider_runtime_options(provider_config)
 
     collected: list[dict[str, Any]] = []
     group_plans: list[
@@ -953,15 +920,13 @@ def collect_config(
     for group_key, targets in sorted(grouped.items()):
         kind, instance = group_key
         options = provider_options[group_key]
-        token_env = options.get("token_env")
-        if token_env is not None and (not isinstance(token_env, str) or not token_env):
-            raise CollectionError(
-                f"providers.{kind}.token_env must be a non-empty string"
-            )
+        provider_config = providers_by_group[group_key]
+        token_env = provider_config.token_env
         token = os.environ.get(token_env) if token_env else None
         if token_env and not token:
             raise CollectionError(
-                f"providers.{kind}.token_env is configured but the environment variable is not set"
+                f"providers.{provider_config.ref}.token_env is configured but the "
+                "environment variable is not set"
             )
         group_plans.append((group_key, targets, options, token))
     for (kind, instance), targets, options, token in group_plans:
@@ -1011,12 +976,7 @@ def collect_config(
                 )
             )
 
-    repository_ids = [
-        RepositoryTarget(
-            item["provider"], item["instance"], item["owner"], item["name"]
-        ).canonical_id
-        for item in repositories
-    ]
+    repository_ids = [repository.target.canonical_id for repository in repositories]
     plan = _collection_plan(
         window_start=window_start,
         window_end=window_end,

@@ -12,6 +12,7 @@ from urllib.error import HTTPError
 
 from git_evidence.bounds import json_size_with_limit
 from git_evidence.collect import _merge_bundles, collect_config
+from git_evidence.config import validate_collection_config
 from git_evidence.model import BundleLoadError, load_bundle
 from git_evidence.providers import GitHubProvider
 from git_evidence.providers.base import (
@@ -322,17 +323,18 @@ class PageAndEntityBoundTests(unittest.TestCase):
             "scope": {
                 "repositories": [
                     {
-                        "provider": "github",
-                        "instance": "github.com",
+                        "provider_ref": "public-github",
                         "owner": "example",
                         "name": "project",
                     }
                 ]
             },
-            "providers": {"github": {}},
+            "providers": {
+                "public-github": {"kind": "github", "instance": "github.com"}
+            },
         }
         bundle = collect_config(
-            config,
+            validate_collection_config(config),
             provider_factory=lambda *args: OverflowProvider(),
         )
         self.assertFalse(bundle["coverage"]["render_eligible"])

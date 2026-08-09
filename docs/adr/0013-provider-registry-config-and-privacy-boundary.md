@@ -8,6 +8,9 @@ date: 2026-08-02
 Terminology note: per ADR-0017, a Bundle or report passing the deterministic
 gate is render-eligible, not approved for disclosure.
 
+The configuration-domain and compatibility decisions below are superseded by
+ADR-0021. The provider registry and privacy decisions remain accepted.
+
 ## Decision
 
 The provider catalog is a fail-closed registry. Each registered kind owns one

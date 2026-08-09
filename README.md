@@ -51,8 +51,8 @@ external operator decision.
 - The default model has no productivity score, ranking, or performance claim.
 - Provider descriptors and instance factories are registered together and
   unknown provider kinds fail closed.
-- Collection and report configuration are independently validated; the legacy
-  single-file loader remains available for compatibility.
+- TOML is the only configuration format. Repositories select named Provider
+  instances, each with independent credentials, transport, cache, and budget.
 - Actors are anonymous by default, credentials are environment-only, and
   source URLs are retained only after auth material is redacted.
 
@@ -68,14 +68,14 @@ bundle from configured providers:
 python -m pip install .
 git-evidence --version
 git-evidence providers
-git-evidence doctor --config config.example.yml
-git-evidence collect --config config.example.yml \
+git-evidence doctor --config config.example.toml
+git-evidence collect --config config.example.toml \
   --output evidence/bundle.json
 git-evidence validate fixtures/example_bundle.json
 git-evidence migrate fixtures/example_bundle.json \
   --output evidence/bundle-0.2.json
 git-evidence render fixtures/example_bundle.json \
-  --config config.example.yml --profile project-first --output report.md
+  --config config.example.toml --profile project-first --output report.md
 ```
 
 `validate` and `collect` accept `--diagnostics-format json` for structured
@@ -103,7 +103,7 @@ before `collect`, or remove `token_env` for an intentionally anonymous public
 run.
 
 Actor names remain anonymous by default. To render a name, set
-`report.display_actor_names: true` and provide its full canonical actor ID in
+`display_actor_names = true` under `[report]` and provide its full canonical actor ID in
 `report.actor_labels`; pass the same configuration to `render --config`.
 
 GitLab, GitHub, and Gitee each have an experimental resource-API collector in
@@ -138,8 +138,8 @@ does close render eligibility.
 
 ## Status
 
-The P2 contract slice includes the provider registry, collection/report config
-split, fail-closed privacy render gate, provenance-linked coverage
+The P2 contract slice includes the provider registry, typed TOML configuration,
+fail-closed privacy render gate, provenance-linked coverage
 failures, private cache replay, strict cache status/header handling, duplicate
 record diagnostics, and bounded transport budgets. No provider is advertised
 as production-complete: this checkout's offline fixtures and renderer tests do

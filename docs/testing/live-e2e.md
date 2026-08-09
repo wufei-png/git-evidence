@@ -11,7 +11,7 @@ retention, pagination limits, and the current adapter version.
   authorized to read the data. Do not use private company repositories in this
   project.
 - Keep tokens in environment variables or the provider CLI credential store.
-  Do not put tokens in YAML, shell history, fixtures, or committed bundles.
+  Do not put tokens in TOML, shell history, fixtures, or committed bundles.
 - Write live bundles and rendered reports under `/tmp` or the ignored
   `evidence/` and `reports/` directories. Live bundles are not public
   contract fixtures.
@@ -39,23 +39,25 @@ canonical collection and uses the CLI only as an additional operator check.
 Create an uncommitted live configuration with an explicit allowlist and a
 provider token environment variable where required:
 
-```yaml
-window:
-  start: 2026-07-26T00:00:00Z
-  end: 2026-08-02T00:00:00Z
-  timezone: UTC
+```toml
+[window]
+start = 2026-07-26T00:00:00Z
+end = 2026-08-02T00:00:00Z
+timezone = "UTC"
 
-scope:
-  repositories:
-    - provider: github
-      instance: github.com
-      owner: <owner>
-      name: <repository>
+[scope]
+actors = []
 
-providers:
-  github:
-    token_env: GITHUB_TOKEN
-    include_activity_api: true
+[[scope.repositories]]
+provider_ref = "live-github"
+owner = "<owner>"
+name = "<repository>"
+
+[providers.live-github]
+kind = "github"
+instance = "github.com"
+token_env = "GITHUB_TOKEN"
+include_activity_api = true
 ```
 
 Run the same flow for each provider with a provider-specific target and token
@@ -63,7 +65,7 @@ environment variable:
 
 ```bash
 PYTHONPATH=src python3 -m git_evidence collect \
-  --config /tmp/live-config.yml \
+  --config /tmp/live-config.toml \
   --output /tmp/live-bundle.json
 PYTHONPATH=src python3 -m git_evidence validate /tmp/live-bundle.json
 PYTHONPATH=src python3 -m git_evidence render \

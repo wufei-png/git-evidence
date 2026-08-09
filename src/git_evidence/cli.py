@@ -10,7 +10,12 @@ from . import __version__
 from .atomic_io import AtomicWriteError, atomic_write_text
 from .bounds import InputLimitError, read_bounded_bytes
 from .collect import CollectionError, collect_config
-from .config import ConfigError, load_collection_config, load_report_config
+from .config import (
+    ConfigError,
+    ReportConfig,
+    load_collection_config,
+    load_report_config,
+)
 from .identity import compute_artifact_bytes_digest
 from .limits import MAX_BUNDLE_BYTES
 from .migration import MigrationError, migrate_v01_to_v02
@@ -146,8 +151,9 @@ def main(argv: list[str] | None = None) -> int:
         except ConfigError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
-        repositories = config["scope"]["repositories"]
-        print(f"CONFIGURATION: valid ({len(repositories)} allowlisted repositories)")
+        print(
+            f"CONFIGURATION: valid ({len(config.repositories)} allowlisted repositories)"
+        )
         return 0
     if args.command == "collect":
         try:
@@ -247,28 +253,25 @@ def main(argv: list[str] | None = None) -> int:
         if not issues and args.diagnostics_format == "text":
             print("VALIDATION: none")
         return 0
-    report_config: dict[str, object] = {}
+    report_config = ReportConfig()
     if args.config:
         try:
             report_config = load_report_config(args.config)
         except ConfigError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
-    profile = args.profile or str(report_config.get("profile", "project-first"))
-    language = args.language or str(report_config.get("language", "en"))
-    display_actor_names = bool(report_config.get("display_actor_names", False))
-    actor_labels = report_config.get("actor_labels")
-    privacy = report_config.get("privacy")
-    allow_source_urls = True
-    if isinstance(privacy, dict):
-        allow_source_urls = bool(privacy.get("allow_source_urls", True))
+    profile = args.profile or report_config.profile
+    language = args.language or report_config.language
+    display_actor_names = report_config.display_actor_names
+    actor_labels = report_config.actor_label_map()
+    allow_source_urls = report_config.allow_source_urls
     try:
         rendered = render_bundle(
             bundle,
             profile=profile,
             language=language,
             display_actor_names=display_actor_names,
-            actor_labels=actor_labels if isinstance(actor_labels, dict) else None,
+            actor_labels=actor_labels,
             allow_source_urls=allow_source_urls,
         )
     except RenderError as exc:

@@ -15,14 +15,32 @@ def config_for(
     *,
     max_requests: int,
 ) -> dict[str, object]:
+    instances = sorted({repository["instance"] for repository in repositories})
+    refs = {instance: f"github-{index}" for index, instance in enumerate(instances)}
     return {
         "window": {
             "start": "2026-08-01T00:00:00Z",
             "end": "2026-08-02T00:00:00Z",
             "timezone": "UTC",
         },
-        "scope": {"repositories": repositories},
-        "providers": {"github": {"max_requests": max_requests}},
+        "scope": {
+            "repositories": [
+                {
+                    "provider_ref": refs[repository["instance"]],
+                    "owner": repository["owner"],
+                    "name": repository["name"],
+                }
+                for repository in repositories
+            ]
+        },
+        "providers": {
+            provider_ref: {
+                "kind": "github",
+                "instance": instance,
+                "transport": {"max_requests": max_requests},
+            }
+            for instance, provider_ref in refs.items()
+        },
     }
 
 
@@ -30,7 +48,6 @@ def repository(
     owner: str, name: str, *, instance: str = "github.com"
 ) -> dict[str, str]:
     return {
-        "provider": "github",
         "instance": instance,
         "owner": owner,
         "name": name,
@@ -56,7 +73,7 @@ class FairPreflightTests(unittest.TestCase):
             return object()
 
         with self.assertRaises(PlanBudgetInfeasibleConfigError):
-            collect_config(config, provider_factory=factory)
+            collect_config(validate_collection_config(config), provider_factory=factory)
         self.assertFalse(called)
 
     def test_budget_is_scoped_per_provider_instance_group(self) -> None:
@@ -68,7 +85,7 @@ class FairPreflightTests(unittest.TestCase):
             max_requests=5,
         )
         validated = validate_collection_config(config)
-        self.assertEqual(len(validated["scope"]["repositories"]), 2)
+        self.assertEqual(len(validated.repositories), 2)
 
     def test_config_and_request_repository_order_is_canonical(self) -> None:
         repositories = [
@@ -87,16 +104,13 @@ class FairPreflightTests(unittest.TestCase):
                     config_for(permutation, max_requests=15)
                 )
                 self.assertEqual(
-                    [
-                        (item["owner"], item["name"])
-                        for item in validated["scope"]["repositories"]
-                    ],
+                    [(item.owner, item.name) for item in validated.repositories],
                     expected,
                 )
 
                 targets = tuple(
                     RepositoryTarget(
-                        item["provider"],
+                        "github",
                         item["instance"],
                         item["owner"],
                         item["name"],
@@ -128,7 +142,9 @@ class FairPreflightTests(unittest.TestCase):
         for permutation in (repositories, list(reversed(repositories))):
             with self.subTest(permutation=permutation):
                 bundle = collect_config(
-                    config_for(permutation, max_requests=10),
+                    validate_collection_config(
+                        config_for(permutation, max_requests=10)
+                    ),
                     provider_factory=lambda *args: FailedProvider(),
                 )
                 expected_ids = [

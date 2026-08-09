@@ -27,7 +27,6 @@ from git_evidence.cli import main as cli_main
 from git_evidence.collect import _merge_bundles, collect_config
 from git_evidence.config import (
     ConfigError,
-    provider_runtime_options,
     validate_collection_config,
     validate_report_config,
 )
@@ -73,15 +72,16 @@ class ReviewLoopFindingTests(unittest.TestCase):
             "scope": {
                 "repositories": [
                     {
-                        "provider": "github",
-                        "instance": "github.com",
+                        "provider_ref": "public-github",
                         "owner": "example",
                         "name": "project",
                     }
                 ],
                 "actors": [],
             },
-            "providers": {"github": {}},
+            "providers": {
+                "public-github": {"kind": "github", "instance": "github.com"}
+            },
         }
         for unsafe in (
             "https://user:password@example.test",
@@ -90,7 +90,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
         ):
             with self.subTest(instance=unsafe):
                 invalid = deepcopy(base)
-                invalid["scope"]["repositories"][0]["instance"] = unsafe
+                invalid["providers"]["public-github"]["instance"] = unsafe
                 with self.assertRaises(ConfigError):
                     validate_collection_config(invalid)
                 with self.assertRaises(ValueError):
@@ -1243,17 +1243,22 @@ class ReviewLoopFindingTests(unittest.TestCase):
             "scope": {
                 "repositories": [
                     {
-                        "provider": "github",
-                        "instance": "github.com",
+                        "provider_ref": "public-github",
                         "owner": "example",
                         "name": "project",
                     }
                 ]
             },
-            "providers": {"github": {"token_env": "GITHUB_TOKEN"}},
+            "providers": {
+                "public-github": {
+                    "kind": "github",
+                    "instance": "github.com",
+                    "token_env": "GITHUB_TOKEN",
+                }
+            },
         }
         unknown = deepcopy(base)
-        unknown["providers"]["github"]["business"] = {
+        unknown["providers"]["public-github"]["business"] = {
             "author": "synthetic",
             "tokenized_name": "safe",
         }
@@ -1261,7 +1266,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
             validate_collection_config(unknown)
         for secret_key in ("github_token", "clientSecret", "X-API-Key", "authHeader"):
             unsafe = deepcopy(base)
-            unsafe["providers"]["github"]["nested"] = {secret_key: "secret"}
+            unsafe["providers"]["public-github"]["nested"] = {secret_key: "secret"}
             with self.subTest(secret_key=secret_key), self.assertRaises(ConfigError):
                 validate_collection_config(unsafe)
         unsafe_alias = deepcopy(base)
@@ -1273,11 +1278,11 @@ class ReviewLoopFindingTests(unittest.TestCase):
         self,
     ) -> None:
         with self.assertRaises(ConfigError):
-            validate_report_config({"privacy": {"actor_display": []}})
+            validate_report_config({"report": {"privacy": {"actor_display": []}}})
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "report.yml"
+            path = Path(directory) / "report.toml"
             path.write_text(
-                "report:\n  privacy:\n    actor_display: []\n", encoding="utf-8"
+                '[report.privacy]\nactor_display = "invalid"\n', encoding="utf-8"
             )
             result = cli_main(["render", str(FIXTURE), "--config", str(path)])
             self.assertEqual(result, 2)
@@ -1293,17 +1298,21 @@ class ReviewLoopFindingTests(unittest.TestCase):
             "scope": {
                 "repositories": [
                     {
-                        "provider": "github",
-                        "instance": "github.com",
+                        "provider_ref": "public-github",
                         "owner": "example",
                         "name": "project",
                     }
                 ],
                 "actors": [],
             },
-            "providers": {"github": {}},
+            "providers": {
+                "public-github": {"kind": "github", "instance": "github.com"}
+            },
         }
-        bundle = collect_config(config, provider_factory=lambda *args: LeakyProvider())
+        bundle = collect_config(
+            validate_collection_config(config),
+            provider_factory=lambda *args: LeakyProvider(),
+        )
         self.assertTrue(
             any(
                 failure["failure_class"] == "privacy_violation"
@@ -1481,15 +1490,16 @@ class ReviewLoopFindingTests(unittest.TestCase):
             "scope": {
                 "repositories": [
                     {
-                        "provider": "github",
-                        "instance": "github.com",
+                        "provider_ref": "public-github",
                         "owner": "example",
                         "name": "project",
                     }
                 ],
                 "actors": [],
             },
-            "providers": {"github": {}},
+            "providers": {
+                "public-github": {"kind": "github", "instance": "github.com"}
+            },
         }
         called = False
 
@@ -1498,7 +1508,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
             called = True
             return object()
 
-        with self.assertRaises(ConfigError):
+        with self.assertRaises(TypeError):
             collect_config(config, provider_factory=factory)
         self.assertFalse(called)
 
@@ -1521,6 +1531,21 @@ class ReviewLoopFindingTests(unittest.TestCase):
         self.assertEqual(bundle["work_items"], [])
 
     def test_runtime_and_transport_budgets_are_finite_and_bounded(self) -> None:
+        base = {
+            "window": {"start": WINDOW_START, "end": WINDOW_END, "timezone": "UTC"},
+            "scope": {
+                "repositories": [
+                    {
+                        "provider_ref": "public-github",
+                        "owner": "example",
+                        "name": "project",
+                    }
+                ]
+            },
+            "providers": {
+                "public-github": {"kind": "github", "instance": "github.com"}
+            },
+        }
         for key, value in (
             ("timeout_seconds", float("inf")),
             ("max_retries", 11),
@@ -1531,11 +1556,17 @@ class ReviewLoopFindingTests(unittest.TestCase):
             ("retry_after_max_seconds", 301),
         ):
             with self.subTest(key=key), self.assertRaises(ConfigError):
-                provider_runtime_options("github", {key: value})
+                config = deepcopy(base)
+                config["providers"]["public-github"]["transport"] = {key: value}
+                validate_collection_config(config)
         with self.assertRaises(ConfigError):
-            provider_runtime_options("github", {"cache": {"ttl_seconds": 86_401}})
+            config = deepcopy(base)
+            config["providers"]["public-github"]["cache"] = {"ttl_seconds": 86_401}
+            validate_collection_config(config)
         with self.assertRaises(ConfigError):
-            provider_runtime_options("github", {"cache": {"max_entries": 10_001}})
+            config = deepcopy(base)
+            config["providers"]["public-github"]["cache"] = {"max_entries": 10_001}
+            validate_collection_config(config)
         with self.assertRaises(ValueError):
             UrllibTransport("https://example.test", timeout=301)
         with self.assertRaises(ValueError):

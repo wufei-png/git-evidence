@@ -20,58 +20,48 @@ FIXTURE = ROOT / "fixtures" / "example_bundle.json"
 
 
 class P2ContractTests(unittest.TestCase):
-    def test_collection_and_report_loaders_validate_only_their_domain(self) -> None:
-        collection_valid_report_invalid = """
-window:
-  start: 2026-07-27T00:00:00Z
-  end: 2026-08-03T00:00:00Z
-  timezone: UTC
-scope:
-  repositories:
-    - provider: github
-      instance: github.com
-      owner: example
-      name: project
-providers:
-  github: {}
-report:
-  profile: invalid-profile
+    def test_collection_and_report_loaders_materialize_typed_toml(self) -> None:
+        collection_config = """
+[window]
+start = 2026-07-27T00:00:00Z
+end = 2026-08-03T00:00:00Z
+timezone = "UTC"
+
+[scope]
+actors = []
+
+[[scope.repositories]]
+provider_ref = "public-github"
+owner = "example"
+name = "project"
+
+[providers.public-github]
+kind = "github"
+instance = "github.com"
 """
-        report_valid_collection_invalid = """
-window:
-  start: 2026-07-27T00:00:00Z
-  end: 2026-08-03T00:00:00Z
-  timezone: UTC
-scope:
-  repositories:
-    - provider: unknown
-      instance: example.invalid
-      owner: example
-      name: project
-providers:
-  unknown: {}
-report:
-  profile: timeline
-  language: en
-  privacy:
-    actor_display: anonymous
-    allow_source_urls: true
-    auth_redaction: true
+        report_config = """
+[report]
+profile = "timeline"
+language = "en"
+
+[report.privacy]
+actor_display = "anonymous"
+allow_source_urls = true
+auth_redaction = true
 """
         with tempfile.TemporaryDirectory() as directory:
-            first = Path(directory) / "collection.yml"
-            first.write_text(collection_valid_report_invalid, encoding="utf-8")
+            first = Path(directory) / "collection.toml"
+            first.write_text(collection_config, encoding="utf-8")
             self.assertEqual(
-                load_collection_config(first)["scope"]["repositories"][0]["provider"],
+                load_collection_config(first).repositories[0].target.provider_kind,
                 "github",
             )
-            with self.assertRaises(ConfigError):
-                load_report_config(first)
+            self.assertEqual(load_report_config(first).profile, "project-first")
 
-            second = Path(directory) / "report.yml"
-            second.write_text(report_valid_collection_invalid, encoding="utf-8")
+            second = Path(directory) / "report.toml"
+            second.write_text(report_config, encoding="utf-8")
             report = load_report_config(second)
-            self.assertEqual(report["profile"], "timeline")
+            self.assertEqual(report.profile, "timeline")
             with self.assertRaises(ConfigError):
                 load_collection_config(second)
 

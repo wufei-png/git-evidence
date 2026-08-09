@@ -81,14 +81,14 @@ jobs:
           PY
           "$smoke_root/venv/bin/git-evidence" --version
           "$smoke_root/venv/bin/git-evidence" providers > providers.json
-          "$smoke_root/venv/bin/git-evidence" doctor --config "$repo/config.example.yml"
+          "$smoke_root/venv/bin/git-evidence" doctor --config "$repo/config.example.toml"
           "$smoke_root/venv/bin/git-evidence" validate "$repo/fixtures/example_bundle.json"
           "$smoke_root/venv/bin/git-evidence" migrate \
             "$repo/fixtures/example_bundle.json" --output migrated.json
           "$smoke_root/venv/bin/git-evidence" validate migrated.json
           "$smoke_root/venv/bin/git-evidence" render \
             "$repo/fixtures/example_bundle.json" \
-            --config "$repo/config.example.yml" \
+            --config "$repo/config.example.toml" \
             --output report.md
           test -s providers.json
           test -s report.md

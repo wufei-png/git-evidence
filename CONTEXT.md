@@ -13,6 +13,12 @@ observations through the project's shared reporting language. A provider may
 have capabilities that another provider does not; it must report those limits
 instead of presenting an empty result as proof of no activity.
 
+**Provider instance**:
+One configured authority for a Provider, with its own credential reference and
+collection limits. Repositories refer to it by a stable provider reference;
+Provider kind alone does not identify it.
+_Avoid_: Provider config, Provider kind config
+
 **Change request**:
 A review-and-integration work item such as a GitLab merge request, GitHub pull
 request, or Gitee pull request.
@@ -130,11 +136,10 @@ does not replace the capability state.
 
 **Configuration boundary**:
 Collection configuration owns the time window, repository/actor allowlists,
-provider registry selection, runtime limits, and environment-only credential
+Provider instance selection, runtime limits, and environment-only credential
 references. Report configuration owns profile, language, privacy, and explicit
-actor labels. The two domains are independently validated; the compatibility
-single-file loader may validate both, but `collect` and `render` consume only
-their respective domains.
+actor labels. TOML is the sole configuration language; historical shapes are
+outside the boundary.
 
 **Privacy default**:
 Actors are anonymous unless an explicit actor-ID-to-label map is supplied.

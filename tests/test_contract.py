@@ -15,7 +15,11 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from git_evidence.cli import main as cli_main
 from git_evidence.collect import collect_config
-from git_evidence.config import ConfigError, load_config
+from git_evidence.config import (
+    ConfigError,
+    load_collection_config,
+    validate_collection_config,
+)
 from git_evidence.model import load_bundle
 from git_evidence.privacy import PrivacyError
 from git_evidence.providers import (
@@ -568,26 +572,12 @@ class ContractTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;", report)
 
     def test_render_cli_reads_explicit_identity_map_from_config(self) -> None:
-        temporary = ROOT / "tests" / ".tmp-render-config.yml"
+        temporary = ROOT / "tests" / ".tmp-render-config.toml"
         temporary.write_text(
-            "window:\n"
-            "  start: 2026-07-27T00:00:00Z\n"
-            "  end: 2026-08-03T00:00:00Z\n"
-            "  timezone: UTC\n"
-            "scope:\n"
-            "  repositories:\n"
-            "    - provider: github\n"
-            "      instance: github.com\n"
-            "      owner: example\n"
-            "      name: project\n"
-            "  actors: []\n"
-            "providers:\n"
-            "  github: {}\n"
-            "report:\n"
-            "  profile: actor-summary\n"
-            "  display_actor_names: true\n"
-            "  actor_labels:\n"
-            '    "actor:github:github.com:42": Alice\n',
+            '[report]\nprofile = "actor-summary"\n'
+            "display_actor_names = true\n"
+            "[report.actor_labels]\n"
+            '"actor:github:github.com:42" = "Alice"\n',
             encoding="utf-8",
         )
         output = StringIO()
@@ -1236,15 +1226,20 @@ class ContractTests(unittest.TestCase):
             "scope": {
                 "repositories": [
                     {
-                        "provider": "github",
-                        "instance": "github.com",
+                        "provider_ref": "public-github",
                         "owner": "example",
                         "name": "project",
                     }
                 ],
                 "actors": [],
             },
-            "providers": {"github": {"include_activity_api": True}},
+            "providers": {
+                "public-github": {
+                    "kind": "github",
+                    "instance": "github.com",
+                    "include_activity_api": True,
+                }
+            },
         }
 
         def factory(
@@ -1253,7 +1248,9 @@ class ContractTests(unittest.TestCase):
             del kind, options, token
             return GitHubProvider(transport, instance=instance)
 
-        bundle = collect_config(config, provider_factory=factory)
+        bundle = collect_config(
+            validate_collection_config(config), provider_factory=factory
+        )
         self.assertTrue(bundle["coverage"]["render_eligible"])
         self.assertEqual(validate_bundle(bundle), [])
         self.assertTrue(
@@ -1400,23 +1397,26 @@ class ContractTests(unittest.TestCase):
             "scope": {
                 "repositories": [
                     {
-                        "provider": "github",
-                        "instance": "github.com",
+                        "provider_ref": "public-github",
                         "owner": "example",
                         "name": "project",
                     },
                     {
-                        "provider": "gitlab",
-                        "instance": "gitlab.com",
+                        "provider_ref": "public-gitlab",
                         "owner": "example",
                         "name": "project",
                     },
                 ],
                 "actors": ["actor:github:github.com:999"],
             },
-            "providers": {"github": {}, "gitlab": {}},
+            "providers": {
+                "public-github": {"kind": "github", "instance": "github.com"},
+                "public-gitlab": {"kind": "gitlab", "instance": "gitlab.com"},
+            },
         }
-        bundle = collect_config(config, provider_factory=factory)
+        bundle = collect_config(
+            validate_collection_config(config), provider_factory=factory
+        )
         self.assertEqual(validate_bundle(bundle), [])
         self.assertEqual(len(bundle["providers"]), 2)
         self.assertEqual(len(bundle["repositories"]), 2)
@@ -1454,24 +1454,27 @@ class ContractTests(unittest.TestCase):
             "scope": {
                 "repositories": [
                     {
-                        "provider": "github",
-                        "instance": "github.com",
+                        "provider_ref": "public-github",
                         "owner": "example",
                         "name": "project",
                     },
                     {
-                        "provider": "gitlab",
-                        "instance": "gitlab.com",
+                        "provider_ref": "public-gitlab",
                         "owner": "example",
                         "name": "project",
                     },
                 ],
                 "actors": [],
             },
-            "providers": {"github": {}, "gitlab": {}},
+            "providers": {
+                "public-github": {"kind": "github", "instance": "github.com"},
+                "public-gitlab": {"kind": "gitlab", "instance": "gitlab.com"},
+            },
         }
 
-        bundle = collect_config(config, provider_factory=factory)
+        bundle = collect_config(
+            validate_collection_config(config), provider_factory=factory
+        )
         self.assertEqual(
             [item["id"] for item in bundle["repositories"]],
             ["repo:github:github.com:example/project"],
@@ -1854,47 +1857,45 @@ class ContractTests(unittest.TestCase):
         )
 
     def test_config_requires_explicit_allowlist_and_aware_window(self) -> None:
-        config = load_config(ROOT / "config.example.yml")
-        self.assertEqual(config["scope"]["repositories"][0]["provider"], "github")
-        bad = dict(config)
-        bad["scope"] = {"repositories": []}
-        temporary = ROOT / "tests" / ".tmp-invalid-config.yml"
+        config = load_collection_config(ROOT / "config.example.toml")
+        self.assertEqual(config.repositories[0].target.provider_kind, "github")
+        temporary = ROOT / "tests" / ".tmp-invalid-config.toml"
         try:
             temporary.write_text(
-                "window:\n"
-                "  start: 2026-07-27T00:00:00Z\n"
-                "  end: 2026-08-03T00:00:00Z\n"
-                "  timezone: UTC\n"
-                "scope:\n"
-                "  repositories: []\n"
-                "providers: {}\n",
+                "[window]\n"
+                "start = 2026-07-27T00:00:00Z\n"
+                "end = 2026-08-03T00:00:00Z\n"
+                'timezone = "UTC"\n'
+                "[scope]\n"
+                "repositories = []\n"
+                "[providers]\n",
                 encoding="utf-8",
             )
             with self.assertRaises(ConfigError):
-                load_config(temporary)
+                load_collection_config(temporary)
         finally:
             temporary.unlink(missing_ok=True)
 
     def test_config_rejects_unknown_provider(self) -> None:
-        temporary = ROOT / "tests" / ".tmp-unknown-provider.yml"
+        temporary = ROOT / "tests" / ".tmp-unknown-provider.toml"
         try:
             temporary.write_text(
-                "window:\n"
-                "  start: 2026-07-27T00:00:00Z\n"
-                "  end: 2026-08-03T00:00:00Z\n"
-                "  timezone: UTC\n"
-                "scope:\n"
-                "  repositories:\n"
-                "    - provider: unknown\n"
-                "      instance: example.invalid\n"
-                "      owner: example\n"
-                "      name: project\n"
-                "providers:\n"
-                "  unknown: {}\n",
+                "[window]\n"
+                "start = 2026-07-27T00:00:00Z\n"
+                "end = 2026-08-03T00:00:00Z\n"
+                'timezone = "UTC"\n'
+                "[scope]\n"
+                "[[scope.repositories]]\n"
+                'provider_ref = "unknown"\n'
+                'owner = "example"\n'
+                'name = "project"\n'
+                "[providers.unknown]\n"
+                'kind = "unknown"\n'
+                'instance = "example.invalid"\n',
                 encoding="utf-8",
             )
             with self.assertRaises(ConfigError):
-                load_config(temporary)
+                load_collection_config(temporary)
         finally:
             temporary.unlink(missing_ok=True)
 

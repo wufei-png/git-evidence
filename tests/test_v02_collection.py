@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from git_evidence.collect import collect_config
+from git_evidence.config import validate_collection_config
 from git_evidence.providers import GiteeProvider, GitHubProvider, GitLabProvider
 from git_evidence.providers.transport import new_response_correlation_key
 from git_evidence.render import render_bundle
@@ -46,8 +47,7 @@ class V02CollectionTests(unittest.TestCase):
             "scope": {
                 "repositories": [
                     {
-                        "provider": kind,
-                        "instance": instance,
+                        "provider_ref": f"public-{kind}",
                         "owner": "example",
                         "name": "project",
                     }
@@ -55,9 +55,14 @@ class V02CollectionTests(unittest.TestCase):
                 ],
                 "actors": [],
             },
-            "providers": {kind: {} for kind in adapters},
+            "providers": {
+                f"public-{kind}": {"kind": kind, "instance": instance}
+                for kind, (_, _, instance) in adapters.items()
+            },
         }
-        return collect_config(config, provider_factory=factory)
+        return collect_config(
+            validate_collection_config(config), provider_factory=factory
+        )
 
     def test_collects_strict_v02_with_response_and_native_provenance(self) -> None:
         bundle = self._collect()
@@ -121,18 +126,20 @@ class V02CollectionTests(unittest.TestCase):
             "scope": {
                 "repositories": [
                     {
-                        "provider": "github",
-                        "instance": "github.com",
+                        "provider_ref": "public-github",
                         "owner": "example",
                         "name": "project",
                     }
                 ],
                 "actors": [],
             },
-            "providers": {"github": {}},
+            "providers": {
+                "public-github": {"kind": "github", "instance": "github.com"}
+            },
         }
         bundle = collect_config(
-            config, provider_factory=lambda *args: ProvenanceStrippingProvider()
+            validate_collection_config(config),
+            provider_factory=lambda *args: ProvenanceStrippingProvider(),
         )
         self.assertFalse(bundle["coverage"]["render_eligible"])
         self.assertEqual(

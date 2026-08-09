@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+import os
+import tempfile
 import tomllib
 import unittest
 from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
+from git_evidence.collect import collect_config
 from git_evidence.config import (
+    CollectionConfig,
     ConfigError,
-    provider_runtime_options,
+    ProviderInstanceConfig,
+    ReportConfig,
+    RuntimeOptions,
+    load_collection_config,
     validate_collection_config,
     validate_report_config,
 )
@@ -39,15 +48,14 @@ def base_config() -> dict[Any, Any]:
         "scope": {
             "repositories": [
                 {
-                    "provider": "github",
-                    "instance": "github.com",
+                    "provider_ref": "public-github",
                     "owner": "example",
                     "name": "project",
                 }
             ],
             "actors": [],
         },
-        "providers": {"github": {}},
+        "providers": {"public-github": {"kind": "github", "instance": "github.com"}},
         "report": {"privacy": {}},
     }
 
@@ -56,6 +64,183 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class StrictConfigTests(unittest.TestCase):
+    def test_validated_network_config_types_cannot_be_constructed_directly(
+        self,
+    ) -> None:
+        runtime = RuntimeOptions(
+            timeout_seconds=30,
+            max_retries=2,
+            max_pages=100,
+            max_requests=1000,
+            retry_backoff_seconds=0.5,
+            retry_jitter_seconds=0.25,
+            retry_after_max_seconds=60,
+            cache_enabled=False,
+            cache_path=None,
+            cache_ttl_seconds=300,
+            cache_max_entries=256,
+        )
+        with self.assertRaisesRegex(
+            TypeError, "issued only by configuration validation"
+        ):
+            ProviderInstanceConfig(
+                ref="unsafe",
+                kind="github",
+                instance="http://127.0.0.1",
+                token_env="TOKEN",
+                include_activity_api=False,
+                verify_tls=False,
+                allow_insecure_loopback=True,
+                runtime=runtime,
+            )
+        with self.assertRaisesRegex(
+            TypeError, "issued only by configuration validation"
+        ):
+            CollectionConfig(
+                window_start=datetime(2026, 8, 1, tzinfo=UTC),
+                window_end=datetime(2026, 8, 2, tzinfo=UTC),
+                timezone="UTC",
+                repositories=(),
+                actors=(),
+                providers=(),
+                report=ReportConfig(),
+            )
+
+    def test_yaml_is_not_detected_or_migrated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.yml"
+            path.write_text("window:\n  timezone: UTC\n", encoding="utf-8")
+            with self.assertRaises(ConfigError):
+                load_collection_config(path)
+
+    def test_toml_input_bytes_depth_and_scalar_lengths_are_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text(
+                (ROOT / "config.example.toml").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            for constant, limit in (
+                ("MAX_CONFIG_BYTES", 16),
+                ("MAX_CONFIG_DEPTH", 2),
+                ("MAX_CONFIG_SCALAR_CHARS", 4),
+            ):
+                with (
+                    self.subTest(constant=constant),
+                    patch(f"git_evidence.config.{constant}", limit),
+                    self.assertRaises(ConfigError),
+                ):
+                    load_collection_config(path)
+
+    def test_provider_references_are_exact_bounded_and_fully_used(self) -> None:
+        unknown = base_config()
+        unknown["scope"]["repositories"][0]["provider_ref"] = "missing"
+        with self.assertRaisesRegex(ConfigError, "provider_ref is unknown"):
+            validate_collection_config(unknown)
+
+        unused = base_config()
+        unused["providers"]["unused"] = {
+            "kind": "gitlab",
+            "instance": "gitlab.com",
+        }
+        with self.assertRaisesRegex(ConfigError, "unused reference"):
+            validate_collection_config(unused)
+
+        invalid_ref = base_config()
+        invalid_ref["providers"]["Public_GitHub"] = invalid_ref["providers"].pop(
+            "public-github"
+        )
+        invalid_ref["scope"]["repositories"][0]["provider_ref"] = "Public_GitHub"
+        with self.assertRaisesRegex(ConfigError, "provider reference"):
+            validate_collection_config(invalid_ref)
+
+    def test_duplicate_canonical_provider_instance_is_rejected(self) -> None:
+        config = base_config()
+        config["providers"]["github-alias"] = {
+            "kind": "github",
+            "instance": "HTTPS://GITHUB.COM:443/",
+        }
+        config["scope"]["repositories"].append(
+            {
+                "provider_ref": "github-alias",
+                "owner": "another",
+                "name": "project",
+            }
+        )
+        with self.assertRaisesRegex(ConfigError, "duplicate canonical provider"):
+            validate_collection_config(config)
+
+    def test_multiple_instances_of_one_kind_keep_separate_runtime_and_credentials(
+        self,
+    ) -> None:
+        config = base_config()
+        config["providers"]["public-github"]["token_env"] = "PUBLIC_GITHUB_TOKEN"
+        config["providers"]["public-github"]["transport"] = {"max_requests": 7}
+        config["providers"]["enterprise-github"] = {
+            "kind": "github",
+            "instance": "ghe.example",
+            "token_env": "ENTERPRISE_GITHUB_TOKEN",
+            "transport": {"max_requests": 9},
+        }
+        config["scope"]["repositories"].append(
+            {
+                "provider_ref": "enterprise-github",
+                "owner": "enterprise",
+                "name": "project",
+            }
+        )
+        validated = validate_collection_config(config)
+        providers = {provider.ref: provider for provider in validated.providers}
+        self.assertEqual(providers["public-github"].token_env, "PUBLIC_GITHUB_TOKEN")
+        self.assertEqual(providers["public-github"].runtime.max_requests, 7)
+        self.assertEqual(
+            providers["enterprise-github"].token_env, "ENTERPRISE_GITHUB_TOKEN"
+        )
+        self.assertEqual(providers["enterprise-github"].runtime.max_requests, 9)
+
+        observed: list[tuple[str, int, str | None]] = []
+
+        class FailedProvider:
+            def collect(self, request: CollectionRequest) -> dict[str, object]:
+                del request
+                raise RuntimeError("fixture failure")
+
+        def factory(
+            kind: str,
+            instance: str,
+            options: dict[str, Any],
+            token: str | None,
+        ) -> FailedProvider:
+            del kind
+            observed.append((instance, options["max_requests"], token))
+            return FailedProvider()
+
+        with patch.dict(
+            os.environ,
+            {
+                "PUBLIC_GITHUB_TOKEN": "public-token",
+                "ENTERPRISE_GITHUB_TOKEN": "enterprise-token",
+            },
+        ):
+            collect_config(validated, provider_factory=factory)
+        self.assertEqual(
+            observed,
+            [
+                ("ghe.example", 9, "enterprise-token"),
+                ("github.com", 7, "public-token"),
+            ],
+        )
+
+    def test_token_env_must_be_an_environment_variable_name(self) -> None:
+        for value in ("TOKEN-NAME", "1TOKEN", "TOKEN NAME", ""):
+            config = base_config()
+            config["providers"]["public-github"]["token_env"] = value
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ConfigError, "environment variable"),
+            ):
+                validate_collection_config(config)
+
     def test_unknown_keys_are_rejected_at_every_fixed_mapping_level(self) -> None:
         mutations = (
             ("configuration", lambda config: config.__setitem__("widnow", {})),
@@ -68,14 +253,14 @@ class StrictConfigTests(unittest.TestCase):
                 ),
             ),
             (
-                "providers.github",
-                lambda config: config["providers"]["github"].__setitem__(
+                "providers.public-github",
+                lambda config: config["providers"]["public-github"].__setitem__(
                     "max_page", 10
                 ),
             ),
             (
-                "providers.github.cache",
-                lambda config: config["providers"]["github"].__setitem__(
+                "providers.public-github.cache",
+                lambda config: config["providers"]["public-github"].__setitem__(
                     "cache", {"enable": True}
                 ),
             ),
@@ -104,16 +289,20 @@ class StrictConfigTests(unittest.TestCase):
 
     def test_report_only_and_direct_provider_validation_are_strict(self) -> None:
         with self.assertRaisesRegex(ConfigError, "report contains unknown"):
-            validate_report_config({"profil": "project-first"})
-        with self.assertRaisesRegex(ConfigError, "providers.github contains unknown"):
-            provider_runtime_options("github", {"max_page": 10})
+            validate_report_config({"report": {"profil": "project-first"}})
+        config = base_config()
+        config["providers"]["public-github"]["max_page"] = 10
+        with self.assertRaisesRegex(
+            ConfigError, "providers.public-github contains unknown"
+        ):
+            validate_collection_config(config)
 
     def test_collection_config_without_report_uses_report_defaults(self) -> None:
         config = base_config()
         config.pop("report")
         report = validate_report_config(config)
-        self.assertEqual(report["profile"], "project-first")
-        self.assertEqual(report["language"], "en")
+        self.assertEqual(report.profile, "project-first")
+        self.assertEqual(report.language, "en")
 
 
 class InstanceIdentityTests(unittest.TestCase):
@@ -316,8 +505,7 @@ class InstanceIdentityTests(unittest.TestCase):
         config = base_config()
         config["scope"]["repositories"].append(
             {
-                "provider": "github",
-                "instance": "HTTPS://GITHUB.COM:443/",
+                "provider_ref": "public-github",
                 "owner": "example",
                 "name": "project",
             }
@@ -328,8 +516,7 @@ class InstanceIdentityTests(unittest.TestCase):
         config = base_config()
         config["scope"]["repositories"].append(
             {
-                "provider": "github",
-                "instance": "github.com.",
+                "provider_ref": "public-github",
                 "owner": "example",
                 "name": "project",
             }
@@ -339,11 +526,9 @@ class InstanceIdentityTests(unittest.TestCase):
 
     def test_config_targets_and_requests_store_canonical_instances(self) -> None:
         config = base_config()
-        config["scope"]["repositories"][0]["instance"] = "HTTPS://GITHUB.COM:443/"
+        config["providers"]["public-github"]["instance"] = "HTTPS://GITHUB.COM:443/"
         validated = validate_collection_config(config)
-        self.assertEqual(
-            validated["scope"]["repositories"][0]["instance"], "github.com"
-        )
+        self.assertEqual(validated.repositories[0].target.instance, "github.com")
 
         target = RepositoryTarget(
             "github", "HTTPS://GITHUB.COM:443/", "example", "project"

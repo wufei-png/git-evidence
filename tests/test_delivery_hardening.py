@@ -301,20 +301,20 @@ class CanaryLogBoundaryTests(unittest.TestCase):
             )
             stub.chmod(0o700)
             config = """\
-window:
-  start: 2026-08-01T00:00:00Z
-  end: 2026-08-02T00:00:00Z
-  timezone: UTC
-scope:
-  repositories:
-    - provider: github
-      instance: github.com
-      owner: secret-owner
-      name: private-project
-  actors: []
-providers:
-  github:
-    token_env: LIVE_PROVIDER_TOKEN
+[window]
+start = 2026-08-01T00:00:00Z
+end = 2026-08-02T00:00:00Z
+timezone = "UTC"
+[scope]
+actors = []
+[[scope.repositories]]
+provider_ref = "live-github"
+owner = "secret-owner"
+name = "private-project"
+[providers.live-github]
+kind = "github"
+instance = "github.com"
+token_env = "LIVE_PROVIDER_TOKEN"
 """
             environment = os.environ.copy()
             environment.update(

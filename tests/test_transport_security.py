@@ -63,8 +63,12 @@ def collection_config(
     allow_insecure_loopback: bool = False,
 ) -> dict[str, object]:
     provider: dict[str, object] = {
-        "verify_tls": verify_tls,
-        "allow_insecure_loopback": allow_insecure_loopback,
+        "kind": "github",
+        "instance": instance,
+        "transport": {
+            "verify_tls": verify_tls,
+            "allow_insecure_loopback": allow_insecure_loopback,
+        },
     }
     if token_env is not None:
         provider["token_env"] = token_env
@@ -77,8 +81,7 @@ def collection_config(
         "scope": {
             "repositories": [
                 {
-                    "provider": "github",
-                    "instance": instance,
+                    "provider_ref": "github",
                     "owner": "example",
                     "name": "project",
                 }
