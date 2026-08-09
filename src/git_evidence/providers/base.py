@@ -527,7 +527,7 @@ class CollectionRequest:
             raise ValueError("repositories must be a non-empty allowlist")
         for target in self.repositories:
             if not isinstance(target, RepositoryTarget):
-                raise ValueError("repositories must contain RepositoryTarget values")
+                raise TypeError("repositories must contain RepositoryTarget values")
             if (
                 target.provider_kind != self.provider_kind
                 or target.instance != self.instance

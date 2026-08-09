@@ -26,7 +26,6 @@ from git_evidence.providers.transport import MappingTransport, UrllibTransport
 from git_evidence.render import LABELS, render_bundle
 from git_evidence.validation import compute_render_eligibility, validate_bundle
 
-
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "fixtures" / "example_bundle.json"
 
@@ -105,10 +104,13 @@ class AtomicOutputTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "first\n")
             self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
 
-            with patch(
-                "git_evidence.atomic_io.os.replace",
-                side_effect=OSError("synthetic replace failure"),
-            ), self.assertRaises(AtomicWriteError):
+            with (
+                patch(
+                    "git_evidence.atomic_io.os.replace",
+                    side_effect=OSError("synthetic replace failure"),
+                ),
+                self.assertRaises(AtomicWriteError),
+            ):
                 atomic_write_text(target, "second\n")
             self.assertEqual(target.read_text(encoding="utf-8"), "first\n")
             self.assertEqual(list(target.parent.glob(".bundle.json.*.tmp")), [])
@@ -158,10 +160,13 @@ class AtomicOutputTests(unittest.TestCase):
             )
 
         stderr = StringIO()
-        with patch(
-            "git_evidence.cli.atomic_write_text",
-            side_effect=AtomicWriteError("synthetic output failure"),
-        ), patch("sys.stderr", stderr):
+        with (
+            patch(
+                "git_evidence.cli.atomic_write_text",
+                side_effect=AtomicWriteError("synthetic output failure"),
+            ),
+            patch("sys.stderr", stderr),
+        ):
             status = cli_main(
                 [
                     "render",
@@ -173,13 +178,18 @@ class AtomicOutputTests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertIn("synthetic output failure", stderr.getvalue())
 
-    def test_collect_json_diagnostics_are_single_documents_for_all_outcomes(self) -> None:
+    def test_collect_json_diagnostics_are_single_documents_for_all_outcomes(
+        self,
+    ) -> None:
         publishable = load_bundle(FIXTURE)
         stdout = StringIO()
         stderr = StringIO()
-        with patch("git_evidence.cli.load_collection_config", return_value={}), patch(
-            "git_evidence.cli.collect_config", return_value=publishable
-        ), patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+        with (
+            patch("git_evidence.cli.load_collection_config", return_value={}),
+            patch("git_evidence.cli.collect_config", return_value=publishable),
+            patch("sys.stdout", stdout),
+            patch("sys.stderr", stderr),
+        ):
             status = cli_main(
                 [
                     "collect",
@@ -193,7 +203,9 @@ class AtomicOutputTests(unittest.TestCase):
         diagnostics = json.loads(stderr.getvalue())
         self.assertEqual(diagnostics["status"], "publishable_with_warnings")
         self.assertEqual(diagnostics["issues"], [])
-        self.assertEqual(json.loads(stdout.getvalue())["coverage"]["allow_publish"], True)
+        self.assertEqual(
+            json.loads(stdout.getvalue())["coverage"]["allow_publish"], True
+        )
 
         failed = load_bundle(FIXTURE)
         failed["coverage"]["group_failures"] = [
@@ -206,9 +218,12 @@ class AtomicOutputTests(unittest.TestCase):
             }
         ]
         stderr = StringIO()
-        with patch("git_evidence.cli.load_collection_config", return_value={}), patch(
-            "git_evidence.cli.collect_config", return_value=failed
-        ), patch("sys.stdout", StringIO()), patch("sys.stderr", stderr):
+        with (
+            patch("git_evidence.cli.load_collection_config", return_value={}),
+            patch("git_evidence.cli.collect_config", return_value=failed),
+            patch("sys.stdout", StringIO()),
+            patch("sys.stderr", stderr),
+        ):
             status = cli_main(
                 [
                     "collect",
@@ -225,7 +240,9 @@ class AtomicOutputTests(unittest.TestCase):
 
 
 class PaginationProofValidationTests(unittest.TestCase):
-    def test_supported_paginated_sources_require_provider_specific_complete_proof(self) -> None:
+    def test_supported_paginated_sources_require_provider_specific_complete_proof(
+        self,
+    ) -> None:
         for mutation, expected_code in (
             (lambda item: item.pop("diagnostics"), "coverage.pagination_missing"),
             (
@@ -275,7 +292,7 @@ class CanaryLogBoundaryTests(unittest.TestCase):
             sensitive_repository = "repo:github:github.com:secret-owner/private-project"
             stub.write_text(
                 "#!/bin/sh\n"
-                "if [ \"$1\" = collect ]; then\n"
+                'if [ "$1" = collect ]; then\n'
                 f"  echo 'required source failed for {sensitive_repository}' >&2\n"
                 "  exit 3\n"
                 "fi\n"
@@ -327,17 +344,19 @@ providers:
 
 
 class RenderingAndPackagingTests(unittest.TestCase):
-    def test_visual_controls_are_rendered_visibly_and_actor_is_not_repeated(self) -> None:
+    def test_visual_controls_are_rendered_visibly_and_actor_is_not_repeated(
+        self,
+    ) -> None:
         bundle = load_bundle(FIXTURE)
-        bundle["facts"][0]["summary"] = "safe\u202Etxt\u200B"
+        bundle["facts"][0]["summary"] = "safe\u202etxt\u200b"
         report = render_bundle(
             bundle,
             profile="actor-summary",
             display_actor_names=True,
             actor_labels={bundle["actors"][0]["id"]: "Unique Actor Label"},
         )
-        self.assertNotIn("\u202E", report)
-        self.assertNotIn("\u200B", report)
+        self.assertNotIn("\u202e", report)
+        self.assertNotIn("\u200b", report)
         self.assertIn("U\\+202E", report)
         self.assertIn("U\\+200B", report)
         self.assertEqual(report.count("Unique Actor Label"), 1)

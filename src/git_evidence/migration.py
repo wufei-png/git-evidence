@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
-from datetime import datetime, timezone
-from typing import Any, Mapping
+from datetime import UTC, datetime
+from typing import Any
 
 from .identity import (
     CANONICALIZATION,
@@ -34,43 +35,98 @@ _ENTITY_FIELDS = {
     "repositories": {"id", "provider_id", "full_name", "name", "web_url", "extensions"},
     "actors": {"id", "provider_id", "source_id", "handle", "extensions"},
     "work_items": {
-        "id", "repository_id", "actor_id", "occurred_at", "kind", "number",
-        "title", "state", "web_url", "extensions",
+        "id",
+        "repository_id",
+        "actor_id",
+        "occurred_at",
+        "kind",
+        "number",
+        "title",
+        "state",
+        "web_url",
+        "extensions",
     },
     "change_requests": {
-        "id", "repository_id", "actor_id", "occurred_at", "kind", "number",
-        "title", "state", "merged_at", "web_url", "extensions",
+        "id",
+        "repository_id",
+        "actor_id",
+        "occurred_at",
+        "kind",
+        "number",
+        "title",
+        "state",
+        "merged_at",
+        "web_url",
+        "extensions",
     },
     "interactions": {
-        "id", "repository_id", "actor_id", "occurred_at", "kind", "subject_type",
-        "subject_id", "subject_number", "body_collected", "web_url", "extensions",
+        "id",
+        "repository_id",
+        "actor_id",
+        "occurred_at",
+        "kind",
+        "subject_type",
+        "subject_id",
+        "subject_number",
+        "body_collected",
+        "web_url",
+        "extensions",
     },
     "commits": {
-        "id", "repository_id", "actor_id", "occurred_at", "title", "sha",
-        "hash_algorithm", "web_url", "extensions",
+        "id",
+        "repository_id",
+        "actor_id",
+        "occurred_at",
+        "title",
+        "sha",
+        "hash_algorithm",
+        "web_url",
+        "extensions",
     },
     "ref_changes": {
-        "id", "repository_id", "actor_id", "occurred_at", "kind", "ref",
-        "change_association", "commit_ids", "commit_shas", "change_request_ids",
-        "evidence_ids", "web_url", "extensions",
+        "id",
+        "repository_id",
+        "actor_id",
+        "occurred_at",
+        "kind",
+        "ref",
+        "change_association",
+        "commit_ids",
+        "commit_shas",
+        "change_request_ids",
+        "evidence_ids",
+        "web_url",
+        "extensions",
     },
     "releases": {
-        "id", "repository_id", "actor_id", "occurred_at", "name", "tag",
-        "web_url", "extensions",
+        "id",
+        "repository_id",
+        "actor_id",
+        "occurred_at",
+        "name",
+        "tag",
+        "web_url",
+        "extensions",
     },
     "evidence": {
-        "id", "provider_id", "subject_type", "subject_id", "source", "url",
-        "source_ref", "extensions",
+        "id",
+        "provider_id",
+        "subject_type",
+        "subject_id",
+        "source",
+        "url",
+        "source_ref",
+        "extensions",
     },
 }
 
 
 def _utc_timestamp(value: str) -> str:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         raise MigrationError("legacy timestamps must be timezone-aware")
-    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
+    return (
+        parsed.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
     )
 
 
@@ -112,7 +168,9 @@ def _legacy_plan(bundle: Mapping[str, Any]) -> dict[str, Any]:
         provider_id = provider.get("id")
         kind = provider.get("kind")
         instance = provider.get("instance")
-        if not all(isinstance(value, str) and value for value in (provider_id, kind, instance)):
+        if not all(
+            isinstance(value, str) and value for value in (provider_id, kind, instance)
+        ):
             continue
         providers.append(
             {
@@ -122,12 +180,14 @@ def _legacy_plan(bundle: Mapping[str, Any]) -> dict[str, Any]:
             }
         )
     providers.sort(key=lambda item: (item["kind"], item["instance"]))
-    return normalize_plan({
-        "origin": "legacy_migration",
-        "window": deepcopy(run.get("window")),
-        "scope": deepcopy(run.get("scope")),
-        "providers": providers,
-    })
+    return normalize_plan(
+        {
+            "origin": "legacy_migration",
+            "window": deepcopy(run.get("window")),
+            "scope": deepcopy(run.get("scope")),
+            "providers": providers,
+        }
+    )
 
 
 def _provider_kind_indexes(
@@ -176,9 +236,7 @@ def _strict_record(
     allowed = _ENTITY_FIELDS[key]
     record = {name: deepcopy(value) for name, value in item.items() if name in allowed}
     unknown = {
-        name: deepcopy(value)
-        for name, value in item.items()
-        if name not in allowed
+        name: deepcopy(value) for name, value in item.items() if name not in allowed
     }
     if unknown:
         extensions = record.get("extensions")
@@ -201,8 +259,15 @@ def _migrate_entities(bundle: Mapping[str, Any]) -> dict[str, list[dict[str, Any
     provider_kinds, repository_kinds = _provider_kind_indexes(bundle)
     result: dict[str, list[dict[str, Any]]] = {}
     for key in (
-        "providers", "repositories", "actors", "work_items", "change_requests",
-        "interactions", "commits", "ref_changes", "releases",
+        "providers",
+        "repositories",
+        "actors",
+        "work_items",
+        "change_requests",
+        "interactions",
+        "commits",
+        "ref_changes",
+        "releases",
     ):
         records: list[dict[str, Any]] = []
         for item in bundle.get(key, []):
@@ -308,7 +373,9 @@ def _migrate_assertions(bundle: Mapping[str, Any]) -> list[dict[str, Any]]:
                 isinstance(evidence_ids, list) and bool(evidence_ids),
             )
         ):
-            raise MigrationError(f"legacy fact {legacy_id!r} cannot become a typed assertion")
+            raise MigrationError(
+                f"legacy fact {legacy_id!r} cannot become a typed assertion"
+            )
         assertion: dict[str, Any] = {
             "id": legacy_id.replace("fact:", "assertion:", 1),
             "subject_type": subject_type,
@@ -336,7 +403,9 @@ def migrate_v01_to_v02(
         raise MigrationError("only schema_version 0.1 can be migrated to 0.2")
     from .validation import validate_bundle
 
-    blockers = [issue for issue in validate_bundle(dict(bundle)) if issue.severity == "error"]
+    blockers = [
+        issue for issue in validate_bundle(dict(bundle)) if issue.severity == "error"
+    ]
     if blockers:
         raise MigrationError("legacy bundle must validate before migration")
     artifact_digest = source_artifact_digest
@@ -381,9 +450,7 @@ def migrate_v01_to_v02(
     result["plan_id"] = compute_plan_id(result["plan"])
     result["bundle_digest"] = compute_bundle_digest(result)
     target_blockers = [
-        issue
-        for issue in validate_bundle(result)
-        if issue.severity == "error"
+        issue for issue in validate_bundle(result) if issue.severity == "error"
     ]
     if target_blockers:
         codes = ", ".join(sorted({issue.code for issue in target_blockers}))

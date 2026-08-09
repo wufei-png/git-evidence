@@ -26,7 +26,9 @@ def config_for(
     }
 
 
-def repository(owner: str, name: str, *, instance: str = "github.com") -> dict[str, str]:
+def repository(
+    owner: str, name: str, *, instance: str = "github.com"
+) -> dict[str, str]:
     return {
         "provider": "github",
         "instance": instance,

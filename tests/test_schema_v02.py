@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from io import StringIO
 import json
 import tempfile
 import unittest
+from copy import deepcopy
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,18 +17,17 @@ from git_evidence.identity import (
 )
 from git_evidence.migration import MigrationError, migrate_v01_to_v02
 from git_evidence.model import load_bundle
-from git_evidence.render import render_bundle
-from git_evidence.validation import recompute_allow_publish, validate_bundle
 from git_evidence.providers.gitee import GiteeProvider
 from git_evidence.providers.github import GitHubProvider
 from git_evidence.providers.gitlab import GitLabProvider
+from git_evidence.render import render_bundle
+from git_evidence.validation import recompute_allow_publish, validate_bundle
 from tests.test_contract import (
     gitee_transport,
     github_transport,
     gitlab_transport,
     request_for,
 )
-
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "fixtures" / "example_bundle.json"
@@ -55,10 +54,14 @@ class CanonicalIdentityTests(unittest.TestCase):
         self.assertEqual(compute_plan_id(decomposed), compute_plan_id(composed))
         self.assertNotEqual(invocation_record()["id"], invocation_record()["id"])
 
-    def test_bundle_digest_sorts_canonical_collections_but_preserves_other_arrays(self) -> None:
+    def test_bundle_digest_sorts_canonical_collections_but_preserves_other_arrays(
+        self,
+    ) -> None:
         bundle = migrated_fixture()
         reversed_entities = deepcopy(bundle)
-        reversed_entities["assertions"] = list(reversed(reversed_entities["assertions"]))
+        reversed_entities["assertions"] = list(
+            reversed(reversed_entities["assertions"])
+        )
         self.assertEqual(
             compute_bundle_digest(bundle),
             compute_bundle_digest(reversed_entities),
@@ -116,7 +119,9 @@ class MigrationContractTests(unittest.TestCase):
         with self.assertRaises(MigrationError):
             migrate_v01_to_v02(
                 bundle,
-                source_artifact_digest=compute_artifact_bytes_digest(FIXTURE.read_bytes()),
+                source_artifact_digest=compute_artifact_bytes_digest(
+                    FIXTURE.read_bytes()
+                ),
                 migrated_at=MIGRATED_AT,
             )
 
@@ -128,8 +133,12 @@ class MigrationContractTests(unittest.TestCase):
             source_artifact_digest=compute_artifact_bytes_digest(FIXTURE.read_bytes()),
             migrated_at="2026-08-09T08:00:00+08:00",
         )
-        self.assertEqual(migrated["plan"]["window"]["start"], "2026-07-27T00:00:00.000000Z")
-        self.assertEqual(migrated["migration"]["migrated_at"], "2026-08-09T00:00:00.000000Z")
+        self.assertEqual(
+            migrated["plan"]["window"]["start"], "2026-07-27T00:00:00.000000Z"
+        )
+        self.assertEqual(
+            migrated["migration"]["migrated_at"], "2026-08-09T00:00:00.000000Z"
+        )
         self.assertEqual(validate_bundle(migrated), [])
 
     def test_recorded_provider_bundles_with_nullable_fields_migrate(self) -> None:
@@ -168,7 +177,9 @@ class MigrationContractTests(unittest.TestCase):
             migrated_at=MIGRATED_AT,
         )
         self.assertEqual(
-            migrated["repositories"][0]["extensions"]["github"]["legacy_fields"]["description"],
+            migrated["repositories"][0]["extensions"]["github"]["legacy_fields"][
+                "description"
+            ],
             "safe legacy metadata",
         )
         self.assertEqual(validate_bundle(migrated), [])
@@ -190,16 +201,16 @@ class StrictV02ValidationTests(unittest.TestCase):
     def test_namespaced_extensions_are_accepted_and_covered_by_digest(self) -> None:
         bundle = migrated_fixture()
         old_digest = bundle["bundle_digest"]
-        bundle["repositories"][0]["extensions"] = {
-            "github": {"database_id": 123}
-        }
+        bundle["repositories"][0]["extensions"] = {"github": {"database_id": 123}}
         self.assertTrue(recompute_allow_publish(bundle))
         self.assertNotEqual(bundle["bundle_digest"], old_digest)
         self.assertEqual(validate_bundle(bundle), [])
 
     def test_plan_and_invocation_invariants_are_recomputed(self) -> None:
         bundle = migrated_fixture()
-        bundle["plan"]["scope"]["repositories"].append("repo:github:github.com:other/project")
+        bundle["plan"]["scope"]["repositories"].append(
+            "repo:github:github.com:other/project"
+        )
         codes = {issue.code for issue in validate_bundle(bundle)}
         self.assertIn("plan.digest_mismatch", codes)
 
@@ -235,9 +246,7 @@ class StrictV02ValidationTests(unittest.TestCase):
 
         bundle = migrated_fixture()
         assertion = next(
-            item
-            for item in bundle["assertions"]
-            if item["subject_type"] == "work_item"
+            item for item in bundle["assertions"] if item["subject_type"] == "work_item"
         )
         assertion["predicate"] = "release.published.v1"
         resign(bundle)

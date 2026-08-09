@@ -116,7 +116,10 @@ class RequestTargetPolicyTests(unittest.TestCase):
             "https://ghe.example/base/api/v3/repos/example/project?access_token=foreign",
         )
         for candidate in rejected:
-            with self.subTest(candidate=candidate), self.assertRaises(ApiError) as caught:
+            with (
+                self.subTest(candidate=candidate),
+                self.assertRaises(ApiError) as caught,
+            ):
                 transport._url(candidate, None)
             self.assertEqual(caught.exception.failure_class, "request_rejected")
             self.assertNotIn("fixture-token", str(caught.exception))
@@ -143,7 +146,9 @@ class RequestTargetPolicyTests(unittest.TestCase):
                 allow_insecure_loopback=True,
             )
         with self.assertRaisesRegex(ValueError, "authenticated requests require HTTPS"):
-            UrllibTransport("https://api.example.test", "fixture-token", verify_tls=False)
+            UrllibTransport(
+                "https://api.example.test", "fixture-token", verify_tls=False
+            )
         with self.assertRaisesRegex(ValueError, "explicit credentialless loopback"):
             UrllibTransport("http://127.0.0.1:8080/api")
         with self.assertRaisesRegex(ValueError, "explicit credentialless loopback"):
@@ -189,7 +194,9 @@ class RequestTargetPolicyTests(unittest.TestCase):
             )
         )
 
-    def test_insecure_loopback_bundle_is_diagnostic_and_not_render_eligible(self) -> None:
+    def test_insecure_loopback_bundle_is_diagnostic_and_not_render_eligible(
+        self,
+    ) -> None:
         transport = UrllibTransport(
             "http://127.0.0.1:8080/api",
             allow_insecure_loopback=True,
@@ -230,7 +237,9 @@ class RequestTargetPolicyTests(unittest.TestCase):
             )
         )
 
-    def test_diagnostic_transport_markers_directly_block_validation_and_rendering(self) -> None:
+    def test_diagnostic_transport_markers_directly_block_validation_and_rendering(
+        self,
+    ) -> None:
         for nested in (False, True):
             with self.subTest(nested=nested):
                 bundle = load_bundle(FIXTURE)
@@ -238,7 +247,9 @@ class RequestTargetPolicyTests(unittest.TestCase):
                     "group_status": "diagnostic_insecure_transport",
                     "metrics": {"insecure_transport": True},
                 }
-                bundle["collection"] = {"groups": [diagnostic]} if nested else diagnostic
+                bundle["collection"] = (
+                    {"groups": [diagnostic]} if nested else diagnostic
+                )
                 bundle["coverage"]["allow_publish"] = True
                 self.assertIn(
                     "collection.insecure_transport",
@@ -364,8 +375,16 @@ class RequestTargetPolicyTests(unittest.TestCase):
 
     def test_provider_auth_styles_follow_only_their_actual_api_boundary(self) -> None:
         cases = (
-            (GitHubProvider(token="fixture-token"), "https://api.github.com", "Authorization"),
-            (GitLabProvider(token="fixture-token"), "https://gitlab.com/api/v4", "Private-token"),
+            (
+                GitHubProvider(token="fixture-token"),
+                "https://api.github.com",
+                "Authorization",
+            ),
+            (
+                GitLabProvider(token="fixture-token"),
+                "https://gitlab.com/api/v4",
+                "Private-token",
+            ),
             (GiteeProvider(token="fixture-token"), "https://gitee.com/api/v5", None),
         )
         for provider, api_base, header_name in cases:

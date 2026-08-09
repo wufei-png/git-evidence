@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_ROOT = ROOT / "src" / "git_evidence" / "schemas"
 LEGACY_DUPLICATE_ROOT = ROOT / "schemas"
@@ -15,7 +14,9 @@ def main() -> int:
         "evidence-bundle-0.1.schema.json",
         "evidence-bundle-0.2.schema.json",
     }:
-        raise SystemExit("authoritative package must contain exactly the 0.1 and 0.2 Schemas")
+        raise SystemExit(
+            "authoritative package must contain exactly the 0.1 and 0.2 Schemas"
+        )
     duplicate_paths = list(LEGACY_DUPLICATE_ROOT.glob("evidence-bundle-*.schema.json"))
     if duplicate_paths:
         raise SystemExit("Schema copies outside src/git_evidence/schemas are forbidden")

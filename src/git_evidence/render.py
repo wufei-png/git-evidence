@@ -72,14 +72,15 @@ def _escape_text(value: Any) -> str:
         0xFEFF,
     }
     text = "".join(
-        f"U+{ord(character):04X}"
-        if ord(character) in visual_controls
-        else character
+        f"U+{ord(character):04X}" if ord(character) in visual_controls else character
         for character in text
     )
     text = html_escape(text, quote=False)
     markdown_punctuation = r"\\`*_[\]{}()#+\-.!|>"
-    return "".join(f"\\{character}" if character in markdown_punctuation else character for character in text)
+    return "".join(
+        f"\\{character}" if character in markdown_punctuation else character
+        for character in text
+    )
 
 
 def _link(label: str, url: str) -> str:
@@ -95,14 +96,18 @@ def _actor_labels(
     actor_labels: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     labels = LABELS[language]
-    actors = sorted(collection(bundle, "actors"), key=lambda item: str(item.get("id", "")))
+    actors = sorted(
+        collection(bundle, "actors"), key=lambda item: str(item.get("id", ""))
+    )
     result: dict[str, str] = {}
     anonymous_number = 0
     for actor in actors:
         actor_id = actor.get("id")
         if not actor_id:
             continue
-        display = actor_labels.get(actor_id) if display_actor_names and actor_labels else None
+        display = (
+            actor_labels.get(actor_id) if display_actor_names and actor_labels else None
+        )
         if isinstance(display, str) and display.strip():
             result[actor_id] = _escape_text(display)
             continue
@@ -112,9 +117,17 @@ def _actor_labels(
     return result
 
 
-def _indexes(bundle: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    repositories = {item["id"]: item for item in collection(bundle, "repositories") if item.get("id")}
-    evidence = {item["id"]: item for item in collection(bundle, "evidence") if item.get("id")}
+def _indexes(
+    bundle: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    repositories = {
+        item["id"]: item
+        for item in collection(bundle, "repositories")
+        if item.get("id")
+    }
+    evidence = {
+        item["id"]: item for item in collection(bundle, "evidence") if item.get("id")
+    }
     return repositories, evidence
 
 
@@ -191,7 +204,12 @@ def _fact_line(
     allow_source_urls: bool = True,
     include_actor: bool = True,
 ) -> str:
-    summary = _escape_text(fact.get("summary") or fact.get("title") or fact.get("kind") or "verified activity")
+    summary = _escape_text(
+        fact.get("summary")
+        or fact.get("title")
+        or fact.get("kind")
+        or "verified activity"
+    )
     actor_id = fact.get("actor_id")
     actor = actor_labels.get(actor_id) if actor_id else None
     if actor and include_actor:
@@ -224,7 +242,9 @@ def _render_coverage(bundle: dict[str, Any], language: str) -> list[str]:
         status = _escape_text(observation.get("status") or "unknown")
         note = _escape_text(observation.get("note") or "")
         provider_id = _escape_text(observation.get("provider_id") or "unknown-provider")
-        repository_id = _escape_text(observation.get("repository_id") or "unknown-repository")
+        repository_id = _escape_text(
+            observation.get("repository_id") or "unknown-repository"
+        )
         lines.append(
             f"- {source}: **{status}** — provider={provider_id}; repository={repository_id}"
             + (f" — {note}" if note else "")
@@ -240,15 +260,23 @@ def _render_coverage(bundle: dict[str, Any], language: str) -> list[str]:
             source = _escape_text(warning.get("source") or "unknown")
             status = _escape_text(warning.get("status") or "unknown")
             provider_id = _escape_text(warning.get("provider_id") or "unknown-provider")
-            repository_id = _escape_text(warning.get("repository_id") or "unknown-repository")
+            repository_id = _escape_text(
+                warning.get("repository_id") or "unknown-repository"
+            )
             code = _escape_text(warning.get("code") or "coverage_warning")
-            message = _escape_text(warning.get("message") or "optional source is not complete")
+            message = _escape_text(
+                warning.get("message") or "optional source is not complete"
+            )
             failure_class = warning.get("failure_class")
             if not failure_class and isinstance(warning.get("failure_classes"), list):
                 failure_class = ", ".join(
-                    str(value) for value in warning["failure_classes"] if isinstance(value, str)
+                    str(value)
+                    for value in warning["failure_classes"]
+                    if isinstance(value, str)
                 )
-            failure = f"; failure={_escape_text(failure_class)}" if failure_class else ""
+            failure = (
+                f"; failure={_escape_text(failure_class)}" if failure_class else ""
+            )
             lines.append(
                 f"- **{code}** — {source}: **{status}** — "
                 f"provider={provider_id}; repository={repository_id} — {message}{failure}"
@@ -256,14 +284,20 @@ def _render_coverage(bundle: dict[str, Any], language: str) -> list[str]:
     return lines
 
 
-def _render_metadata(
-    bundle: dict[str, Any], profile: str, language: str
-) -> list[str]:
+def _render_metadata(bundle: dict[str, Any], profile: str, language: str) -> list[str]:
     if bundle.get("schema_version") != "0.2":
         return []
-    invocation = bundle.get("invocation") if isinstance(bundle.get("invocation"), dict) else {}
-    generator = invocation.get("generator") if isinstance(invocation.get("generator"), dict) else {}
-    generator_text = f"{generator.get('name', 'unknown')}/{generator.get('version', 'unknown')}"
+    invocation = (
+        bundle.get("invocation") if isinstance(bundle.get("invocation"), dict) else {}
+    )
+    generator = (
+        invocation.get("generator")
+        if isinstance(invocation.get("generator"), dict)
+        else {}
+    )
+    generator_text = (
+        f"{generator.get('name', 'unknown')}/{generator.get('version', 'unknown')}"
+    )
     if generator.get("commit"):
         generator_text += f"@{generator['commit']}"
     return [
@@ -287,7 +321,9 @@ def _render_evidence_index(
     *,
     allow_source_urls: bool,
 ) -> list[str]:
-    items = sorted(collection(bundle, "evidence"), key=lambda item: str(item.get("id", "")))
+    items = sorted(
+        collection(bundle, "evidence"), key=lambda item: str(item.get("id", ""))
+    )
     if not items:
         return []
     retrievals = {
@@ -300,9 +336,19 @@ def _render_evidence_index(
         evidence_id = str(item.get("id") or "")
         number = evidence_numbers[evidence_id]
         retrieval = retrievals.get(item.get("retrieval_id"), {})
-        native = item.get("native_identity") if isinstance(item.get("native_identity"), dict) else {}
-        native_text = native.get("value") if native.get("state") == "known" else native.get("reason", "unavailable")
-        source_ref = item.get("source_ref") or retrieval.get("target_ref") or "unavailable"
+        native = (
+            item.get("native_identity")
+            if isinstance(item.get("native_identity"), dict)
+            else {}
+        )
+        native_text = (
+            native.get("value")
+            if native.get("state") == "known"
+            else native.get("reason", "unavailable")
+        )
+        source_ref = (
+            item.get("source_ref") or retrieval.get("target_ref") or "unavailable"
+        )
         if not allow_source_urls and "://" in str(source_ref):
             source_ref = "[hidden]"
         retrieval_detail = "; ".join(
@@ -342,9 +388,13 @@ def render_bundle(
 ) -> str:
     """Render a validated bundle using a deterministic built-in profile."""
     if profile not in PROFILES:
-        raise RenderError(f"unknown profile: {profile}; choose from {', '.join(PROFILES)}")
+        raise RenderError(
+            f"unknown profile: {profile}; choose from {', '.join(PROFILES)}"
+        )
     if language not in LANGUAGES:
-        raise RenderError(f"unknown language: {language}; choose from {', '.join(LANGUAGES)}")
+        raise RenderError(
+            f"unknown language: {language}; choose from {', '.join(LANGUAGES)}"
+        )
     issues = validate_bundle(bundle)
     blocking_issues = [issue for issue in issues if issue.severity == "error"]
     if blocking_issues:
@@ -365,7 +415,9 @@ def render_bundle(
         actor_labels=actor_labels,
     )
     facts = sorted(_renderable_claims(bundle), key=_fact_sort_key)
-    run_or_plan = bundle["plan"] if bundle.get("schema_version") == "0.2" else bundle["run"]
+    run_or_plan = (
+        bundle["plan"] if bundle.get("schema_version") == "0.2" else bundle["run"]
+    )
     window = run_or_plan["window"]
     lines = [
         f"# {labels['title']}",
@@ -402,7 +454,9 @@ def render_bundle(
         for fact in facts:
             grouped[str(fact.get("actor_id") or "anonymous")].append(fact)
         for actor_id in sorted(grouped):
-            lines.append(f"### {rendered_actor_labels.get(actor_id, labels['anonymous'])}")
+            lines.append(
+                f"### {rendered_actor_labels.get(actor_id, labels['anonymous'])}"
+            )
             lines.append("")
             for fact in grouped[actor_id]:
                 lines.append(
@@ -428,7 +482,9 @@ def render_bundle(
                 other_facts.append(fact)
 
         if profile == "release-focused":
-            release_facts = [fact for fact in facts if str(fact.get("section")) == "release"]
+            release_facts = [
+                fact for fact in facts if str(fact.get("section")) == "release"
+            ]
             lines.extend([f"## {labels['releases']}", ""])
             for fact in release_facts:
                 lines.append(
@@ -445,14 +501,23 @@ def render_bundle(
                 lines.append(f"- {labels['no_releases']}")
             lines.append("")
 
-        heading = labels["projects"] if profile == "project-first" else labels["project_activity"]
+        heading = (
+            labels["projects"]
+            if profile == "project-first"
+            else labels["project_activity"]
+        )
         lines.extend([f"## {heading}", ""])
         for repository_id in sorted(project_facts):
             repository = repositories[repository_id]
-            name = _escape_text(repository.get("full_name") or repository.get("name") or repository_id)
+            name = _escape_text(
+                repository.get("full_name") or repository.get("name") or repository_id
+            )
             lines.extend([f"### {name}", ""])
             for fact in project_facts[repository_id]:
-                if profile == "release-focused" and str(fact.get("section")) == "release":
+                if (
+                    profile == "release-focused"
+                    and str(fact.get("section")) == "release"
+                ):
                     continue
                 lines.append(
                     _fact_line(

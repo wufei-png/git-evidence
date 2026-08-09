@@ -19,17 +19,17 @@ from .gitlab import GitLabProvider
 
 __all__ = [
     "ACTIVITY_SOURCES",
+    "PROVIDER_REGISTRY",
     "RESOURCE_SOURCES",
     "CollectionRequest",
-    "GiteeProvider",
     "GitHubProvider",
     "GitLabProvider",
+    "GiteeProvider",
     "ProviderDescriptor",
     "ProviderNotReady",
     "ProviderRegistration",
     "ProviderRegistry",
     "ProviderRegistryError",
-    "PROVIDER_REGISTRY",
     "RepositoryTarget",
     "provider_catalog",
 ]

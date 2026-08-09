@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +15,6 @@ from git_evidence.privacy import sanitize_public_url
 from git_evidence.providers import PROVIDER_REGISTRY, ProviderRegistryError
 from git_evidence.render import render_bundle
 from git_evidence.validation import validate_bundle
-
 
 FIXTURE = ROOT / "fixtures" / "example_bundle.json"
 
@@ -62,7 +61,10 @@ report:
         with tempfile.TemporaryDirectory() as directory:
             first = Path(directory) / "collection.yml"
             first.write_text(collection_valid_report_invalid, encoding="utf-8")
-            self.assertEqual(load_collection_config(first)["scope"]["repositories"][0]["provider"], "github")
+            self.assertEqual(
+                load_collection_config(first)["scope"]["repositories"][0]["provider"],
+                "github",
+            )
             with self.assertRaises(ConfigError):
                 load_report_config(first)
 
@@ -94,7 +96,9 @@ report:
             sanitize_public_url(unsafe_url),
             "https://example.test/issues/7?view=full#comment-1",
         )
-        self.assertTrue(any(issue.code == "privacy.auth_url" for issue in validate_bundle(unsafe)))
+        self.assertTrue(
+            any(issue.code == "privacy.auth_url" for issue in validate_bundle(unsafe))
+        )
         with self.assertRaises(ValueError):
             render_bundle(unsafe)
 

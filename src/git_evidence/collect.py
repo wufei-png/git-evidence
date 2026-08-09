@@ -61,9 +61,11 @@ def _timestamp_text(value: Any, field: str) -> str:
     if isinstance(value, datetime):
         if value.tzinfo is None:
             raise CollectionError(f"{field} must include a timezone")
-        return value.astimezone(UTC).isoformat(
-            timespec="microseconds"
-        ).replace("+00:00", "Z")
+        return (
+            value.astimezone(UTC)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z")
+        )
     if isinstance(value, str) and value:
         try:
             parsed = datetime.fromisoformat(value)
@@ -71,9 +73,11 @@ def _timestamp_text(value: Any, field: str) -> str:
             raise CollectionError(f"{field} must be a valid timestamp") from exc
         if parsed.tzinfo is None:
             raise CollectionError(f"{field} must include a timezone")
-        return parsed.astimezone(UTC).isoformat(
-            timespec="microseconds"
-        ).replace("+00:00", "Z")
+        return (
+            parsed.astimezone(UTC)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z")
+        )
     raise CollectionError(f"{field} must be a non-empty timestamp")
 
 
@@ -100,12 +104,18 @@ def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
         seen_ids: set[str] = set()
         for position, item in enumerate(value):
             if not isinstance(item, dict):
-                raise ResponseShapeError(f"provider bundle {key}[{position}] must be an object")
+                raise ResponseShapeError(
+                    f"provider bundle {key}[{position}] must be an object"
+                )
             entity_id = item.get("id")
             if not isinstance(entity_id, str) or not entity_id.strip():
-                raise ResponseShapeError(f"provider bundle {key}[{position}] is missing a non-empty id")
+                raise ResponseShapeError(
+                    f"provider bundle {key}[{position}] is missing a non-empty id"
+                )
             if entity_id in seen_ids:
-                raise ResponseShapeError(f"provider bundle {key} contains duplicate id: {entity_id}")
+                raise ResponseShapeError(
+                    f"provider bundle {key} contains duplicate id: {entity_id}"
+                )
             seen_ids.add(entity_id)
 
     coverage = bundle.get("coverage")
@@ -114,9 +124,15 @@ def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
     if isinstance(coverage, dict):
         for key in ("required_sources", "observations", "fatal", "group_failures"):
             if key in coverage and not isinstance(coverage[key], list):
-                raise ResponseShapeError(f"provider bundle coverage.{key} must be an array")
-        if "allow_publish" in coverage and not isinstance(coverage["allow_publish"], bool):
-            raise ResponseShapeError("provider bundle coverage.allow_publish must be boolean")
+                raise ResponseShapeError(
+                    f"provider bundle coverage.{key} must be an array"
+                )
+        if "allow_publish" in coverage and not isinstance(
+            coverage["allow_publish"], bool
+        ):
+            raise ResponseShapeError(
+                "provider bundle coverage.allow_publish must be boolean"
+            )
 
     collection = bundle.get("collection")
     if collection is not None and not isinstance(collection, dict):
@@ -124,10 +140,18 @@ def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
     if isinstance(collection, dict):
         for key in ("groups",):
             if key in collection and not isinstance(collection[key], list):
-                raise ResponseShapeError(f"provider bundle collection.{key} must be an array")
+                raise ResponseShapeError(
+                    f"provider bundle collection.{key} must be an array"
+                )
         for key in ("limits", "metrics", "group"):
-            if key in collection and collection[key] is not None and not isinstance(collection[key], dict):
-                raise ResponseShapeError(f"provider bundle collection.{key} must be an object")
+            if (
+                key in collection
+                and collection[key] is not None
+                and not isinstance(collection[key], dict)
+            ):
+                raise ResponseShapeError(
+                    f"provider bundle collection.{key} must be an object"
+                )
 
     retrievals = {
         item.get("id"): item
@@ -152,7 +176,9 @@ def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
     }
     for category, subject_type in subject_types.items():
         for entity in bundle.get(category, []):
-            if not isinstance(entity, dict) or not isinstance(entity.get("occurred_at"), str):
+            if not isinstance(entity, dict) or not isinstance(
+                entity.get("occurred_at"), str
+            ):
                 # Actor-filtered structural parents intentionally carry no claim/evidence.
                 continue
             subject_id = entity.get("id")
@@ -190,12 +216,15 @@ def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
         for issue in validation_issues
         if issue.severity == "error"
         and not issue.code.startswith("coverage.")
-        and issue.code not in {"collection.insecure_transport", "collection.limit_exceeded"}
+        and issue.code
+        not in {"collection.insecure_transport", "collection.limit_exceeded"}
         and not (issue.code == "scope.repository_missing" and group_failures)
     ]
     if hard_issues:
         details = "; ".join(issue.code for issue in hard_issues[:4])
-        raise ResponseShapeError(f"provider bundle semantic validation failed: {details}")
+        raise ResponseShapeError(
+            f"provider bundle semantic validation failed: {details}"
+        )
     return bundle
 
 
@@ -216,7 +245,9 @@ def _failed_group_bundle(
     observations: list[dict[str, Any]] = []
     fatal: list[dict[str, Any]] = []
     group_failures: list[dict[str, Any]] = []
-    capabilities = {source: "incomplete" for source in (*RESOURCE_SOURCES, *ACTIVITY_SOURCES)}
+    capabilities = {
+        source: "incomplete" for source in (*RESOURCE_SOURCES, *ACTIVITY_SOURCES)
+    }
     for target in targets:
         for source in (*RESOURCE_SOURCES, *ACTIVITY_SOURCES):
             diagnostics = {
@@ -261,12 +292,14 @@ def _failed_group_bundle(
                 "actors": actor_ids,
             },
         },
-        "providers": [{
-            "id": provider_id,
-            "kind": kind,
-            "instance": instance,
-            "capabilities": capabilities,
-        }],
+        "providers": [
+            {
+                "id": provider_id,
+                "kind": kind,
+                "instance": instance,
+                "capabilities": capabilities,
+            }
+        ],
         "repositories": [],
         "actors": [],
         "work_items": [],
@@ -293,7 +326,9 @@ def _failed_group_bundle(
                     "retry_after_max_seconds",
                 )
             },
-            "metrics": empty_transport_metrics(cache_enabled=bool(runtime["cache_enabled"])),
+            "metrics": empty_transport_metrics(
+                cache_enabled=bool(runtime["cache_enabled"])
+            ),
         },
         "privacy": {
             "actor_display": "anonymous",
@@ -317,18 +352,38 @@ def _bundle_group_identity(bundle: dict[str, Any]) -> tuple[str, str, list[str]]
         provider = collection.get("provider")
         instance = collection.get("instance")
         if isinstance(provider, str) and isinstance(instance, str):
-            scope = (bundle.get("run") or {}).get("scope") if isinstance(bundle.get("run"), dict) else {}
-            repositories = scope.get("repositories", []) if isinstance(scope, dict) else []
-            return provider, instance, [item for item in repositories if isinstance(item, str)]
+            scope = (
+                (bundle.get("run") or {}).get("scope")
+                if isinstance(bundle.get("run"), dict)
+                else {}
+            )
+            repositories = (
+                scope.get("repositories", []) if isinstance(scope, dict) else []
+            )
+            return (
+                provider,
+                instance,
+                [item for item in repositories if isinstance(item, str)],
+            )
     providers = bundle.get("providers")
     if isinstance(providers, list) and providers and isinstance(providers[0], dict):
         provider = providers[0]
         kind = provider.get("kind")
         instance = provider.get("instance")
         if isinstance(kind, str) and isinstance(instance, str):
-            scope = (bundle.get("run") or {}).get("scope") if isinstance(bundle.get("run"), dict) else {}
-            repositories = scope.get("repositories", []) if isinstance(scope, dict) else []
-            return kind, instance, [item for item in repositories if isinstance(item, str)]
+            scope = (
+                (bundle.get("run") or {}).get("scope")
+                if isinstance(bundle.get("run"), dict)
+                else {}
+            )
+            repositories = (
+                scope.get("repositories", []) if isinstance(scope, dict) else []
+            )
+            return (
+                kind,
+                instance,
+                [item for item in repositories if isinstance(item, str)],
+            )
     return "unknown", "unknown", []
 
 
@@ -394,8 +449,14 @@ def _record_merge_failure(
     provider, instance, scoped_repositories = _bundle_group_identity(bundle)
     repository = item.get("repository_id") if isinstance(item, dict) else None
     if not isinstance(repository, str) or not repository:
-        repository = scoped_repositories[0] if scoped_repositories else "unknown-repository"
-    source = source_category if source_category in (*RESOURCE_SOURCES, *ACTIVITY_SOURCES) else "repositories"
+        repository = (
+            scoped_repositories[0] if scoped_repositories else "unknown-repository"
+        )
+    source = (
+        source_category
+        if source_category in (*RESOURCE_SOURCES, *ACTIVITY_SOURCES)
+        else "repositories"
+    )
     provider_id = f"provider:{provider}:{instance}"
     failure = {
         "provider": provider,
@@ -420,7 +481,11 @@ def _record_merge_failure(
             "provider_id": provider_id,
             "repository_id": repository,
             "status": "incomplete",
-            "diagnostics": {"failure_class": "malformed_response", "group_failure": True, "reason": reason},
+            "diagnostics": {
+                "failure_class": "malformed_response",
+                "group_failure": True,
+                "reason": reason,
+            },
         }
         merged["coverage"]["observations"].append(observation)
         append_optional_coverage_warning(merged["coverage"], observation)
@@ -434,7 +499,11 @@ def _record_merge_failure(
             if isinstance(diagnostics, dict):
                 merge_diagnostics(
                     diagnostics,
-                    {"failure_class": "malformed_response", "group_failure": True, "reason": reason},
+                    {
+                        "failure_class": "malformed_response",
+                        "group_failure": True,
+                        "reason": reason,
+                    },
                 )
             append_optional_coverage_warning(merged["coverage"], observation)
     if source in RESOURCE_SOURCES:
@@ -524,17 +593,22 @@ def _merge_bundles(
     seen: dict[str, set[str]] = {key: set() for key in collection_keys}
     provider_gate_blocked = False
     aggregate_limit_exceeded = False
-    estimated_size = json_size_with_limit(
-        merged,
-        max_bytes=MAX_BUNDLE_BYTES - 1,
-    ) + 1
+    estimated_size = (
+        json_size_with_limit(
+            merged,
+            max_bytes=MAX_BUNDLE_BYTES - 1,
+        )
+        + 1
+    )
     for bundle in bundles:
         coverage = bundle.get("coverage") or {}
         if not _provider_bundle_has_complete_core_coverage(bundle):
             provider_gate_blocked = True
         merged["coverage"]["observations"].extend(coverage.get("observations") or [])
         merged["coverage"]["fatal"].extend(coverage.get("fatal") or [])
-        merged["coverage"]["group_failures"].extend(coverage.get("group_failures") or [])
+        merged["coverage"]["group_failures"].extend(
+            coverage.get("group_failures") or []
+        )
         if isinstance(coverage.get("warnings"), list):
             for item in coverage["warnings"]:
                 if isinstance(item, dict):
@@ -546,32 +620,51 @@ def _merge_bundles(
                 group = {
                     key: value
                     for key, value in collection.items()
-                    if key in {"provider", "instance", "group_status", "failure_class", "limits", "metrics"}
+                    if key
+                    in {
+                        "provider",
+                        "instance",
+                        "group_status",
+                        "failure_class",
+                        "limits",
+                        "metrics",
+                    }
                 }
             if group:
                 merged["collection"]["groups"].append(group)
             incoming_metrics = collection.get("metrics")
             if isinstance(incoming_metrics, dict):
                 aggregate = merged["collection"]["metrics"]
-                for key in ("request_count", "page_count", "retry_count", "cache_hits", "cache_misses"):
+                for key in (
+                    "request_count",
+                    "page_count",
+                    "retry_count",
+                    "cache_hits",
+                    "cache_misses",
+                ):
                     value = incoming_metrics.get(key)
                     if isinstance(value, int) and value >= 0:
                         aggregate[key] += value
                 aggregate["budget_exhausted"] = bool(
-                    aggregate["budget_exhausted"] or incoming_metrics.get("budget_exhausted", False)
+                    aggregate["budget_exhausted"]
+                    or incoming_metrics.get("budget_exhausted", False)
                 )
                 aggregate["cache_enabled"] = bool(
-                    aggregate["cache_enabled"] or incoming_metrics.get("cache_enabled", False)
+                    aggregate["cache_enabled"]
+                    or incoming_metrics.get("cache_enabled", False)
                 )
                 aggregate["insecure_transport"] = bool(
                     aggregate["insecure_transport"]
                     or incoming_metrics.get("insecure_transport", False)
                 )
         try:
-            estimated_size = json_size_with_limit(
-                merged,
-                max_bytes=MAX_BUNDLE_BYTES - 1,
-            ) + 1
+            estimated_size = (
+                json_size_with_limit(
+                    merged,
+                    max_bytes=MAX_BUNDLE_BYTES - 1,
+                )
+                + 1
+            )
         except (InputLimitError, TypeError, ValueError):
             aggregate_limit_exceeded = True
         for key in collection_keys:
@@ -580,26 +673,39 @@ def _merge_bundles(
                     continue
                 entity_id = item.get("id") if isinstance(item, dict) else None
                 if not isinstance(entity_id, str) or not entity_id.strip():
-                    _record_merge_failure(merged, bundle, key, item, "record is missing a non-empty id")
+                    _record_merge_failure(
+                        merged, bundle, key, item, "record is missing a non-empty id"
+                    )
                     try:
-                        estimated_size = json_size_with_limit(
-                            merged,
-                            max_bytes=MAX_BUNDLE_BYTES - 1,
-                        ) + 1
+                        estimated_size = (
+                            json_size_with_limit(
+                                merged,
+                                max_bytes=MAX_BUNDLE_BYTES - 1,
+                            )
+                            + 1
+                        )
                     except (InputLimitError, TypeError, ValueError):
                         aggregate_limit_exceeded = True
                     continue
                 if entity_id in seen[key]:
-                    _record_merge_failure(merged, bundle, key, item, f"duplicate record id: {entity_id}")
+                    _record_merge_failure(
+                        merged, bundle, key, item, f"duplicate record id: {entity_id}"
+                    )
                     try:
-                        estimated_size = json_size_with_limit(
-                            merged,
-                            max_bytes=MAX_BUNDLE_BYTES - 1,
-                        ) + 1
+                        estimated_size = (
+                            json_size_with_limit(
+                                merged,
+                                max_bytes=MAX_BUNDLE_BYTES - 1,
+                            )
+                            + 1
+                        )
                     except (InputLimitError, TypeError, ValueError):
                         aggregate_limit_exceeded = True
                     continue
-                if sum(len(merged[name]) for name in collection_keys) >= MAX_NORMALIZED_ENTITIES:
+                if (
+                    sum(len(merged[name]) for name in collection_keys)
+                    >= MAX_NORMALIZED_ENTITIES
+                ):
                     aggregate_limit_exceeded = True
                     continue
                 seen[key].add(entity_id)
@@ -608,10 +714,13 @@ def _merge_bundles(
                 if estimated_size <= MAX_BUNDLE_BYTES:
                     continue
                 try:
-                    estimated_size = json_size_with_limit(
-                        merged,
-                        max_bytes=MAX_BUNDLE_BYTES - 1,
-                    ) + 1
+                    estimated_size = (
+                        json_size_with_limit(
+                            merged,
+                            max_bytes=MAX_BUNDLE_BYTES - 1,
+                        )
+                        + 1
+                    )
                 except (InputLimitError, TypeError, ValueError):
                     merged[key].pop()
                     seen[key].remove(entity_id)
@@ -624,7 +733,9 @@ def _merge_bundles(
         or has_blocking_core_coverage(
             merged["coverage"],
             repository_ids=repository_ids,
-            provider_ids_by_repository=_provider_ids_by_repository(merged, repository_ids),
+            provider_ids_by_repository=_provider_ids_by_repository(
+                merged, repository_ids
+            ),
         )
     )
     try:
@@ -671,16 +782,26 @@ def _collection_plan(
                 "instance": instance,
                 "selected_sources": selected_sources,
                 "options": {
-                    "include_activity_api": bool(configured.get("include_activity_api", False)),
+                    "include_activity_api": bool(
+                        configured.get("include_activity_api", False)
+                    ),
                     "verify_tls": bool(configured.get("verify_tls", True)),
-                    "allow_insecure_loopback": bool(configured.get("allow_insecure_loopback", False)),
+                    "allow_insecure_loopback": bool(
+                        configured.get("allow_insecure_loopback", False)
+                    ),
                     **{
                         key: runtime[key]
                         for key in (
-                            "timeout_seconds", "max_retries", "max_pages", "max_requests",
-                            "retry_backoff_seconds", "retry_jitter_seconds",
-                            "retry_after_max_seconds", "cache_enabled",
-                            "cache_ttl_seconds", "cache_max_entries",
+                            "timeout_seconds",
+                            "max_retries",
+                            "max_pages",
+                            "max_requests",
+                            "retry_backoff_seconds",
+                            "retry_jitter_seconds",
+                            "retry_after_max_seconds",
+                            "cache_enabled",
+                            "cache_ttl_seconds",
+                            "cache_max_entries",
                         )
                     },
                 },
@@ -724,9 +845,17 @@ def _finalize_v02(
         **{
             key: merged.get(key, [])
             for key in (
-                "providers", "repositories", "actors", "work_items",
-                "change_requests", "interactions", "commits", "ref_changes",
-                "releases", "retrievals", "evidence",
+                "providers",
+                "repositories",
+                "actors",
+                "work_items",
+                "change_requests",
+                "interactions",
+                "commits",
+                "ref_changes",
+                "releases",
+                "retrievals",
+                "evidence",
             )
         },
         "assertions": [],
@@ -750,10 +879,10 @@ def _finalize_v02(
         }
     ]
     if blockers:
-        codes = ", ".join(
-            sorted({f"{issue.code}@{issue.path}" for issue in blockers})
+        codes = ", ".join(sorted({f"{issue.code}@{issue.path}" for issue in blockers}))
+        raise CollectionError(
+            f"collector produced an invalid schema 0.2 bundle: {codes}"
         )
-        raise CollectionError(f"collector produced an invalid schema 0.2 bundle: {codes}")
     return result
 
 
@@ -776,7 +905,9 @@ def collect_config(
     if not isinstance(repositories, list) or not repositories:
         raise CollectionError("scope.repositories must be a non-empty allowlist")
     actor_ids = scope.get("actors", [])
-    if not isinstance(actor_ids, list) or not all(isinstance(value, str) and value for value in actor_ids):
+    if not isinstance(actor_ids, list) or not all(
+        isinstance(value, str) and value for value in actor_ids
+    ):
         raise CollectionError("scope.actors must be an array of non-empty actor IDs")
     if len(actor_ids) != len(set(actor_ids)):
         raise CollectionError("scope.actors must not contain duplicate actor IDs")
@@ -794,8 +925,12 @@ def collect_config(
         instance = item.get("instance")
         owner = item.get("owner")
         name = item.get("name")
-        if not all(isinstance(value, str) and value for value in (kind, instance, owner, name)):
-            raise CollectionError(f"scope.repositories[{index}] has incomplete provider target")
+        if not all(
+            isinstance(value, str) and value for value in (kind, instance, owner, name)
+        ):
+            raise CollectionError(
+                f"scope.repositories[{index}] has incomplete provider target"
+            )
         if not PROVIDER_REGISTRY.contains(kind):
             raise CollectionError(f"unsupported provider: {kind}")
         provider_config = provider_configs.get(kind)
@@ -805,18 +940,24 @@ def collect_config(
         grouped[group_key].append(RepositoryTarget(kind, instance, owner, name))
         provider_options[group_key] = provider_config
         try:
-            provider_runtime[group_key] = provider_runtime_options(kind, provider_config)
+            provider_runtime[group_key] = provider_runtime_options(
+                kind, provider_config
+            )
         except ValueError as exc:
             raise CollectionError(str(exc)) from exc
 
     collected: list[dict[str, Any]] = []
-    group_plans: list[tuple[tuple[str, str], list[RepositoryTarget], dict[str, Any], str | None]] = []
+    group_plans: list[
+        tuple[tuple[str, str], list[RepositoryTarget], dict[str, Any], str | None]
+    ] = []
     for group_key, targets in sorted(grouped.items()):
         kind, instance = group_key
         options = provider_options[group_key]
         token_env = options.get("token_env")
         if token_env is not None and (not isinstance(token_env, str) or not token_env):
-            raise CollectionError(f"providers.{kind}.token_env must be a non-empty string")
+            raise CollectionError(
+                f"providers.{kind}.token_env must be a non-empty string"
+            )
         token = os.environ.get(token_env) if token_env else None
         if token_env and not token:
             raise CollectionError(
@@ -855,7 +996,7 @@ def collect_config(
             collected.append(_validate_provider_bundle_shape(provider.collect(request)))
         except CollectionError:
             raise
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - isolate one provider-instance group
             collected.append(
                 _failed_group_bundle(
                     kind=kind,
@@ -871,7 +1012,9 @@ def collect_config(
             )
 
     repository_ids = [
-        RepositoryTarget(item["provider"], item["instance"], item["owner"], item["name"]).canonical_id
+        RepositoryTarget(
+            item["provider"], item["instance"], item["owner"], item["name"]
+        ).canonical_id
         for item in repositories
     ]
     plan = _collection_plan(

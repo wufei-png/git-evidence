@@ -13,13 +13,13 @@ from test_contract import (
     request_for,
 )
 
+from git_evidence.privacy import PrivacyError
 from git_evidence.providers.base import CollectionRequest, RepositoryTarget
 from git_evidence.providers.gitee import GiteeProvider
 from git_evidence.providers.github import GitHubProvider
 from git_evidence.providers.gitlab import GitLabProvider
 from git_evidence.providers.resource_base import SourceResult
 from git_evidence.providers.transport import ApiError, ApiResponse, MappingTransport
-from git_evidence.privacy import PrivacyError
 
 
 def response(
@@ -109,9 +109,7 @@ def large_first_page_transport() -> MappingTransport:
             "title": f"issue {index}",
             "state": "open",
             "updated_at": (
-                "2026-07-28T00:00:00Z"
-                if index == 1
-                else "2020-01-01T00:00:00Z"
+                "2026-07-28T00:00:00Z" if index == 1 else "2020-01-01T00:00:00Z"
             ),
         }
         for index in range(1, 101)
@@ -121,11 +119,7 @@ def large_first_page_transport() -> MappingTransport:
         response(
             f"https://api.github.com{path}?page=1",
             full_out_of_window_page,
-            {
-                "Link": (
-                    f'<{second_page}>; rel="next"'
-                )
-            },
+            {"Link": (f'<{second_page}>; rel="next"')},
         ),
     ]
     transport.responses[second_page] = [response(second_page, [])]
@@ -303,9 +297,7 @@ class FairSchedulerTests(unittest.TestCase):
                     raise RuntimeError("synthetic secret must not enter the bundle")
                 return super()._scheduled_repository(target, raw)
 
-        bundle = RootFailingProvider(fair_transport()).collect(
-            two_repository_request()
-        )
+        bundle = RootFailingProvider(fair_transport()).collect(two_repository_request())
         self.assertEqual(
             [item["full_name"] for item in bundle["repositories"]],
             ["z/small"],
@@ -340,13 +332,19 @@ class FairSchedulerTests(unittest.TestCase):
                 }
                 large = "repo:github:github.com:a/large"
                 small = "repo:github:github.com:z/small"
-                self.assertEqual(observations[(large, "work_items")]["status"], "incomplete")
+                self.assertEqual(
+                    observations[(large, "work_items")]["status"], "incomplete"
+                )
                 self.assertEqual(
                     observations[(large, "work_items")]["diagnostics"]["failure_class"],
                     failure_class,
                 )
-                self.assertEqual(observations[(small, "work_items")]["status"], "supported")
-                self.assertEqual(observations[(small, "interactions")]["status"], "supported")
+                self.assertEqual(
+                    observations[(small, "work_items")]["status"], "supported"
+                )
+                self.assertEqual(
+                    observations[(small, "interactions")]["status"], "supported"
+                )
                 self.assertFalse(bundle["coverage"]["allow_publish"])
                 self.assertNotIn(str(error), str(bundle))
 
@@ -394,7 +392,9 @@ class FairSchedulerTests(unittest.TestCase):
                     observations[(large, failed_source)]["status"], "incomplete"
                 )
                 self.assertEqual(
-                    observations[(large, failed_source)]["diagnostics"]["failure_class"],
+                    observations[(large, failed_source)]["diagnostics"][
+                        "failure_class"
+                    ],
                     "unexpected_error",
                 )
                 self.assertEqual(

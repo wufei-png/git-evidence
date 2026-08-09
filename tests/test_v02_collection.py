@@ -34,7 +34,9 @@ class V02CollectionTests(unittest.TestCase):
             "gitee": (GiteeProvider, gitee_transport(), "gitee.com"),
         }
 
-        def factory(kind: str, instance: str, options: dict[str, object], token: str | None) -> object:
+        def factory(
+            kind: str, instance: str, options: dict[str, object], token: str | None
+        ) -> object:
             del options, token
             provider, transport, _ = adapters[kind]
             return provider(transport, instance=instance)
@@ -76,7 +78,10 @@ class V02CollectionTests(unittest.TestCase):
             all(item["retrieval_id"] in retrieval_ids for item in bundle["evidence"])
         )
         self.assertTrue(
-            all(item["native_identity"]["state"] == "known" for item in bundle["evidence"])
+            all(
+                item["native_identity"]["state"] == "known"
+                for item in bundle["evidence"]
+            )
         )
 
     def test_plan_identity_is_stable_while_invocations_are_unique(self) -> None:
@@ -138,9 +143,9 @@ class V02CollectionTests(unittest.TestCase):
     def test_renderer_keeps_stable_evidence_references_without_urls(self) -> None:
         bundle = self._collect()
         retrieval_id = bundle["evidence"][0]["retrieval_id"]
-        next(
-            item for item in bundle["retrievals"] if item["id"] == retrieval_id
-        )["target_ref"] = "https://api.example.test/private/repository"
+        next(item for item in bundle["retrievals"] if item["id"] == retrieval_id)[
+            "target_ref"
+        ] = "https://api.example.test/private/repository"
         recompute_allow_publish(bundle)
         report = render_bundle(bundle, allow_source_urls=False)
         self.assertIn("[E1]", report)

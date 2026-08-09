@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from datetime import datetime, timezone
-from hashlib import sha256
 import math
 import os
-from typing import Any, Mapping
 import unicodedata
+from collections.abc import Mapping
+from copy import deepcopy
+from datetime import UTC, datetime
+from hashlib import sha256
+from typing import Any
 from uuid import uuid4
 
 import rfc8785
 
 from . import __version__
-
 
 CANONICALIZATION = {
     "algorithm": "RFC8785",
@@ -42,9 +42,7 @@ class IdentityError(ValueError):
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
-    )
+    return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _normalize_nfc(value: Any) -> Any:

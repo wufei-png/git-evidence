@@ -25,9 +25,9 @@ from .resource_base import (
     validate_repository_identity,
 )
 from .transport import (
+    LINK_PAGINATION,
     ApiError,
     JsonTransport,
-    LINK_PAGINATION,
     PageResult,
     ResponseShapeError,
     UrllibTransport,
@@ -99,7 +99,9 @@ class GiteeProvider(ResourceProvider):
     def _id(target: RepositoryTarget, kind: str, native_id: Any) -> str:
         if not is_valid_native_id(native_id):
             raise ValueError(f"{kind} response omitted a stable native id")
-        return f"{kind}:gitee:{target.instance}:{target.owner}/{target.name}:{native_id}"
+        return (
+            f"{kind}:gitee:{target.instance}:{target.owner}/{target.name}:{native_id}"
+        )
 
     def _page(self, path: str, params: dict[str, Any]) -> PageResult:
         return paginate(
@@ -198,8 +200,8 @@ class GiteeProvider(ResourceProvider):
                     "interactions",
                     f"{self._repo_path(target)}/{collection}/{number}/comments",
                     {},
-                    lambda comment, number=number, subject=item: self._normalize_comment(
-                        target, comment, number, subject
+                    lambda comment, number=number, subject=item: (
+                        self._normalize_comment(target, comment, number, subject)
                     ),
                     lambda comment: in_window_or_malformed(
                         comment, request, "created_at", "updated_at"
@@ -222,11 +224,17 @@ class GiteeProvider(ResourceProvider):
                     redact_url=getattr(self.transport, "_redact_url", None),
                 )
             if not isinstance(response.body, dict):
-                raise ResponseShapeError(f"expected repository object from {response.url}")
-            validate_repository_identity(response.body, target, identity_field="full_name")
+                raise ResponseShapeError(
+                    f"expected repository object from {response.url}"
+                )
+            validate_repository_identity(
+                response.body, target, identity_field="full_name"
+            )
         except ApiError as exc:
             failed = {
-                source: SourceResult([], "incomplete", str(exc), api_error_diagnostics(exc))
+                source: SourceResult(
+                    [], "incomplete", str(exc), api_error_diagnostics(exc)
+                )
                 for source in RESOURCE_SOURCES
             }
             return RepositorySnapshot(None, failed)
@@ -252,7 +260,9 @@ class GiteeProvider(ResourceProvider):
             "work_items",
             lambda item: self._normalize_issue(target, item),
             target=target,
-            filter_item=lambda item: in_window_or_malformed(item, request, "updated_at", "created_at"),
+            filter_item=lambda item: in_window_or_malformed(
+                item, request, "updated_at", "created_at"
+            ),
         )
         pull_result = self._safe_page(
             "change_requests",
@@ -272,7 +282,9 @@ class GiteeProvider(ResourceProvider):
             target=target,
             filter_item=lambda item: self._change_request_in_window(item, request),
         )
-        interactions = self._collect_interactions(target, issue_result.items, pull_result.items, request)
+        interactions = self._collect_interactions(
+            target, issue_result.items, pull_result.items, request
+        )
         commit_result = self._safe_page(
             "commits",
             lambda: self._page(
@@ -286,7 +298,9 @@ class GiteeProvider(ResourceProvider):
             lambda item: self._normalize_commit(target, item),
             target=target,
             filter_item=lambda item: in_window_or_malformed(
-                {"timestamp": self._commit_timestamp(item)} if isinstance(item, dict) else item,
+                {"timestamp": self._commit_timestamp(item)}
+                if isinstance(item, dict)
+                else item,
                 request,
                 "timestamp",
             ),
@@ -300,7 +314,9 @@ class GiteeProvider(ResourceProvider):
             "releases",
             lambda item: self._normalize_release(target, item),
             target=target,
-            filter_item=lambda item: in_window_or_malformed(item, request, "published_at", "created_at"),
+            filter_item=lambda item: in_window_or_malformed(
+                item, request, "published_at", "created_at"
+            ),
         )
         return RepositorySnapshot(
             repository,
@@ -329,7 +345,9 @@ class GiteeProvider(ResourceProvider):
             ),
         }
 
-    def _normalize_issue(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_issue(
+        self, target: RepositoryTarget, item: dict[str, Any]
+    ) -> dict[str, Any]:
         number = item.get("number") or item.get("id")
         return {
             "id": self._id(target, "work_item", number),
@@ -344,7 +362,9 @@ class GiteeProvider(ResourceProvider):
             "_actor": actor_from(item, "user", "author"),
         }
 
-    def _normalize_pull(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_pull(
+        self, target: RepositoryTarget, item: dict[str, Any]
+    ) -> dict[str, Any]:
         number = item.get("number") or item.get("id")
         merged_at = item.get("merged_at")
         head = item.get("head") if isinstance(item.get("head"), dict) else {}
@@ -360,7 +380,9 @@ class GiteeProvider(ResourceProvider):
             "title": item.get("title") or "",
             "state": "merged" if merged_at else item.get("state"),
             "merged_at": merged_at,
-            "occurred_at": first_timestamp(item, "merged_at", "updated_at", "created_at"),
+            "occurred_at": first_timestamp(
+                item, "merged_at", "updated_at", "created_at"
+            ),
             "web_url": item.get("html_url"),
             "_association_shas": association_shas,
             "_native_id": number,
@@ -412,8 +434,12 @@ class GiteeProvider(ResourceProvider):
         )
 
     @staticmethod
-    def _change_request_in_window(item: dict[str, Any], request: CollectionRequest) -> bool:
-        return in_window_or_malformed(item, request, "merged_at", "updated_at", "created_at")
+    def _change_request_in_window(
+        item: dict[str, Any], request: CollectionRequest
+    ) -> bool:
+        return in_window_or_malformed(
+            item, request, "merged_at", "updated_at", "created_at"
+        )
 
     def _normalize_comment(
         self,
@@ -427,7 +453,9 @@ class GiteeProvider(ResourceProvider):
             "id": self._id(target, "interaction", comment_id),
             "kind": "comment",
             "repository_id": target.canonical_id,
-            "subject_type": "work_item" if subject.get("kind") == "issue" else "change_request",
+            "subject_type": "work_item"
+            if subject.get("kind") == "issue"
+            else "change_request",
             "subject_id": subject.get("id"),
             "subject_number": number,
             "occurred_at": first_timestamp(comment, "created_at", "updated_at"),
@@ -440,13 +468,15 @@ class GiteeProvider(ResourceProvider):
     @staticmethod
     def _commit_timestamp(item: dict[str, Any]) -> str | None:
         commit = item.get("commit") or {}
-        return first_timestamp(
-            commit.get("committer") or {}, "date"
-        ) or first_timestamp(commit.get("author") or {}, "date") or first_timestamp(
-            item, "committed_date", "created_at"
+        return (
+            first_timestamp(commit.get("committer") or {}, "date")
+            or first_timestamp(commit.get("author") or {}, "date")
+            or first_timestamp(item, "committed_date", "created_at")
         )
 
-    def _normalize_commit(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_commit(
+        self, target: RepositoryTarget, item: dict[str, Any]
+    ) -> dict[str, Any]:
         sha = item.get("sha") or item.get("id")
         commit = item.get("commit") or {}
         message = str(commit.get("message") or item.get("message") or "")
@@ -462,7 +492,9 @@ class GiteeProvider(ResourceProvider):
             "_actor": actor_from(item, "author", "committer"),
         }
 
-    def _normalize_release(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_release(
+        self, target: RepositoryTarget, item: dict[str, Any]
+    ) -> dict[str, Any]:
         release_id = item.get("id") or item.get("tag_name")
         return {
             "id": self._id(target, "release", release_id),

@@ -25,9 +25,9 @@ from .resource_base import (
     validate_repository_identity,
 )
 from .transport import (
+    LINK_PAGINATION,
     ApiError,
     JsonTransport,
-    LINK_PAGINATION,
     PageResult,
     ResponseShapeError,
     UrllibTransport,
@@ -103,7 +103,9 @@ class GitHubProvider(ResourceProvider):
     def _id(target: RepositoryTarget, kind: str, native_id: Any) -> str:
         if not is_valid_native_id(native_id):
             raise ResponseShapeError(f"{kind} response omitted a stable native id")
-        return f"{kind}:github:{target.instance}:{target.owner}/{target.name}:{native_id}"
+        return (
+            f"{kind}:github:{target.instance}:{target.owner}/{target.name}:{native_id}"
+        )
 
     def _page(self, path: str, params: dict[str, Any]) -> PageResult:
         return paginate(
@@ -142,10 +144,14 @@ class GitHubProvider(ResourceProvider):
                 f"{root}/issues",
                 {"state": "all", "since": request.window_start},
                 lambda item: self._normalize_issue(target, item),
-                lambda item: not isinstance(item, dict)
-                or (
-                    "pull_request" not in item
-                    and in_window_or_malformed(item, request, "updated_at", "created_at")
+                lambda item: (
+                    not isinstance(item, dict)
+                    or (
+                        "pull_request" not in item
+                        and in_window_or_malformed(
+                            item, request, "updated_at", "created_at"
+                        )
+                    )
                 ),
             ),
             PageSourceRequest(
@@ -198,8 +204,10 @@ class GitHubProvider(ResourceProvider):
                     "interactions",
                     f"{root}/issues/{number}/comments",
                     {},
-                    lambda comment, number=number, subject_type=subject_type: self._normalize_comment(
-                        target, comment, number, "issue_comment", subject_type
+                    lambda comment, number=number, subject_type=subject_type: (
+                        self._normalize_comment(
+                            target, comment, number, "issue_comment", subject_type
+                        )
                     ),
                     lambda comment: in_window_or_malformed(
                         comment, request, "created_at", "submitted_at", "updated_at"
@@ -228,11 +236,13 @@ class GitHubProvider(ResourceProvider):
                             "interactions",
                             endpoint,
                             {},
-                            lambda comment, number=number, kind=endpoint_kind, subject_type=subject_type: self._normalize_comment(
-                                target, comment, number, kind, subject_type
+                            lambda comment, number=number, kind=endpoint_kind, subject_type=subject_type: (
+                                self._normalize_comment(
+                                    target, comment, number, kind, subject_type
+                                )
                             ),
-                            lambda comment, fields=timestamp_fields: in_window_or_malformed(
-                                comment, request, *fields
+                            lambda comment, fields=timestamp_fields: (
+                                in_window_or_malformed(comment, request, *fields)
                             ),
                             subject_type,
                             self._id(target, subject_type, number),
@@ -252,11 +262,17 @@ class GitHubProvider(ResourceProvider):
                     redact_url=getattr(self.transport, "_redact_url", None),
                 )
             if not isinstance(response.body, dict):
-                raise ResponseShapeError(f"expected repository object from {response.url}")
-            validate_repository_identity(response.body, target, identity_field="full_name")
+                raise ResponseShapeError(
+                    f"expected repository object from {response.url}"
+                )
+            validate_repository_identity(
+                response.body, target, identity_field="full_name"
+            )
         except ApiError as exc:
             failed = {
-                source: SourceResult([], "incomplete", str(exc), api_error_diagnostics(exc))
+                source: SourceResult(
+                    [], "incomplete", str(exc), api_error_diagnostics(exc)
+                )
                 for source in RESOURCE_SOURCES
             }
             return RepositorySnapshot(None, failed)
@@ -283,9 +299,15 @@ class GitHubProvider(ResourceProvider):
             "work_items",
             lambda item: self._normalize_issue(target, item),
             target=target,
-            filter_item=lambda item: not isinstance(item, dict)
-            or ("pull_request" not in item
-            and in_window_or_malformed(item, request, "updated_at", "created_at")),
+            filter_item=lambda item: (
+                not isinstance(item, dict)
+                or (
+                    "pull_request" not in item
+                    and in_window_or_malformed(
+                        item, request, "updated_at", "created_at"
+                    )
+                )
+            ),
         )
 
         change_requests = self._safe_page(
@@ -303,7 +325,9 @@ class GitHubProvider(ResourceProvider):
             filter_item=lambda item: self._change_request_in_window(item, request),
         )
 
-        interactions = self._collect_interactions(target, work_items.items, change_requests.items, request)
+        interactions = self._collect_interactions(
+            target, work_items.items, change_requests.items, request
+        )
         commits = self._safe_page(
             "commits",
             lambda: self._page(
@@ -328,7 +352,9 @@ class GitHubProvider(ResourceProvider):
             "releases",
             lambda item: self._normalize_release(target, item),
             target=target,
-            filter_item=lambda item: in_window_or_malformed(item, request, "published_at", "created_at"),
+            filter_item=lambda item: in_window_or_malformed(
+                item, request, "published_at", "created_at"
+            ),
         )
         return RepositorySnapshot(
             repository,
@@ -353,7 +379,9 @@ class GitHubProvider(ResourceProvider):
             "activities",
             lambda event: dict(event),
             target=target,
-            filter_item=lambda event: in_window_or_malformed(event, request, "created_at"),
+            filter_item=lambda event: in_window_or_malformed(
+                event, request, "created_at"
+            ),
         )
         events = result.items
         ref_changes: list[dict[str, Any]] = []
@@ -369,7 +397,9 @@ class GitHubProvider(ResourceProvider):
         for event in events:
             if event.get("type") != "PushEvent":
                 continue
-            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            payload = (
+                event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            )
             commit_shas = [
                 item.get("sha")
                 for item in payload.get("commits", [])
@@ -388,7 +418,9 @@ class GitHubProvider(ResourceProvider):
             if commit_shas:
                 for sha in commit_shas:
                     if sha not in association_cache:
-                        association_cache[sha] = self._commit_change_request_candidates(target, sha)
+                        association_cache[sha] = self._commit_change_request_candidates(
+                            target, sha
+                        )
                         association_retrievals.extend(
                             association_cache[sha][1].retrievals
                         )
@@ -400,7 +432,9 @@ class GitHubProvider(ResourceProvider):
                     else:
                         association_complete = False
                         association_summary["failed"] += 1
-                        failure_class = association_result.diagnostics.get("failure_class")
+                        failure_class = association_result.diagnostics.get(
+                            "failure_class"
+                        )
                         if isinstance(failure_class, str):
                             association_failure_classes.add(failure_class)
             else:
@@ -410,12 +444,16 @@ class GitHubProvider(ResourceProvider):
                 lossy = True
             ref_changes.append(
                 {
-                    "id": self._id(target, "ref_change", event_id) if is_valid_native_id(event_id) else "",
+                    "id": self._id(target, "ref_change", event_id)
+                    if is_valid_native_id(event_id)
+                    else "",
                     "kind": "push",
                     "repository_id": target.canonical_id,
                     "ref": payload.get("ref"),
                     "occurred_at": first_timestamp(event, "created_at"),
-                    "web_url": f"{repository_url}/commit/{head}" if isinstance(head, str) and head else repository_url,
+                    "web_url": f"{repository_url}/commit/{head}"
+                    if isinstance(head, str) and head
+                    else repository_url,
                     "_commit_shas": commit_shas,
                     "_change_request_ids": list(dict.fromkeys(change_request_ids)),
                     "_association_attempted": bool(commit_shas),
@@ -437,20 +475,30 @@ class GitHubProvider(ResourceProvider):
                 "; commit-to-change-request association was only partially observed"
             )
             if association_failure_classes:
-                association_note += " (" + ", ".join(sorted(association_failure_classes)) + ")"
+                association_note += (
+                    " (" + ", ".join(sorted(association_failure_classes)) + ")"
+                )
         if result.status != "supported":
             note = result.note or note
-        activity_status = "incomplete" if result.status == "supported" else result.status
+        activity_status = (
+            "incomplete" if result.status == "supported" else result.status
+        )
         ref_diagnostics = dict(result.diagnostics or {})
         if association_summary["attempted"]:
             association_diagnostics: dict[str, Any] = {"summary": association_summary}
             if association_failure_classes:
-                association_diagnostics["failure_classes"] = sorted(association_failure_classes)
+                association_diagnostics["failure_classes"] = sorted(
+                    association_failure_classes
+                )
             ref_diagnostics["commit_association"] = association_diagnostics
         return {
             "activities": SourceResult(
-                events, activity_status, note, result.diagnostics or {},
-                result.retrievals, result.item_retrieval_keys,
+                events,
+                activity_status,
+                note,
+                result.diagnostics or {},
+                result.retrievals,
+                result.item_retrieval_keys,
             ),
             "ref_changes": SourceResult(
                 ref_changes,
@@ -486,8 +534,9 @@ class GitHubProvider(ResourceProvider):
         if malformed_candidates:
             result.status = "incomplete"
             result.note = (
-                f"{result.note}; " if result.note else ""
-            ) + f"commit association response dropped {malformed_candidates} malformed candidate(s)"
+                (f"{result.note}; " if result.note else "")
+                + f"commit association response dropped {malformed_candidates} malformed candidate(s)"
+            )
             merge_diagnostics(
                 result.diagnostics,
                 {
@@ -505,7 +554,9 @@ class GitHubProvider(ResourceProvider):
             )
         return list(dict.fromkeys(candidate_ids)), result
 
-    def _normalize_issue(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_issue(
+        self, target: RepositoryTarget, item: dict[str, Any]
+    ) -> dict[str, Any]:
         number = item.get("number")
         return {
             "id": self._id(target, "work_item", number),
@@ -520,7 +571,9 @@ class GitHubProvider(ResourceProvider):
             "_actor": actor_from(item, "user"),
         }
 
-    def _normalize_pull(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_pull(
+        self, target: RepositoryTarget, item: dict[str, Any]
+    ) -> dict[str, Any]:
         number = item.get("number")
         merged_at = item.get("merged_at")
         head = item.get("head") if isinstance(item.get("head"), dict) else {}
@@ -536,7 +589,9 @@ class GitHubProvider(ResourceProvider):
             "title": item.get("title") or "",
             "state": "merged" if merged_at else item.get("state"),
             "merged_at": merged_at,
-            "occurred_at": first_timestamp(item, "merged_at", "updated_at", "created_at"),
+            "occurred_at": first_timestamp(
+                item, "merged_at", "updated_at", "created_at"
+            ),
             "web_url": item.get("html_url"),
             "_association_shas": association_shas,
             "_native_id": number,
@@ -559,7 +614,9 @@ class GitHubProvider(ResourceProvider):
             "subject_type": subject_type,
             "subject_id": self._id(target, subject_type, number),
             "subject_number": number,
-            "occurred_at": first_timestamp(item, "created_at", "submitted_at", "updated_at"),
+            "occurred_at": first_timestamp(
+                item, "created_at", "submitted_at", "updated_at"
+            ),
             "body_collected": False,
             "web_url": item.get("html_url") or item.get("pull_request_url"),
             "_native_id": comment_id,
@@ -593,8 +650,10 @@ class GitHubProvider(ResourceProvider):
             result = self._normalize_items(
                 result,
                 "interactions",
-                lambda comment, number=number, subject_type=subject_type: self._normalize_comment(
-                    target, comment, number, "issue_comment", subject_type
+                lambda comment, number=number, subject_type=subject_type: (
+                    self._normalize_comment(
+                        target, comment, number, "issue_comment", subject_type
+                    )
                 ),
                 target=target,
                 filter_item=lambda comment: in_window_or_malformed(
@@ -619,16 +678,21 @@ class GitHubProvider(ResourceProvider):
                         ("created_at", "submitted_at", "updated_at"),
                     ),
                 ):
-                    result = self._safe_page("interactions", lambda endpoint=endpoint: self._page(endpoint, {}))
+                    result = self._safe_page(
+                        "interactions",
+                        lambda endpoint=endpoint: self._page(endpoint, {}),
+                    )
                     result = self._normalize_items(
                         result,
                         "interactions",
-                        lambda comment, number=number, kind=kind, subject_type=subject_type: self._normalize_comment(
-                            target, comment, number, kind, subject_type
+                        lambda comment, number=number, kind=kind, subject_type=subject_type: (
+                            self._normalize_comment(
+                                target, comment, number, kind, subject_type
+                            )
                         ),
                         target=target,
-                        filter_item=lambda comment, timestamp_fields=timestamp_fields: in_window_or_malformed(
-                            comment, request, *timestamp_fields
+                        filter_item=lambda comment, timestamp_fields=timestamp_fields: (
+                            in_window_or_malformed(comment, request, *timestamp_fields)
                         ),
                     )
                     merge_diagnostics(diagnostics, result.diagnostics)
@@ -644,22 +708,28 @@ class GitHubProvider(ResourceProvider):
         )
 
     @staticmethod
-    def _change_request_in_window(item: dict[str, Any], request: CollectionRequest) -> bool:
-        return in_window_or_malformed(item, request, "merged_at", "updated_at", "created_at")
+    def _change_request_in_window(
+        item: dict[str, Any], request: CollectionRequest
+    ) -> bool:
+        return in_window_or_malformed(
+            item, request, "merged_at", "updated_at", "created_at"
+        )
 
     @staticmethod
     def _commit_in_window(item: dict[str, Any], request: CollectionRequest) -> bool:
         if not isinstance(item, dict):
             return True
         commit = item.get("commit") or {}
-        occurred_at = first_timestamp(commit.get("committer") or {}, "date") or first_timestamp(
-            commit.get("author") or {}, "date"
-        )
+        occurred_at = first_timestamp(
+            commit.get("committer") or {}, "date"
+        ) or first_timestamp(commit.get("author") or {}, "date")
         if occurred_at is None:
             return True
         return in_window_or_malformed({"timestamp": occurred_at}, request, "timestamp")
 
-    def _normalize_commit(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_commit(
+        self, target: RepositoryTarget, item: dict[str, Any]
+    ) -> dict[str, Any]:
         sha = item.get("sha")
         commit = item.get("commit")
         if not isinstance(commit, dict):
@@ -667,21 +737,26 @@ class GitHubProvider(ResourceProvider):
         message = commit.get("message")
         if not isinstance(message, str) or not message.strip():
             raise ResponseShapeError(f"commit {sha} has no commit message")
-        committer = commit.get("committer") if isinstance(commit.get("committer"), dict) else {}
+        committer = (
+            commit.get("committer") if isinstance(commit.get("committer"), dict) else {}
+        )
         author = commit.get("author") if isinstance(commit.get("author"), dict) else {}
         title = message.splitlines()[0].strip()
         return {
             "id": self._id(target, "commit", sha),
             "sha": sha,
             "repository_id": target.canonical_id,
-            "occurred_at": first_timestamp(committer, "date") or first_timestamp(author, "date"),
+            "occurred_at": first_timestamp(committer, "date")
+            or first_timestamp(author, "date"),
             "title": title,
             "web_url": item.get("html_url"),
             "_native_id": sha,
             "_actor": actor_from(item, "author", "committer"),
         }
 
-    def _normalize_release(self, target: RepositoryTarget, item: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_release(
+        self, target: RepositoryTarget, item: dict[str, Any]
+    ) -> dict[str, Any]:
         release_id = item.get("id") or item.get("tag_name")
         return {
             "id": self._id(target, "release", release_id),

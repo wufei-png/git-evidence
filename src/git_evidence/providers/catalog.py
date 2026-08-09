@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any
 
 from .base import Provider, ProviderDescriptor, validate_descriptor
 
@@ -31,14 +32,18 @@ class ProviderRegistration:
 class ProviderRegistry:
     """Fail-closed registry for provider descriptors and instance factories."""
 
-    def __init__(self, registrations: Mapping[str, ProviderRegistration] | None = None) -> None:
+    def __init__(
+        self, registrations: Mapping[str, ProviderRegistration] | None = None
+    ) -> None:
         self._registrations: dict[str, ProviderRegistration] = {}
         for kind, registration in (registrations or {}).items():
             self.register(kind, registration)
 
     def register(self, kind: str, registration: ProviderRegistration) -> None:
         if not isinstance(kind, str) or not kind.strip():
-            raise ProviderRegistryError("provider registration kind must be a non-empty string")
+            raise ProviderRegistryError(
+                "provider registration kind must be a non-empty string"
+            )
         if not isinstance(registration, ProviderRegistration):
             raise ProviderRegistryError(f"invalid provider registration for {kind!r}")
         if registration.descriptor.kind != kind:
@@ -63,7 +68,9 @@ class ProviderRegistry:
         return kind in self._registrations
 
     def descriptors(self) -> list[ProviderDescriptor]:
-        return [self._registrations[key].descriptor for key in sorted(self._registrations)]
+        return [
+            self._registrations[key].descriptor for key in sorted(self._registrations)
+        ]
 
     def create(
         self,

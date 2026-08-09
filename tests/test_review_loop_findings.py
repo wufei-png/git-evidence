@@ -1,35 +1,51 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from io import BytesIO
 import json
 import os
-from pathlib import Path
 import stat
 import tempfile
-from types import SimpleNamespace
 import unittest
+from copy import deepcopy
+from io import BytesIO
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Self
 from unittest.mock import patch
 from urllib.error import HTTPError
 
+from test_contract import (
+    WINDOW_END,
+    WINDOW_START,
+    gitee_transport,
+    github_transport,
+    gitlab_transport,
+    request_for,
+    rewrite_transport_urls,
+)
+
 from git_evidence.cli import main as cli_main
 from git_evidence.collect import _merge_bundles, collect_config
-from git_evidence.config import ConfigError, provider_runtime_options, validate_collection_config, validate_report_config
+from git_evidence.config import (
+    ConfigError,
+    provider_runtime_options,
+    validate_collection_config,
+    validate_report_config,
+)
 from git_evidence.model import load_bundle
 from git_evidence.privacy import (
     PrivacyError,
     is_sensitive_field,
     sanitize_public_payload,
 )
-from git_evidence.providers.github import GitHubProvider
-from git_evidence.providers.gitlab import GitLabProvider
-from git_evidence.providers.gitee import GiteeProvider
 from git_evidence.providers.base import (
     CollectionRequest,
     RepositoryTarget,
     append_optional_coverage_warning,
     instance_web_base,
 )
+from git_evidence.providers.gitee import GiteeProvider
+from git_evidence.providers.github import GitHubProvider
+from git_evidence.providers.gitlab import GitLabProvider
 from git_evidence.providers.resource_base import (
     in_window_or_malformed,
     merge_diagnostics,
@@ -45,17 +61,6 @@ from git_evidence.providers.transport import (
     paginate,
 )
 from git_evidence.validation import has_blocking_core_coverage, validate_bundle
-
-from test_contract import (
-    WINDOW_END,
-    WINDOW_START,
-    gitee_transport,
-    gitlab_transport,
-    github_transport,
-    request_for,
-    rewrite_transport_urls,
-)
-
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "fixtures" / "example_bundle.json"
@@ -136,11 +141,31 @@ class ReviewLoopFindingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             provider.collect(mismatched_target)
 
-    def test_repository_root_non_success_status_blocks_all_provider_sources(self) -> None:
+    def test_repository_root_non_success_status_blocks_all_provider_sources(
+        self,
+    ) -> None:
         cases = (
-            ("github", "github.com", GitHubProvider, github_transport(), "/repos/example/project"),
-            ("gitlab", "gitlab.com", GitLabProvider, gitlab_transport(), "/projects/example%2Fproject"),
-            ("gitee", "gitee.com", GiteeProvider, gitee_transport(), "/repos/example/project"),
+            (
+                "github",
+                "github.com",
+                GitHubProvider,
+                github_transport(),
+                "/repos/example/project",
+            ),
+            (
+                "gitlab",
+                "gitlab.com",
+                GitLabProvider,
+                gitlab_transport(),
+                "/projects/example%2Fproject",
+            ),
+            (
+                "gitee",
+                "gitee.com",
+                GiteeProvider,
+                gitee_transport(),
+                "/repos/example/project",
+            ),
         )
         for provider_kind, instance, provider_type, transport, root in cases:
             with self.subTest(provider=provider_kind):
@@ -154,48 +179,135 @@ class ReviewLoopFindingTests(unittest.TestCase):
                     },
                     {"id": 1, "name": "project"},
                 )
-                bundle = provider_type(transport).collect(request_for(provider_kind, instance))
+                bundle = provider_type(transport).collect(
+                    request_for(provider_kind, instance)
+                )
                 self.assertFalse(bundle["coverage"]["allow_publish"])
                 observations = {
-                    item["source"]: item
-                    for item in bundle["coverage"]["observations"]
+                    item["source"]: item for item in bundle["coverage"]["observations"]
                 }
                 resource_observations = {
                     source: observations[source]
-                    for source in ("repositories", "work_items", "change_requests", "interactions", "commits", "releases")
+                    for source in (
+                        "repositories",
+                        "work_items",
+                        "change_requests",
+                        "interactions",
+                        "commits",
+                        "releases",
+                    )
                 }
-                self.assertEqual(set(resource_observations), {"repositories", "work_items", "change_requests", "interactions", "commits", "releases"})
-                self.assertTrue(all(item["status"] == "incomplete" for item in resource_observations.values()))
-                self.assertTrue(
-                    all(item["diagnostics"]["failure_class"] == "service_error" for item in resource_observations.values())
+                self.assertEqual(
+                    set(resource_observations),
+                    {
+                        "repositories",
+                        "work_items",
+                        "change_requests",
+                        "interactions",
+                        "commits",
+                        "releases",
+                    },
                 )
-                self.assertEqual(resource_observations["repositories"]["diagnostics"]["status_code"], 500)
-                self.assertEqual(resource_observations["repositories"]["diagnostics"]["retry_after_seconds"], 7.0)
-                self.assertEqual(resource_observations["repositories"]["diagnostics"]["rate_limit"]["x-ratelimit-remaining"], "0")
+                self.assertTrue(
+                    all(
+                        item["status"] == "incomplete"
+                        for item in resource_observations.values()
+                    )
+                )
+                self.assertTrue(
+                    all(
+                        item["diagnostics"]["failure_class"] == "service_error"
+                        for item in resource_observations.values()
+                    )
+                )
+                self.assertEqual(
+                    resource_observations["repositories"]["diagnostics"]["status_code"],
+                    500,
+                )
+                self.assertEqual(
+                    resource_observations["repositories"]["diagnostics"][
+                        "retry_after_seconds"
+                    ],
+                    7.0,
+                )
+                self.assertEqual(
+                    resource_observations["repositories"]["diagnostics"]["rate_limit"][
+                        "x-ratelimit-remaining"
+                    ],
+                    "0",
+                )
 
     def test_repository_auth_failure_has_no_placeholder_repository(self) -> None:
         cases = (
-            ("github", "github.com", GitHubProvider, github_transport(), "/repos/example/project"),
-            ("gitlab", "gitlab.com", GitLabProvider, gitlab_transport(), "/projects/example%2Fproject"),
-            ("gitee", "gitee.com", GiteeProvider, gitee_transport(), "/repos/example/project"),
+            (
+                "github",
+                "github.com",
+                GitHubProvider,
+                github_transport(),
+                "/repos/example/project",
+            ),
+            (
+                "gitlab",
+                "gitlab.com",
+                GitLabProvider,
+                gitlab_transport(),
+                "/projects/example%2Fproject",
+            ),
+            (
+                "gitee",
+                "gitee.com",
+                GiteeProvider,
+                gitee_transport(),
+                "/repos/example/project",
+            ),
         )
         for provider_kind, instance, provider_type, transport, root in cases:
             with self.subTest(provider=provider_kind):
-                transport.responses[root][0] = ApiResponse(root, 401, {}, {"message": "unauthorized"})
-                bundle = provider_type(transport).collect(request_for(provider_kind, instance))
+                transport.responses[root][0] = ApiResponse(
+                    root, 401, {}, {"message": "unauthorized"}
+                )
+                bundle = provider_type(transport).collect(
+                    request_for(provider_kind, instance)
+                )
                 self.assertEqual(bundle["repositories"], [])
                 self.assertFalse(bundle["coverage"]["allow_publish"])
                 repository_observation = next(
-                    item for item in bundle["coverage"]["observations"] if item["source"] == "repositories"
+                    item
+                    for item in bundle["coverage"]["observations"]
+                    if item["source"] == "repositories"
                 )
-                self.assertEqual(repository_observation["diagnostics"]["failure_class"], "permission_denied")
-                self.assertIn("coverage.required_missing", {issue.code for issue in validate_bundle(bundle)})
+                self.assertEqual(
+                    repository_observation["diagnostics"]["failure_class"],
+                    "permission_denied",
+                )
+                self.assertIn(
+                    "coverage.required_missing",
+                    {issue.code for issue in validate_bundle(bundle)},
+                )
 
     def test_repository_root_identity_mismatch_blocks_without_placeholder(self) -> None:
         cases = (
-            ("github", "github.com", GitHubProvider, "/repos/example/project", "full_name"),
-            ("gitlab", "gitlab.com", GitLabProvider, "/projects/example%2Fproject", "path_with_namespace"),
-            ("gitee", "gitee.com", GiteeProvider, "/repos/example/project", "full_name"),
+            (
+                "github",
+                "github.com",
+                GitHubProvider,
+                "/repos/example/project",
+                "full_name",
+            ),
+            (
+                "gitlab",
+                "gitlab.com",
+                GitLabProvider,
+                "/projects/example%2Fproject",
+                "path_with_namespace",
+            ),
+            (
+                "gitee",
+                "gitee.com",
+                GiteeProvider,
+                "/repos/example/project",
+                "full_name",
+            ),
         )
         for provider_kind, instance, provider_type, root, identity_field in cases:
             for field in (identity_field, "name"):
@@ -208,7 +320,9 @@ class ReviewLoopFindingTests(unittest.TestCase):
                     transport.responses[root][0].body[field] = (
                         "other/project" if field == identity_field else "other-project"
                     )
-                    bundle = provider_type(transport).collect(request_for(provider_kind, instance))
+                    bundle = provider_type(transport).collect(
+                        request_for(provider_kind, instance)
+                    )
                     self.assertEqual(bundle["repositories"], [])
                     self.assertFalse(bundle["coverage"]["allow_publish"])
                     repository_observation = next(
@@ -221,13 +335,34 @@ class ReviewLoopFindingTests(unittest.TestCase):
                         "malformed_response",
                     )
                     self.assertTrue(has_blocking_core_coverage(bundle["coverage"]))
-                    self.assertIn("coverage.publish_blocked", {issue.code for issue in validate_bundle(bundle)})
+                    self.assertIn(
+                        "coverage.publish_blocked",
+                        {issue.code for issue in validate_bundle(bundle)},
+                    )
 
     def test_repository_root_url_identity_and_shape_are_fail_closed(self) -> None:
         cases = (
-            ("github", GitHubProvider, github_transport, "/repos/example/project", "html_url"),
-            ("gitlab", GitLabProvider, gitlab_transport, "/projects/example%2Fproject", "web_url"),
-            ("gitee", GiteeProvider, gitee_transport, "/repos/example/project", "html_url"),
+            (
+                "github",
+                GitHubProvider,
+                github_transport,
+                "/repos/example/project",
+                "html_url",
+            ),
+            (
+                "gitlab",
+                GitLabProvider,
+                gitlab_transport,
+                "/projects/example%2Fproject",
+                "web_url",
+            ),
+            (
+                "gitee",
+                GiteeProvider,
+                gitee_transport,
+                "/repos/example/project",
+                "html_url",
+            ),
         )
         for provider_kind, provider_type, transport_factory, root, url_field in cases:
             for value in (
@@ -237,7 +372,9 @@ class ReviewLoopFindingTests(unittest.TestCase):
                 with self.subTest(provider=provider_kind, value=value):
                     transport = transport_factory()
                     transport.responses[root][0].body[url_field] = value
-                    bundle = provider_type(transport).collect(request_for(provider_kind, f"{provider_kind}.com"))
+                    bundle = provider_type(transport).collect(
+                        request_for(provider_kind, f"{provider_kind}.com")
+                    )
                     repository_observation = next(
                         item
                         for item in bundle["coverage"]["observations"]
@@ -253,11 +390,39 @@ class ReviewLoopFindingTests(unittest.TestCase):
 
     def test_custom_instances_reject_public_root_and_native_urls(self) -> None:
         cases = (
-            ("github", GitHubProvider, github_transport, "/repos/example/project", "html_url", "https://ghe.example/base"),
-            ("gitlab", GitLabProvider, gitlab_transport, "/projects/example%2Fproject", "web_url", "https://glt.example/base"),
-            ("gitee", GiteeProvider, gitee_transport, "/repos/example/project", "html_url", "https://gte.example/base"),
+            (
+                "github",
+                GitHubProvider,
+                github_transport,
+                "/repos/example/project",
+                "html_url",
+                "https://ghe.example/base",
+            ),
+            (
+                "gitlab",
+                GitLabProvider,
+                gitlab_transport,
+                "/projects/example%2Fproject",
+                "web_url",
+                "https://glt.example/base",
+            ),
+            (
+                "gitee",
+                GiteeProvider,
+                gitee_transport,
+                "/repos/example/project",
+                "html_url",
+                "https://gte.example/base",
+            ),
         )
-        for provider_kind, provider_type, transport_factory, root, url_field, instance in cases:
+        for (
+            provider_kind,
+            provider_type,
+            transport_factory,
+            root,
+            url_field,
+            instance,
+        ) in cases:
             with self.subTest(provider=provider_kind, boundary="root"):
                 transport = transport_factory()
                 bundle = provider_type(transport, instance=instance).collect(
@@ -276,10 +441,12 @@ class ReviewLoopFindingTests(unittest.TestCase):
 
             with self.subTest(provider=provider_kind, boundary="native"):
                 transport = transport_factory()
-                rewrite_transport_urls(transport, f"https://{provider_kind}.com", instance)
-                transport.responses[
-                    f"{root}/issues"
-                ][0].body[0][url_field] = f"{instance}/other/project/issues/1"
+                rewrite_transport_urls(
+                    transport, f"https://{provider_kind}.com", instance
+                )
+                transport.responses[f"{root}/issues"][0].body[0][url_field] = (
+                    f"{instance}/other/project/issues/1"
+                )
                 bundle = provider_type(transport, instance=instance).collect(
                     request_for(provider_kind, instance)
                 )
@@ -289,10 +456,14 @@ class ReviewLoopFindingTests(unittest.TestCase):
                     if item["source"] == "work_items"
                 )
                 self.assertEqual(work_items["status"], "incomplete")
-                self.assertEqual(work_items["diagnostics"]["failure_class"], "malformed_response")
+                self.assertEqual(
+                    work_items["diagnostics"]["failure_class"], "malformed_response"
+                )
                 self.assertFalse(bundle["coverage"]["allow_publish"])
 
-    def test_supported_core_operational_diagnostics_close_gate_during_collection(self) -> None:
+    def test_supported_core_operational_diagnostics_close_gate_during_collection(
+        self,
+    ) -> None:
         provider = GitHubProvider(github_transport())
         original_normalize_page = provider._normalize_scheduled_page
 
@@ -304,28 +475,44 @@ class ReviewLoopFindingTests(unittest.TestCase):
                 }
             return result
 
-        with patch.object(provider, "_normalize_scheduled_page", side_effect=normalize_page):
+        with patch.object(
+            provider, "_normalize_scheduled_page", side_effect=normalize_page
+        ):
             bundle = provider.collect(request_for("github", "github.com"))
         commits = next(
-            item for item in bundle["coverage"]["observations"] if item["source"] == "commits"
+            item
+            for item in bundle["coverage"]["observations"]
+            if item["source"] == "commits"
         )
         self.assertEqual(commits["status"], "incomplete")
         self.assertFalse(bundle["coverage"]["allow_publish"])
         self.assertTrue(has_blocking_core_coverage(bundle["coverage"]))
         self.assertTrue(
             any(
-                failure["source"] == "commits" and failure["failure_class"] == "permission_denied"
+                failure["source"] == "commits"
+                and failure["failure_class"] == "permission_denied"
                 for failure in bundle["coverage"]["group_failures"]
             )
         )
-        self.assertTrue(any(failure["source"] == "commits" for failure in bundle["coverage"]["fatal"]))
+        self.assertTrue(
+            any(
+                failure["source"] == "commits"
+                for failure in bundle["coverage"]["fatal"]
+            )
+        )
 
     def test_handwritten_supported_core_failure_diagnostics_are_rejected(self) -> None:
-        for failure_class in ("permission_denied", "malformed_response", "unexpected_normalizer_error"):
+        for failure_class in (
+            "permission_denied",
+            "malformed_response",
+            "unexpected_normalizer_error",
+        ):
             with self.subTest(failure_class=failure_class):
                 bundle = load_bundle(FIXTURE)
                 commit_observation = next(
-                    item for item in bundle["coverage"]["observations"] if item["source"] == "commits"
+                    item
+                    for item in bundle["coverage"]["observations"]
+                    if item["source"] == "commits"
                 )
                 commit_observation["status"] = "supported"
                 commit_observation["diagnostics"] = {
@@ -362,7 +549,9 @@ class ReviewLoopFindingTests(unittest.TestCase):
                 "provider_id": provider_id,
                 "repository_id": repository_id,
                 "status": "incomplete",
-                "diagnostics": {"child_diagnostics": [{"failure_class": "privacy_violation"}]},
+                "diagnostics": {
+                    "child_diagnostics": [{"failure_class": "privacy_violation"}]
+                },
             }
         )
         bundle["coverage"]["warnings"].append(
@@ -380,7 +569,9 @@ class ReviewLoopFindingTests(unittest.TestCase):
         self.assertIn("coverage.optional_privacy_fatal", codes)
         self.assertIn("coverage.publish_blocked", codes)
 
-    def test_optional_privacy_collection_is_fatal_but_typed_optional_failures_warn(self) -> None:
+    def test_optional_privacy_collection_is_fatal_but_typed_optional_failures_warn(
+        self,
+    ) -> None:
         provider = GitHubProvider(github_transport())
         with patch.object(
             provider,
@@ -401,7 +592,9 @@ class ReviewLoopFindingTests(unittest.TestCase):
                 for source in ("activities", "ref_changes")
             )
         )
-        self.assertIn("coverage.fatal", {issue.code for issue in validate_bundle(bundle)})
+        self.assertIn(
+            "coverage.fatal", {issue.code for issue in validate_bundle(bundle)}
+        )
 
     def test_optional_warning_enrichment_is_single_and_monotonic(self) -> None:
         for statuses in (("unavailable", "incomplete"), ("incomplete", "unavailable")):
@@ -417,7 +610,11 @@ class ReviewLoopFindingTests(unittest.TestCase):
                         "diagnostics": (
                             {"failure_class": "permission_denied"}
                             if index == 0
-                            else {"child_diagnostics": [{"failure_classes": ["service_error"]}]}
+                            else {
+                                "child_diagnostics": [
+                                    {"failure_classes": ["service_error"]}
+                                ]
+                            }
                         ),
                     }
                     coverage["observations"].append(observation)
@@ -425,7 +622,9 @@ class ReviewLoopFindingTests(unittest.TestCase):
                 self.assertEqual(len(coverage["warnings"]), 1)
                 warning = coverage["warnings"][0]
                 self.assertEqual(warning["status"], "incomplete")
-                self.assertEqual(warning["failure_classes"], ["permission_denied", "service_error"])
+                self.assertEqual(
+                    warning["failure_classes"], ["permission_denied", "service_error"]
+                )
                 self.assertIn("failure 0", warning["message"])
                 self.assertIn("failure 1", warning["message"])
                 self.assertEqual(
@@ -433,7 +632,9 @@ class ReviewLoopFindingTests(unittest.TestCase):
                     ["incomplete", "incomplete"],
                 )
 
-    def test_optional_warning_must_cover_duplicate_observation_diagnostics(self) -> None:
+    def test_optional_warning_must_cover_duplicate_observation_diagnostics(
+        self,
+    ) -> None:
         bundle = load_bundle(FIXTURE)
         original = next(
             observation
@@ -483,7 +684,9 @@ class ReviewLoopFindingTests(unittest.TestCase):
         self.assertIn("coverage.required_missing", codes)
 
         bundle = load_bundle(FIXTURE)
-        bundle["coverage"]["observations"][0]["provider_id"] = "provider:gitlab:gitlab.com"
+        bundle["coverage"]["observations"][0]["provider_id"] = (
+            "provider:gitlab:gitlab.com"
+        )
         codes = {issue.code for issue in validate_bundle(bundle)}
         self.assertIn("coverage.provider_unknown", codes)
         self.assertIn("coverage.required_missing", codes)
@@ -491,7 +694,9 @@ class ReviewLoopFindingTests(unittest.TestCase):
     def test_fact_evidence_subject_and_provider_provenance_are_required(self) -> None:
         bundle = load_bundle(FIXTURE)
         bundle["evidence"][0].pop("subject_id")
-        self.assertIn("fact.evidence_subject", {issue.code for issue in validate_bundle(bundle)})
+        self.assertIn(
+            "fact.evidence_subject", {issue.code for issue in validate_bundle(bundle)}
+        )
 
         bundle = load_bundle(FIXTURE)
         bundle["evidence"][0]["provider_id"] = "provider:gitlab:gitlab.com"
@@ -502,20 +707,30 @@ class ReviewLoopFindingTests(unittest.TestCase):
     def test_validator_checks_canonical_repository_identity_and_url(self) -> None:
         bundle = load_bundle(FIXTURE)
         bundle["repositories"][0]["full_name"] = "other/project"
-        self.assertIn("repository.identity", {issue.code for issue in validate_bundle(bundle)})
+        self.assertIn(
+            "repository.identity", {issue.code for issue in validate_bundle(bundle)}
+        )
 
         bundle = load_bundle(FIXTURE)
         bundle["repositories"][0]["web_url"] = "https://github.com/other/project"
-        self.assertIn("repository.url_identity", {issue.code for issue in validate_bundle(bundle)})
+        self.assertIn(
+            "repository.url_identity", {issue.code for issue in validate_bundle(bundle)}
+        )
 
-    def test_foreign_optional_activity_is_dropped_without_pseudo_ref_change(self) -> None:
+    def test_foreign_optional_activity_is_dropped_without_pseudo_ref_change(
+        self,
+    ) -> None:
         transport = github_transport()
-        transport.responses["/repos/example/project/events"][0].body[0]["repo"]["name"] = "other/project"
+        transport.responses["/repos/example/project/events"][0].body[0]["repo"][
+            "name"
+        ] = "other/project"
         bundle = GitHubProvider(transport).collect(
             request_for("github", "github.com", include_activity_api=True)
         )
         self.assertTrue(bundle["coverage"]["allow_publish"])
-        self.assertFalse(any(item["id"].endswith(":event-1") for item in bundle["ref_changes"]))
+        self.assertFalse(
+            any(item["id"].endswith(":event-1") for item in bundle["ref_changes"])
+        )
         self.assertTrue(
             all(
                 observation["status"] == "incomplete"
@@ -534,7 +749,8 @@ class ReviewLoopFindingTests(unittest.TestCase):
         self.assertGreater(len(bundle["change_requests"]), 0)
         self.assertTrue(
             any(
-                item["source"] == "work_items" and item["failure_class"] == "fixture_missing"
+                item["source"] == "work_items"
+                and item["failure_class"] == "fixture_missing"
                 for item in bundle["coverage"]["group_failures"]
             )
         )
@@ -589,17 +805,25 @@ class ReviewLoopFindingTests(unittest.TestCase):
             actor_ids=[],
         )
         self.assertFalse(merged["coverage"]["allow_publish"])
-        self.assertIn("coverage.required_missing", {issue.code for issue in validate_bundle(merged)})
-        self.assertIn("coverage.publish_blocked", {issue.code for issue in validate_bundle(merged)})
+        self.assertIn(
+            "coverage.required_missing",
+            {issue.code for issue in validate_bundle(merged)},
+        )
+        self.assertIn(
+            "coverage.publish_blocked",
+            {issue.code for issue in validate_bundle(merged)},
+        )
 
     def test_validation_scopes_core_gate_per_repository(self) -> None:
-        first = GitHubProvider(github_transport()).collect(request_for("github", "github.com"))
+        first = GitHubProvider(github_transport()).collect(
+            request_for("github", "github.com")
+        )
         second_instance = "https://ghe.example/base"
         second_transport = github_transport()
         rewrite_transport_urls(second_transport, "https://github.com", second_instance)
-        second = GitHubProvider(
-            second_transport, instance=second_instance
-        ).collect(request_for("github", second_instance))
+        second = GitHubProvider(second_transport, instance=second_instance).collect(
+            request_for("github", second_instance)
+        )
         repository_ids = [
             first["repositories"][0]["id"],
             second["repositories"][0]["id"],
@@ -641,7 +865,9 @@ class ReviewLoopFindingTests(unittest.TestCase):
         self.assertIn("coverage.required_missing", codes)
         self.assertIn("coverage.publish_blocked", codes)
 
-    def test_cache_replays_allowlisted_pagination_headers_and_rejects_old_or_unsafe_entries(self) -> None:
+    def test_cache_replays_allowlisted_pagination_headers_and_rejects_old_or_unsafe_entries(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "cache.json"
             cache = LocalResponseCache(path, ttl_seconds=300, max_entries=10)
@@ -660,7 +886,10 @@ class ReviewLoopFindingTests(unittest.TestCase):
             replay = cache.get("page-1")
             self.assertIsNotNone(replay)
             assert replay is not None
-            self.assertEqual(replay.headers["link"], '<https://example.test/items?page=2> ; rel = "next"')
+            self.assertEqual(
+                replay.headers["link"],
+                '<https://example.test/items?page=2> ; rel = "next"',
+            )
             self.assertEqual(replay.headers["x-next-page"], "2")
             self.assertEqual(replay.headers["x-ratelimit-remaining"], "4")
             self.assertNotIn("authorization", replay.headers)
@@ -669,7 +898,11 @@ class ReviewLoopFindingTests(unittest.TestCase):
             payload = json.loads(path.read_text(encoding="utf-8"))
             payload["entries"]["old"] = {
                 "stored_at": 0,
-                "response": {"url": "https://example.test/items", "status_code": 200, "body": []},
+                "response": {
+                    "url": "https://example.test/items",
+                    "status_code": 200,
+                    "body": [],
+                },
             }
             path.write_text(json.dumps(payload), encoding="utf-8")
             os.chmod(path, 0o600)
@@ -678,10 +911,14 @@ class ReviewLoopFindingTests(unittest.TestCase):
             self.assertIsNone(cache.get("page-1"))
 
             unsafe_path = Path(directory) / "unsafe.json"
-            unsafe_cache = LocalResponseCache(unsafe_path, ttl_seconds=300, max_entries=10)
+            unsafe_cache = LocalResponseCache(
+                unsafe_path, ttl_seconds=300, max_entries=10
+            )
             unsafe_cache.put(
                 "body-secret",
-                ApiResponse("https://example.test/items", 200, {}, {"api_key": "secret"}),
+                ApiResponse(
+                    "https://example.test/items", 200, {}, {"api_key": "secret"}
+                ),
                 token=None,
             )
             self.assertFalse(unsafe_path.exists())
@@ -699,19 +936,28 @@ class ReviewLoopFindingTests(unittest.TestCase):
             self.assertIsNone(unsafe_cache.get("bool-status"))
             unsafe_cache.put(
                 "header-secret",
-                ApiResponse("https://example.test/items", 200, {"X-Next-Page": "secret"}, []),
+                ApiResponse(
+                    "https://example.test/items", 200, {"X-Next-Page": "secret"}, []
+                ),
                 token="secret",
             )
             self.assertFalse(unsafe_path.exists())
             unsafe_cache.put(
                 "header-invalid",
-                ApiResponse("https://example.test/items", 200, {"X-RateLimit-Remaining": "Bearer secret"}, []),
+                ApiResponse(
+                    "https://example.test/items",
+                    200,
+                    {"X-RateLimit-Remaining": "Bearer secret"},
+                    [],
+                ),
                 token=None,
             )
             self.assertFalse(unsafe_path.exists())
 
             status_entry = Path(directory) / "status-entry.json"
-            status_cache = LocalResponseCache(status_entry, ttl_seconds=300, max_entries=10)
+            status_cache = LocalResponseCache(
+                status_entry, ttl_seconds=300, max_entries=10
+            )
             status_cache.put(
                 "valid",
                 ApiResponse("https://example.test/items", 200, {}, []),
@@ -726,7 +972,11 @@ class ReviewLoopFindingTests(unittest.TestCase):
             with self.assertRaises(ApiError):
                 paginate(
                     MappingTransport(
-                        {"/items": ApiResponse("https://example.test/items", 500, {}, [])}
+                        {
+                            "/items": ApiResponse(
+                                "https://example.test/items", 500, {}, []
+                            )
+                        }
                     ),
                     "/items",
                 )
@@ -818,12 +1068,16 @@ class ReviewLoopFindingTests(unittest.TestCase):
             self.assertFalse(cache_path.exists())
 
         error = HTTPError(raw_url, 401, "unauthorized", {}, BytesIO(b"custom-secret"))
-        with patch("git_evidence.providers.transport.urlopen", side_effect=[error]):
-            with self.assertRaises(ApiError) as caught:
-                transport.get("/items")
+        with (
+            patch("git_evidence.providers.transport.urlopen", side_effect=[error]),
+            self.assertRaises(ApiError) as caught,
+        ):
+            transport.get("/items")
         self.assertNotIn(token, str(caught.exception))
 
-    def test_nested_auth_urls_are_rejected_but_redacted_urls_and_plain_text_are_safe(self) -> None:
+    def test_nested_auth_urls_are_rejected_but_redacted_urls_and_plain_text_are_safe(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "nested.json"
             cache = LocalResponseCache(path, ttl_seconds=300, max_entries=10)
@@ -833,7 +1087,11 @@ class ReviewLoopFindingTests(unittest.TestCase):
                     "https://example.test/items",
                     200,
                     {},
-                    {"_links": {"self": "https://example.test/items?access_token=secret"}},
+                    {
+                        "_links": {
+                            "self": "https://example.test/items?access_token=secret"
+                        }
+                    },
                 ),
                 token=None,
             )
@@ -844,7 +1102,11 @@ class ReviewLoopFindingTests(unittest.TestCase):
                     "https://example.test/items",
                     200,
                     {},
-                    {"_links": {"self": "https://example.test/items?access_token=%5BREDACTED%5D"}},
+                    {
+                        "_links": {
+                            "self": "https://example.test/items?access_token=%5BREDACTED%5D"
+                        }
+                    },
                 ),
                 token=None,
             )
@@ -896,7 +1158,9 @@ class ReviewLoopFindingTests(unittest.TestCase):
             {"permission_denied", "rate_limited"},
         )
 
-    def test_paginate_non_success_preserves_retry_and_rate_limit_diagnostics(self) -> None:
+    def test_paginate_non_success_preserves_retry_and_rate_limit_diagnostics(
+        self,
+    ) -> None:
         transport = MappingTransport(
             {
                 "/items": ApiResponse(
@@ -918,7 +1182,9 @@ class ReviewLoopFindingTests(unittest.TestCase):
         self.assertEqual(caught.exception.rate_limit["retry-after"], "5")
         self.assertEqual(caught.exception.rate_limit["x-ratelimit-remaining"], "0")
 
-    def test_shared_link_parser_follows_spaced_next_and_rejects_malformed_header(self) -> None:
+    def test_shared_link_parser_follows_spaced_next_and_rejects_malformed_header(
+        self,
+    ) -> None:
         transport = MappingTransport(
             {
                 "/items": [
@@ -957,7 +1223,13 @@ class ReviewLoopFindingTests(unittest.TestCase):
             )
 
     def test_privacy_key_variants_are_canonical_and_rejected(self) -> None:
-        for key in ("clientSecret", "X-API-Key", "authHeader", "X-Auth-Token", "github_token"):
+        for key in (
+            "clientSecret",
+            "X-API-Key",
+            "authHeader",
+            "X-Auth-Token",
+            "github_token",
+        ):
             self.assertTrue(is_sensitive_field(key), key)
         self.assertFalse(is_sensitive_field("author"))
         with self.assertRaises(PrivacyError):
@@ -970,7 +1242,12 @@ class ReviewLoopFindingTests(unittest.TestCase):
             "window": {"start": WINDOW_START, "end": WINDOW_END, "timezone": "UTC"},
             "scope": {
                 "repositories": [
-                    {"provider": "github", "instance": "github.com", "owner": "example", "name": "project"}
+                    {
+                        "provider": "github",
+                        "instance": "github.com",
+                        "owner": "example",
+                        "name": "project",
+                    }
                 ]
             },
             "providers": {"github": {"token_env": "GITHUB_TOKEN"}},
@@ -992,12 +1269,16 @@ class ReviewLoopFindingTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             validate_collection_config(unsafe_alias)
 
-    def test_report_privacy_type_errors_are_config_errors_and_cli_status_two(self) -> None:
+    def test_report_privacy_type_errors_are_config_errors_and_cli_status_two(
+        self,
+    ) -> None:
         with self.assertRaises(ConfigError):
             validate_report_config({"privacy": {"actor_display": []}})
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "report.yml"
-            path.write_text("report:\n  privacy:\n    actor_display: []\n", encoding="utf-8")
+            path.write_text(
+                "report:\n  privacy:\n    actor_display: []\n", encoding="utf-8"
+            )
             result = cli_main(["render", str(FIXTURE), "--config", str(path)])
             self.assertEqual(result, 2)
 
@@ -1011,7 +1292,12 @@ class ReviewLoopFindingTests(unittest.TestCase):
             "window": {"start": WINDOW_START, "end": WINDOW_END, "timezone": "UTC"},
             "scope": {
                 "repositories": [
-                    {"provider": "github", "instance": "github.com", "owner": "example", "name": "project"}
+                    {
+                        "provider": "github",
+                        "instance": "github.com",
+                        "owner": "example",
+                        "name": "project",
+                    }
                 ],
                 "actors": [],
             },
@@ -1040,14 +1326,20 @@ class ReviewLoopFindingTests(unittest.TestCase):
             retry_backoff=0,
             sleep_fn=lambda _: None,
         )
-        with patch("git_evidence.providers.transport.urlopen", side_effect=[error]):
-            with self.assertRaises(Exception) as caught:
-                transport.get("/items")
+        with (
+            patch("git_evidence.providers.transport.urlopen", side_effect=[error]),
+            self.assertRaises(Exception) as caught,
+        ):
+            transport.get("/items")
         self.assertEqual(caught.exception.failure_class, "rate_limited")
-        self.assertEqual(caught.exception.failure_classes, ("rate_limited", "budget_exhausted"))
+        self.assertEqual(
+            caught.exception.failure_classes, ("rate_limited", "budget_exhausted")
+        )
         self.assertTrue(transport.metrics()["budget_exhausted"])
 
-    def test_retry_aggregation_keeps_primary_when_later_response_is_malformed(self) -> None:
+    def test_retry_aggregation_keeps_primary_when_later_response_is_malformed(
+        self,
+    ) -> None:
         error = HTTPError(
             "https://example.test/items",
             429,
@@ -1058,9 +1350,11 @@ class ReviewLoopFindingTests(unittest.TestCase):
 
         class InvalidJsonResponse:
             status = 200
-            headers: dict[str, str] = {}
 
-            def __enter__(self) -> "InvalidJsonResponse":
+            def __init__(self) -> None:
+                self.headers: dict[str, str] = {}
+
+            def __enter__(self) -> Self:
                 return self
 
             def __exit__(self, *args: object) -> None:
@@ -1078,12 +1372,14 @@ class ReviewLoopFindingTests(unittest.TestCase):
             retry_jitter=0,
             sleep_fn=lambda _: None,
         )
-        with patch(
-            "git_evidence.providers.transport.urlopen",
-            side_effect=[error, InvalidJsonResponse()],
+        with (
+            patch(
+                "git_evidence.providers.transport.urlopen",
+                side_effect=[error, InvalidJsonResponse()],
+            ),
+            self.assertRaises(ApiError) as caught,
         ):
-            with self.assertRaises(ApiError) as caught:
-                transport.get("/items")
+            transport.get("/items")
         self.assertEqual(caught.exception.failure_class, "rate_limited")
         self.assertEqual(
             caught.exception.failure_classes,
@@ -1123,15 +1419,21 @@ class ReviewLoopFindingTests(unittest.TestCase):
         self.assertEqual(observation["status"], "incomplete")
         self.assertIn("malformed_response", json.dumps(observation["diagnostics"]))
 
-    def test_commit_association_rejects_bad_candidates_and_keeps_valid_siblings(self) -> None:
+    def test_commit_association_rejects_bad_candidates_and_keeps_valid_siblings(
+        self,
+    ) -> None:
         github = github_transport()
-        github.responses["/repos/example/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/pulls"][0].body.extend(
-            [{"number": {"not": "a number"}}, {"number": 7}]
-        )
+        github.responses[
+            "/repos/example/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/pulls"
+        ][0].body.extend([{"number": {"not": "a number"}}, {"number": 7}])
         github_provider = GitHubProvider(github)
         target = request_for("github", "github.com").repositories[0]
-        candidates, result = github_provider._commit_change_request_candidates(target, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        self.assertEqual(candidates[-1], "change_request:github:github.com:example/project:7")
+        candidates, result = github_provider._commit_change_request_candidates(
+            target, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        self.assertEqual(
+            candidates[-1], "change_request:github:github.com:example/project:7"
+        )
         self.assertEqual(result.status, "incomplete")
         self.assertEqual(result.diagnostics["failure_class"], "malformed_response")
         self.assertEqual(result.diagnostics["dropped_count"], 1)
@@ -1142,8 +1444,12 @@ class ReviewLoopFindingTests(unittest.TestCase):
         ][0].body.extend([{"iid": {"not": "an iid"}}, {"iid": 8}])
         gitlab_provider = GitLabProvider(gitlab)
         target = request_for("gitlab", "gitlab.com").repositories[0]
-        candidates, result = gitlab_provider._commit_change_request_candidates(target, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        self.assertEqual(candidates[-1], "change_request:gitlab:gitlab.com:example/project:8")
+        candidates, result = gitlab_provider._commit_change_request_candidates(
+            target, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        self.assertEqual(
+            candidates[-1], "change_request:gitlab:gitlab.com:example/project:8"
+        )
         self.assertEqual(result.status, "incomplete")
         self.assertEqual(result.diagnostics["failure_class"], "malformed_response")
         self.assertEqual(result.diagnostics["dropped_count"], 1)
@@ -1154,10 +1460,14 @@ class ReviewLoopFindingTests(unittest.TestCase):
         issues.append(deepcopy(issues[0]))
         bundle = GitHubProvider(transport).collect(request_for("github", "github.com"))
         work_item_observation = next(
-            item for item in bundle["coverage"]["observations"] if item["source"] == "work_items"
+            item
+            for item in bundle["coverage"]["observations"]
+            if item["source"] == "work_items"
         )
         self.assertEqual(work_item_observation["status"], "incomplete")
-        self.assertEqual(work_item_observation["diagnostics"]["failure_class"], "malformed_response")
+        self.assertEqual(
+            work_item_observation["diagnostics"]["failure_class"], "malformed_response"
+        )
         self.assertEqual(work_item_observation["diagnostics"]["duplicate_count"], 1)
         self.assertFalse(bundle["coverage"]["allow_publish"])
         self.assertEqual(
@@ -1170,7 +1480,12 @@ class ReviewLoopFindingTests(unittest.TestCase):
             "window": {"start": WINDOW_END, "end": WINDOW_START, "timezone": "UTC"},
             "scope": {
                 "repositories": [
-                    {"provider": "github", "instance": "github.com", "owner": "example", "name": "project"}
+                    {
+                        "provider": "github",
+                        "instance": "github.com",
+                        "owner": "example",
+                        "name": "project",
+                    }
                 ],
                 "actors": [],
             },
@@ -1190,10 +1505,18 @@ class ReviewLoopFindingTests(unittest.TestCase):
     def test_naive_provider_timestamps_are_not_accepted(self) -> None:
         self.assertIsNone(parse_timestamp("2026-07-28T08:00:00"))
         request = request_for("github", "github.com")
-        self.assertTrue(in_window_or_malformed({"occurred_at": "2026-07-28T08:00:00"}, request, "occurred_at"))
+        self.assertTrue(
+            in_window_or_malformed(
+                {"occurred_at": "2026-07-28T08:00:00"}, request, "occurred_at"
+            )
+        )
         transport = github_transport()
-        transport.responses["/repos/example/project/issues"][0].body[0]["created_at"] = "2026-07-28T08:00:00Z"
-        transport.responses["/repos/example/project/issues"][0].body[0]["updated_at"] = "2026-07-01T08:00:00Z"
+        transport.responses["/repos/example/project/issues"][0].body[0][
+            "created_at"
+        ] = "2026-07-28T08:00:00Z"
+        transport.responses["/repos/example/project/issues"][0].body[0][
+            "updated_at"
+        ] = "2026-07-01T08:00:00Z"
         bundle = GitHubProvider(transport).collect(request)
         self.assertEqual(bundle["work_items"], [])
 

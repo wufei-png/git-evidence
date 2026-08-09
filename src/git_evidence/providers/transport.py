@@ -11,8 +11,9 @@ import stat
 import time
 from collections.abc import Callable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -450,7 +451,7 @@ class RequestCoordinator:
         if max_requests is None:
             raise ValueError("max_requests must be a finite integer")
         if isinstance(max_requests, bool) or not isinstance(max_requests, int):
-            raise ValueError("max_requests must be an integer")
+            raise TypeError("max_requests must be an integer")
         if max_requests < 1:
             raise ValueError("max_requests must be at least 1")
         if max_requests > MAX_REQUESTS:
@@ -505,7 +506,7 @@ class LocalResponseCache:
                 f"cache ttl_seconds must be in (0, {MAX_CACHE_TTL_SECONDS}]"
             )
         if isinstance(max_entries, bool) or not isinstance(max_entries, int):
-            raise ValueError("cache max_entries must be an integer")
+            raise TypeError("cache max_entries must be an integer")
         if max_entries < 1 or max_entries > MAX_CACHE_ENTRIES:
             raise ValueError(f"cache max_entries must be in [1, {MAX_CACHE_ENTRIES}]")
         self.path = Path(path).expanduser()
@@ -524,15 +525,18 @@ class LocalResponseCache:
             for key, child in value.items():
                 if is_sensitive_field(key):
                     return True
-                if is_url_field(key):
-                    if has_auth_material(
+                if (
+                    is_url_field(key)
+                    and has_auth_material(
                         child,
                         additional_query_names=credential_query_names,
-                    ) and not is_redacted_public_url(
+                    )
+                    and not is_redacted_public_url(
                         child,
                         additional_query_names=credential_query_names,
-                    ):
-                        return True
+                    )
+                ):
+                    return True
                 if LocalResponseCache._contains_sensitive_material(
                     child,
                     token,
@@ -740,7 +744,9 @@ class LocalResponseCache:
 
     def put(self, key: str, response: ApiResponse, *, token: str | None) -> None:
         stored_at = _finite_cache_timestamp(self.clock())
-        provenance = response.provenance if isinstance(response.provenance, Mapping) else {}
+        provenance = (
+            response.provenance if isinstance(response.provenance, Mapping) else {}
+        )
         fetched_at = (
             stored_at
             if not provenance
@@ -838,7 +844,7 @@ def transport_metrics(transport: Any) -> dict[str, Any]:
         return empty_transport_metrics()
     try:
         value = getter()
-    except Exception:
+    except Exception:  # noqa: BLE001 - metrics are a best-effort diagnostic boundary
         return empty_transport_metrics()
     if not isinstance(value, dict):
         return empty_transport_metrics()
@@ -1126,16 +1132,18 @@ class ApiResponse:
 
 
 def _epoch_timestamp(value: float) -> str:
-    return datetime.fromtimestamp(value, timezone.utc).isoformat(
-        timespec="microseconds"
-    ).replace("+00:00", "Z")
+    return (
+        datetime.fromtimestamp(value, UTC)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _timestamp_epoch(value: Any) -> float | None:
     if not isinstance(value, str):
         return None
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
     if parsed.tzinfo is None:
@@ -1289,7 +1297,7 @@ class UrllibTransport:
                 f"timeout must be finite and in [{MIN_TIMEOUT_SECONDS}, {MAX_TIMEOUT_SECONDS}]"
             )
         if isinstance(max_retries, bool) or not isinstance(max_retries, int):
-            raise ValueError("max_retries must be an integer")
+            raise TypeError("max_retries must be an integer")
         if max_retries < 0 or max_retries > MAX_RETRIES:
             raise ValueError(f"max_retries must be in [0, {MAX_RETRIES}]")
         for name, value, maximum in (
@@ -1697,8 +1705,12 @@ class PageResult:
     pages: int
     complete: bool
     diagnostics: dict[str, Any] | None = None
-    retrievals: list[dict[str, Any]] = field(default_factory=list, compare=False)
-    item_retrieval_keys: list[str] = field(default_factory=list, compare=False)
+    retrievals: list[dict[str, Any]] = dataclass_field(
+        default_factory=list, compare=False
+    )
+    item_retrieval_keys: list[str] = dataclass_field(
+        default_factory=list, compare=False
+    )
 
 
 @dataclass(frozen=True)
@@ -1935,7 +1947,7 @@ class PaginationCursor:
         if per_page > MAX_PAGE_ITEMS:
             raise ValueError(f"per_page must be at most {MAX_PAGE_ITEMS}")
         if isinstance(max_pages, bool) or not isinstance(max_pages, int):
-            raise ValueError("max_pages must be an integer")
+            raise TypeError("max_pages must be an integer")
         if max_pages < 1 or max_pages > MAX_PAGES:
             raise ValueError(f"max_pages must be in [1, {MAX_PAGES}]")
 
@@ -1974,7 +1986,7 @@ class PaginationCursor:
         )
         try:
             self._step_once()
-        except Exception as exc:  # noqa: BLE001 - terminalize arbitrary transport failures
+        except Exception as exc:
             (
                 self.visited_requests,
                 self.visited_responses,
@@ -2078,7 +2090,9 @@ class PaginationCursor:
         outcome = (
             decision.outcome or "documented_short_page"
             if decision.complete
-            else "max_pages_reached" if self.pages >= self.max_pages else None
+            else "max_pages_reached"
+            if self.pages >= self.max_pages
+            else None
         )
         retrieval_key = new_response_correlation_key()
         retrieval = response_retrieval_provenance(

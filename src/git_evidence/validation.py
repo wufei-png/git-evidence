@@ -3,29 +3,30 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from importlib.resources import files
-from typing import Any, Iterable, Mapping
+from typing import Any
 from urllib.parse import urlparse
 
 from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import SchemaError
 
-from .model import COLLECTION_KEYS, collection
 from .identity import (
     IdentityError,
     compute_bundle_digest,
     compute_plan_id,
     normalize_plan,
 )
+from .model import COLLECTION_KEYS
 from .privacy import iter_privacy_violations, iter_privacy_warnings
 from .providers.base import (
     ACTIVITY_SOURCES,
-    OPTIONAL_COVERAGE_WARNING_CODE,
     OPERATIONAL_FAILURE_CLASSES,
+    OPTIONAL_COVERAGE_WARNING_CODE,
     RESOURCE_SOURCES,
     RepositoryTarget,
     git_object_id_algorithm,
@@ -107,7 +108,9 @@ def _diagnostic_failure_classes(value: Any) -> set[str]:
             classes.add(failure_class)
         failure_classes = value.get("failure_classes")
         if isinstance(failure_classes, (list, tuple, set)):
-            classes.update(item for item in failure_classes if isinstance(item, str) and item)
+            classes.update(
+                item for item in failure_classes if isinstance(item, str) and item
+            )
         for child in value.values():
             classes.update(_diagnostic_failure_classes(child))
     elif isinstance(value, (list, tuple, set)):
@@ -133,8 +136,7 @@ def _required_core_coverage_missing(
     if repository_ids is None:
         return any(
             not any(
-                isinstance(observation, dict)
-                and observation.get("source") == source
+                isinstance(observation, dict) and observation.get("source") == source
                 for observation in observations
             )
             for source in RESOURCE_SOURCES
@@ -340,7 +342,7 @@ def _parse_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None else None
@@ -363,10 +365,14 @@ def _validate_ids(
                 continue
             entity_id = item.get("id")
             if not isinstance(entity_id, str) or not entity_id:
-                _issue(issues, "entity.id", f"{key}[{position}] is missing a non-empty id")
+                _issue(
+                    issues, "entity.id", f"{key}[{position}] is missing a non-empty id"
+                )
                 continue
             if entity_id in index:
-                _issue(issues, "entity.duplicate_id", f"duplicate {key} id: {entity_id}")
+                _issue(
+                    issues, "entity.duplicate_id", f"duplicate {key} id: {entity_id}"
+                )
                 continue
             index[entity_id] = item
         indexes[key] = index
@@ -390,7 +396,11 @@ def _validate_run(
         start = _parse_timestamp(window.get("start"))
         end = _parse_timestamp(window.get("end"))
         if start is None or end is None:
-            _issue(issues, "window.timestamp", "window start/end must be timezone-aware ISO timestamps")
+            _issue(
+                issues,
+                "window.timestamp",
+                "window start/end must be timezone-aware ISO timestamps",
+            )
         elif start >= end:
             _issue(issues, "window.order", "window start must be before end")
         if not isinstance(window.get("timezone"), str) or not window["timezone"]:
@@ -400,19 +410,39 @@ def _validate_run(
         _issue(issues, "scope.missing", "run.scope must be an object")
         return set(), None
     repositories = scope.get("repositories")
-    if not isinstance(repositories, list) or not repositories or not all(
-        isinstance(value, str) and value for value in repositories
+    if (
+        not isinstance(repositories, list)
+        or not repositories
+        or not all(isinstance(value, str) and value for value in repositories)
     ):
-        _issue(issues, "scope.repositories", "run.scope.repositories must be a non-empty id allowlist")
+        _issue(
+            issues,
+            "scope.repositories",
+            "run.scope.repositories must be a non-empty id allowlist",
+        )
         return set(), None
     if len(repositories) != len(set(repositories)):
-        _issue(issues, "scope.repositories_duplicate", "run.scope.repositories must not contain duplicate IDs")
+        _issue(
+            issues,
+            "scope.repositories_duplicate",
+            "run.scope.repositories must not contain duplicate IDs",
+        )
     actors = scope.get("actors", [])
-    if not isinstance(actors, list) or not all(isinstance(value, str) and value for value in actors):
-        _issue(issues, "scope.actors", "run.scope.actors must be an array of non-empty actor IDs")
+    if not isinstance(actors, list) or not all(
+        isinstance(value, str) and value for value in actors
+    ):
+        _issue(
+            issues,
+            "scope.actors",
+            "run.scope.actors must be an array of non-empty actor IDs",
+        )
         actor_ids: set[str] | None = None
     elif len(actors) != len(set(actors)):
-        _issue(issues, "scope.actors_duplicate", "run.scope.actors must not contain duplicate IDs")
+        _issue(
+            issues,
+            "scope.actors_duplicate",
+            "run.scope.actors must not contain duplicate IDs",
+        )
         actor_ids = set(actors)
     else:
         actor_ids = set(actors)
@@ -427,11 +457,17 @@ def _validate_evidence(
         url = item.get("url")
         source_ref = item.get("source_ref")
         if not url and not source_ref:
-            _issue(issues, "evidence.reference", f"evidence {evidence_id} has no url or source_ref")
+            _issue(
+                issues,
+                "evidence.reference",
+                f"evidence {evidence_id} has no url or source_ref",
+            )
         if url:
             parsed = urlparse(str(url))
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                _issue(issues, "evidence.url", f"evidence {evidence_id} has an invalid URL")
+                _issue(
+                    issues, "evidence.url", f"evidence {evidence_id} has an invalid URL"
+                )
     for fact_id, fact in indexes.get("facts", {}).items():
         evidence_ids = fact.get("evidence_ids")
         if not isinstance(evidence_ids, list) or not evidence_ids:
@@ -439,7 +475,11 @@ def _validate_evidence(
             continue
         for evidence_id in evidence_ids:
             if not isinstance(evidence_id, str) or evidence_id not in evidence:
-                _issue(issues, "fact.evidence_ref", f"fact {fact_id} references missing evidence {evidence_id}")
+                _issue(
+                    issues,
+                    "fact.evidence_ref",
+                    f"fact {fact_id} references missing evidence {evidence_id}",
+                )
                 continue
             _validate_fact_evidence_subject(
                 fact_id,
@@ -472,8 +512,14 @@ def _validate_evidence(
         commit_ids = ref_change.get("commit_ids")
         if commit_ids is None:
             continue
-        if not isinstance(commit_ids, list) or not all(isinstance(value, str) for value in commit_ids):
-            _issue(issues, "ref_change.commit_ids", f"ref_change {ref_change_id} has invalid commit_ids")
+        if not isinstance(commit_ids, list) or not all(
+            isinstance(value, str) for value in commit_ids
+        ):
+            _issue(
+                issues,
+                "ref_change.commit_ids",
+                f"ref_change {ref_change_id} has invalid commit_ids",
+            )
             continue
         for commit_id in commit_ids:
             if not isinstance(commit_id, str) or commit_id not in commits:
@@ -522,7 +568,11 @@ def _validate_fact_evidence_subject(
         _issue(issues, "fact.subject", f"fact {fact_id} has an invalid subject_id")
 
     expected_type = _inferred_fact_subject_type(fact)
-    expected_id = fact_subject_id if isinstance(fact_subject_id, str) and fact_subject_id else None
+    expected_id = (
+        fact_subject_id
+        if isinstance(fact_subject_id, str) and fact_subject_id
+        else None
+    )
     subject_type = evidence.get("subject_type")
     subject_id = evidence.get("subject_id")
     if subject_type is None and subject_id is None:
@@ -595,13 +645,15 @@ def _validate_fact_evidence_subject(
                 "fact.evidence_provenance",
                 f"fact {fact_id} evidence {evidence.get('id')} provider_id does not match subject",
             )
-    elif evidence_provider_id is not None:
-        if not isinstance(evidence_provider_id, str) or evidence_provider_id not in indexes.get("providers", {}):
-            _issue(
-                issues,
-                "fact.evidence_provenance",
-                f"fact {fact_id} evidence {evidence.get('id')} references an unknown provider",
-            )
+    elif evidence_provider_id is not None and (
+        not isinstance(evidence_provider_id, str)
+        or evidence_provider_id not in indexes.get("providers", {})
+    ):
+        _issue(
+            issues,
+            "fact.evidence_provenance",
+            f"fact {fact_id} evidence {evidence.get('id')} references an unknown provider",
+        )
 
     fact_repository_id = fact.get("repository_id")
     subject_repository_id = subject.get("repository_id")
@@ -636,9 +688,12 @@ def _provider_id_from_entity_id(
     for provider_id, provider in provider_index.items():
         kind = provider.get("kind")
         instance = provider.get("instance")
-        if isinstance(kind, str) and isinstance(instance, str):
-            if entity_id.startswith(f"{singular}:{kind}:{instance}:"):
-                return provider_id
+        if (
+            isinstance(kind, str)
+            and isinstance(instance, str)
+            and entity_id.startswith(f"{singular}:{kind}:{instance}:")
+        ):
+            return provider_id
     return None
 
 
@@ -655,7 +710,7 @@ def _canonical_repository_prefix(
     provider_repository_prefix = f"repo:{kind}:{instance}:"
     if not repository_id.startswith(provider_repository_prefix):
         return None
-    repository_segment = repository_id[len(provider_repository_prefix):]
+    repository_segment = repository_id[len(provider_repository_prefix) :]
     if not repository_segment:
         return None
     singular = {
@@ -677,7 +732,7 @@ def _repository_target_from_id(
     prefix = f"repo:{kind}:{instance}:"
     if not repository_id.startswith(prefix):
         return None
-    repository_segment = repository_id[len(prefix):]
+    repository_segment = repository_id[len(prefix) :]
     if "/" not in repository_segment:
         return None
     owner, name = repository_segment.rsplit("/", 1)
@@ -733,7 +788,8 @@ def _validate_canonical_repository_identity(
             f"repository {repository_id} full_name/path identity does not match its canonical target",
         )
     if "name" in repository and (
-        not isinstance(repository["name"], str) or repository["name"].strip() != target.name
+        not isinstance(repository["name"], str)
+        or repository["name"].strip() != target.name
     ):
         _issue(
             issues,
@@ -748,7 +804,9 @@ def _validate_canonical_repository_identity(
             f"repository {repository_id} has no verifiable canonical URL",
         )
     for value in url_values:
-        if not isinstance(value, str) or not repository_url_matches_target(value, target):
+        if not isinstance(value, str) or not repository_url_matches_target(
+            value, target
+        ):
             _issue(
                 issues,
                 "repository.url_identity",
@@ -776,7 +834,9 @@ def _entity_provider_id(
             if isinstance(provider_id, str) and provider_id:
                 return provider_id
     collection_key = SUBJECT_COLLECTIONS.get(subject_type, f"{subject_type}s")
-    return _provider_id_from_entity_id(collection_key, item, indexes.get("providers", {}))
+    return _provider_id_from_entity_id(
+        collection_key, item, indexes.get("providers", {})
+    )
 
 
 def _validate_provenance(
@@ -788,8 +848,17 @@ def _validate_provenance(
     for provider_id, provider in providers.items():
         kind = provider.get("kind")
         instance = provider.get("instance")
-        if not isinstance(kind, str) or not kind or not isinstance(instance, str) or not instance:
-            _issue(issues, "provider.provenance", f"provider {provider_id} must declare kind and instance")
+        if (
+            not isinstance(kind, str)
+            or not kind
+            or not isinstance(instance, str)
+            or not instance
+        ):
+            _issue(
+                issues,
+                "provider.provenance",
+                f"provider {provider_id} must declare kind and instance",
+            )
             continue
         if re.fullmatch(r"[a-z][a-z0-9_-]*", kind) is None:
             _issue(
@@ -836,7 +905,10 @@ def _validate_provenance(
                 f"repository {repository_id} references an unknown provider",
             )
             continue
-        if explicit_provider_id is not None and explicit_provider_id != inferred_provider_id:
+        if (
+            explicit_provider_id is not None
+            and explicit_provider_id != inferred_provider_id
+        ):
             _issue(
                 issues,
                 "repository.provenance",
@@ -851,10 +923,14 @@ def _validate_provenance(
                 "repository.provenance",
                 f"repository {repository_id} does not match provider {provider_id}",
             )
-        _validate_canonical_repository_identity(repository_id, repository, provider, issues)
+        _validate_canonical_repository_identity(
+            repository_id, repository, provider, issues
+        )
 
     entity_collections = tuple(
-        key for key in COLLECTION_KEYS if key not in {"providers", "repositories", "evidence", "facts"}
+        key
+        for key in COLLECTION_KEYS
+        if key not in {"providers", "repositories", "evidence", "facts"}
     )
     for collection_key in entity_collections:
         singular = {
@@ -865,12 +941,23 @@ def _validate_provenance(
         for entity_id, item in indexes.get(collection_key, {}).items():
             explicit_provider_id = item.get("provider_id")
             repository_id = item.get("repository_id")
-            repository = repositories.get(repository_id) if isinstance(repository_id, str) else None
-            repository_provider_id = repository.get("provider_id") if isinstance(repository, dict) else None
+            repository = (
+                repositories.get(repository_id)
+                if isinstance(repository_id, str)
+                else None
+            )
+            repository_provider_id = (
+                repository.get("provider_id") if isinstance(repository, dict) else None
+            )
             if explicit_provider_id is not None and (
-                not isinstance(explicit_provider_id, str) or explicit_provider_id not in providers
+                not isinstance(explicit_provider_id, str)
+                or explicit_provider_id not in providers
             ):
-                _issue(issues, "entity.provenance", f"{collection_key} {entity_id} references an unknown provider")
+                _issue(
+                    issues,
+                    "entity.provenance",
+                    f"{collection_key} {entity_id} references an unknown provider",
+                )
             if (
                 isinstance(explicit_provider_id, str)
                 and isinstance(repository_provider_id, str)
@@ -890,7 +977,11 @@ def _validate_provenance(
                 continue
             provider = providers.get(provider_id)
             if provider is None:
-                _issue(issues, "entity.provenance", f"{collection_key} {entity_id} has unknown provider provenance")
+                _issue(
+                    issues,
+                    "entity.provenance",
+                    f"{collection_key} {entity_id} has unknown provider provenance",
+                )
                 continue
             kind = provider.get("kind")
             instance = provider.get("instance")
@@ -900,12 +991,18 @@ def _validate_provenance(
                     "entity.provenance",
                     f"{collection_key} {entity_id} id does not match provider {provider_id}",
                 )
-            expected_repository_prefix = _canonical_repository_prefix(
-                collection_key,
-                repository_id,
-                provider,
-            ) if isinstance(repository_id, str) else None
-            if expected_repository_prefix and not entity_id.startswith(expected_repository_prefix):
+            expected_repository_prefix = (
+                _canonical_repository_prefix(
+                    collection_key,
+                    repository_id,
+                    provider,
+                )
+                if isinstance(repository_id, str)
+                else None
+            )
+            if expected_repository_prefix and not entity_id.startswith(
+                expected_repository_prefix
+            ):
                 _issue(
                     issues,
                     "entity.repository_binding",
@@ -919,7 +1016,11 @@ def _validate_provenance(
         if provider_id is not None and (
             not isinstance(provider_id, str) or provider_id not in providers
         ):
-            _issue(issues, "evidence.provenance", f"evidence {evidence_id} references an unknown provider")
+            _issue(
+                issues,
+                "evidence.provenance",
+                f"evidence {evidence_id} references an unknown provider",
+            )
         if isinstance(subject_type, str) and isinstance(subject_id, str):
             subject_collection = SUBJECT_COLLECTIONS.get(subject_type)
             subject = indexes.get(subject_collection or "", {}).get(subject_id)
@@ -933,6 +1034,7 @@ def _validate_provenance(
                     f"evidence {evidence_id} provider does not match its subject",
                 )
 
+
 def _validate_scope(
     indexes: dict[str, dict[str, dict[str, Any]]],
     scope_repository_ids: set[str],
@@ -941,14 +1043,26 @@ def _validate_scope(
 ) -> None:
     repositories = indexes.get("repositories", {})
     for repository_id in sorted(set(repositories) - scope_repository_ids):
-        _issue(issues, "scope.entity_outside", f"repositories {repository_id} is outside the repository allowlist")
+        _issue(
+            issues,
+            "scope.entity_outside",
+            f"repositories {repository_id} is outside the repository allowlist",
+        )
     missing = scope_repository_ids - set(repositories)
     for repository_id in sorted(missing):
-        _issue(issues, "scope.repository_missing", f"allowlisted repository is not in bundle: {repository_id}")
+        _issue(
+            issues,
+            "scope.repository_missing",
+            f"allowlisted repository is not in bundle: {repository_id}",
+        )
     actors = indexes.get("actors", {})
     if scope_actor_ids:
         for actor_id in sorted(set(actors) - scope_actor_ids):
-            _issue(issues, "scope.actor_outside", f"actor {actor_id} is outside the actor allowlist")
+            _issue(
+                issues,
+                "scope.actor_outside",
+                f"actor {actor_id} is outside the actor allowlist",
+            )
     for key in (
         "work_items",
         "change_requests",
@@ -961,19 +1075,39 @@ def _validate_scope(
         for entity_id, item in indexes.get(key, {}).items():
             repository_id = item.get("repository_id")
             if not isinstance(repository_id, str) or not repository_id:
-                _issue(issues, "scope.entity_repository_missing", f"{key} {entity_id} has no repository_id")
+                _issue(
+                    issues,
+                    "scope.entity_repository_missing",
+                    f"{key} {entity_id} has no repository_id",
+                )
             elif repository_id not in scope_repository_ids:
-                _issue(issues, "scope.entity_outside", f"{key} {entity_id} is outside the repository allowlist")
+                _issue(
+                    issues,
+                    "scope.entity_outside",
+                    f"{key} {entity_id} is outside the repository allowlist",
+                )
             actor_id = item.get("actor_id")
             if actor_id is None:
                 continue
             if not isinstance(actor_id, str) or not actor_id:
-                _issue(issues, "scope.actor_ref_invalid", f"{key} {entity_id} has an invalid actor_id")
+                _issue(
+                    issues,
+                    "scope.actor_ref_invalid",
+                    f"{key} {entity_id} has an invalid actor_id",
+                )
             else:
                 if actor_id not in actors:
-                    _issue(issues, "scope.actor_ref_missing", f"{key} {entity_id} references missing actor {actor_id}")
+                    _issue(
+                        issues,
+                        "scope.actor_ref_missing",
+                        f"{key} {entity_id} references missing actor {actor_id}",
+                    )
                 if scope_actor_ids and actor_id not in scope_actor_ids:
-                    _issue(issues, "scope.actor_outside", f"{key} {entity_id} has an actor outside the actor allowlist")
+                    _issue(
+                        issues,
+                        "scope.actor_outside",
+                        f"{key} {entity_id} has an actor outside the actor allowlist",
+                    )
 
 
 def _validate_interactions(
@@ -1038,21 +1172,38 @@ def _validate_coverage(
     if not isinstance(required_sources, list) or not all(
         isinstance(value, str) and value for value in required_sources
     ):
-        _issue(issues, "coverage.required_sources", "coverage.required_sources must be an array of strings")
+        _issue(
+            issues,
+            "coverage.required_sources",
+            "coverage.required_sources must be an array of strings",
+        )
         required_sources = []
     else:
         if not required_sources:
-            _issue(issues, "coverage.required_sources_empty", "coverage.required_sources must not be empty")
+            _issue(
+                issues,
+                "coverage.required_sources_empty",
+                "coverage.required_sources must not be empty",
+            )
         if len(required_sources) != len(set(required_sources)):
-            _issue(issues, "coverage.required_sources_duplicate", "coverage.required_sources must not contain duplicates")
+            _issue(
+                issues,
+                "coverage.required_sources_duplicate",
+                "coverage.required_sources must not contain duplicates",
+            )
         unknown_sources = sorted(set(required_sources) - KNOWN_COVERAGE_SOURCES)
         if unknown_sources:
             _issue(
                 issues,
                 "coverage.required_source_unknown",
-                "coverage.required_sources contains unknown sources: " + ", ".join(unknown_sources),
+                "coverage.required_sources contains unknown sources: "
+                + ", ".join(unknown_sources),
             )
-            required_sources = [source for source in required_sources if source in KNOWN_COVERAGE_SOURCES]
+            required_sources = [
+                source
+                for source in required_sources
+                if source in KNOWN_COVERAGE_SOURCES
+            ]
         missing_contract_sources = sorted(
             set(required_sources_contract) - set(required_sources)
         )
@@ -1064,15 +1215,25 @@ def _validate_coverage(
                 + ", ".join(missing_contract_sources),
             )
     if not isinstance(observations, list):
-        _issue(issues, "coverage.observations", "coverage.observations must be an array")
+        _issue(
+            issues, "coverage.observations", "coverage.observations must be an array"
+        )
         observations = []
     group_failures = coverage.get("group_failures", [])
     if not isinstance(group_failures, list):
-        _issue(issues, "coverage.group_failures_shape", "coverage.group_failures must be an array")
+        _issue(
+            issues,
+            "coverage.group_failures_shape",
+            "coverage.group_failures must be an array",
+        )
         group_failures = []
     for position, failure in enumerate(group_failures):
         if not isinstance(failure, dict):
-            _issue(issues, "coverage.group_failure_shape", f"coverage.group_failures[{position}] must be an object")
+            _issue(
+                issues,
+                "coverage.group_failure_shape",
+                f"coverage.group_failures[{position}] must be an object",
+            )
             continue
         for field in ("provider", "instance", "repository", "source", "failure_class"):
             if not isinstance(failure.get(field), str) or not failure[field]:
@@ -1094,7 +1255,11 @@ def _validate_coverage(
     warning_groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for position, warning in enumerate(warnings):
         if not isinstance(warning, dict):
-            _issue(issues, "coverage.warning_shape", f"coverage.warnings[{position}] must be an object")
+            _issue(
+                issues,
+                "coverage.warning_shape",
+                f"coverage.warnings[{position}] must be an object",
+            )
             continue
         if warning.get("code") != OPTIONAL_COVERAGE_WARNING_CODE:
             _issue(
@@ -1143,7 +1308,9 @@ def _validate_coverage(
                 f"coverage.warnings[{position}] references repository outside the allowlist: {repository_id}",
             )
         message = warning.get("message")
-        if message is not None and (not isinstance(message, str) or not message.strip()):
+        if message is not None and (
+            not isinstance(message, str) or not message.strip()
+        ):
             _issue(
                 issues,
                 "coverage.warning_message",
@@ -1162,7 +1329,10 @@ def _validate_coverage(
         if failure_classes is not None and (
             not isinstance(failure_classes, list)
             or not failure_classes
-            or any(not isinstance(value, str) or value not in FAILURE_CLASSES for value in failure_classes)
+            or any(
+                not isinstance(value, str) or value not in FAILURE_CLASSES
+                for value in failure_classes
+            )
         ):
             _issue(
                 issues,
@@ -1179,30 +1349,51 @@ def _validate_coverage(
         ):
             key = (source, repository_id, provider_id)
             if key in warning_groups:
-                _issue(issues, "coverage.warning_duplicate", f"duplicate coverage warning: {key}")
+                _issue(
+                    issues,
+                    "coverage.warning_duplicate",
+                    f"duplicate coverage warning: {key}",
+                )
             warning_groups.setdefault(key, []).append(warning)
     by_group: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     optional_privacy_observations: list[dict[str, Any]] = []
     for position, observation in enumerate(observations):
         if not isinstance(observation, dict):
-            _issue(issues, "coverage.observation_shape", f"coverage.observations[{position}] must be an object")
+            _issue(
+                issues,
+                "coverage.observation_shape",
+                f"coverage.observations[{position}] must be an object",
+            )
             continue
         source = observation.get("source")
         state = observation.get("status")
         if not isinstance(source, str) or not source:
-            _issue(issues, "coverage.observation_source", f"coverage observation {position} has no source")
+            _issue(
+                issues,
+                "coverage.observation_source",
+                f"coverage observation {position} has no source",
+            )
             continue
         if state not in CAPABILITY_STATES:
-            _issue(issues, "coverage.observation_status", f"coverage {source} has invalid status: {state!r}")
+            _issue(
+                issues,
+                "coverage.observation_status",
+                f"coverage {source} has invalid status: {state!r}",
+            )
         diagnostics = observation.get("diagnostics")
         pagination: Any = None
         if diagnostics is not None:
             if not isinstance(diagnostics, dict):
-                _issue(issues, "coverage.diagnostics_shape", f"coverage {source} diagnostics must be an object")
+                _issue(
+                    issues,
+                    "coverage.diagnostics_shape",
+                    f"coverage {source} diagnostics must be an object",
+                )
             else:
                 failure_class = diagnostics.get("failure_class")
                 if failure_class is not None and (
-                    not isinstance(failure_class, str) or failure_class not in FAILURE_CLASSES
+                    not isinstance(failure_class, str)
+                    or failure_class not in FAILURE_CLASSES
                 ):
                     _issue(
                         issues,
@@ -1254,8 +1445,12 @@ def _validate_coverage(
                             )
                         provider_id = observation.get("provider_id")
                         provider = indexes.get("providers", {}).get(provider_id, {})
-                        provider_kind = provider.get("kind") if isinstance(provider, dict) else None
-                        expected_outcome = PROVIDER_PAGINATION_OUTCOMES.get(provider_kind)
+                        provider_kind = (
+                            provider.get("kind") if isinstance(provider, dict) else None
+                        )
+                        expected_outcome = PROVIDER_PAGINATION_OUTCOMES.get(
+                            provider_kind
+                        )
                         if (
                             state == "supported"
                             and expected_outcome is not None
@@ -1269,16 +1464,24 @@ def _validate_coverage(
                                 f"{provider_kind} terminal outcome {expected_outcome!r}",
                             )
                 operational_failures = (
-                    _diagnostic_failure_classes(diagnostics) & OPERATIONAL_FAILURE_CLASSES
+                    _diagnostic_failure_classes(diagnostics)
+                    & OPERATIONAL_FAILURE_CLASSES
                 )
-                if source in RESOURCE_SOURCES and state == "supported" and operational_failures:
+                if (
+                    source in RESOURCE_SOURCES
+                    and state == "supported"
+                    and operational_failures
+                ):
                     _issue(
                         issues,
                         "coverage.supported_operational_failure",
                         f"core coverage {source} is marked supported despite operational failures: "
                         + ", ".join(sorted(operational_failures)),
                     )
-                if source in ACTIVITY_SOURCES and "privacy_violation" in operational_failures:
+                if (
+                    source in ACTIVITY_SOURCES
+                    and "privacy_violation" in operational_failures
+                ):
                     optional_privacy_observations.append(observation)
         if (
             source in PAGINATED_COVERAGE_SOURCES
@@ -1298,7 +1501,8 @@ def _validate_coverage(
                 f"coverage {source} must declare a repository_id",
             )
         if repository_id is not None and (
-            not isinstance(repository_id, str) or repository_id not in scope_repository_ids
+            not isinstance(repository_id, str)
+            or repository_id not in scope_repository_ids
         ):
             _issue(
                 issues,
@@ -1325,9 +1529,17 @@ def _validate_coverage(
             and isinstance(provider_id, str)
             and provider_id in indexes.get("providers", {})
         ):
-            by_group.setdefault((source, repository_id, provider_id), []).append(observation)
-        repository = indexes.get("repositories", {}).get(repository_id) if isinstance(repository_id, str) else None
-        repository_provider_id = repository.get("provider_id") if isinstance(repository, dict) else None
+            by_group.setdefault((source, repository_id, provider_id), []).append(
+                observation
+            )
+        repository = (
+            indexes.get("repositories", {}).get(repository_id)
+            if isinstance(repository_id, str)
+            else None
+        )
+        repository_provider_id = (
+            repository.get("provider_id") if isinstance(repository, dict) else None
+        )
         if (
             isinstance(provider_id, str)
             and isinstance(repository_provider_id, str)
@@ -1338,7 +1550,11 @@ def _validate_coverage(
                 "coverage.provenance",
                 f"coverage {source} provider does not match repository {repository_id}",
             )
-        provider = indexes.get("providers", {}).get(provider_id) if isinstance(provider_id, str) else None
+        provider = (
+            indexes.get("providers", {}).get(provider_id)
+            if isinstance(provider_id, str)
+            else None
+        )
         if isinstance(repository_id, str) and isinstance(provider, dict):
             kind = provider.get("kind")
             instance = provider.get("instance")
@@ -1354,7 +1570,10 @@ def _validate_coverage(
             continue
         warning_key = (source, repository_id, provider_id)
         for observation in matches:
-            if observation.get("status") != "supported" and warning_key not in warning_groups:
+            if (
+                observation.get("status") != "supported"
+                and warning_key not in warning_groups
+            ):
                 _issue(
                     issues,
                     "coverage.warning_missing",
@@ -1411,7 +1630,9 @@ def _validate_coverage(
             )
             continue
         non_supported_matches = [
-            observation for observation in matches if observation.get("status") != "supported"
+            observation
+            for observation in matches
+            if observation.get("status") != "supported"
         ]
         observed_failure_classes: set[str] = set()
         observed_notes: list[str] = []
@@ -1487,14 +1708,25 @@ def _validate_coverage(
                     f"coverage.fatal[{position}] must be an object",
                 )
                 continue
-            for field in ("code", "provider", "instance", "repository", "source", "status"):
+            for field in (
+                "code",
+                "provider",
+                "instance",
+                "repository",
+                "source",
+                "status",
+            ):
                 if not isinstance(blocker.get(field), str) or not blocker[field]:
                     _issue(
                         issues,
                         "coverage.fatal_field",
                         f"coverage.fatal[{position}].{field} must be a non-empty string",
                     )
-            if blocker.get("status") not in {"unsupported", "unavailable", "incomplete"}:
+            if blocker.get("status") not in {
+                "unsupported",
+                "unavailable",
+                "incomplete",
+            }:
                 _issue(
                     issues,
                     "coverage.fatal_status",
@@ -1573,9 +1805,7 @@ def _validate_coverage(
                 and matches
                 and all(
                     failure_class
-                    not in _diagnostic_failure_classes(
-                        observation.get("diagnostics")
-                    )
+                    not in _diagnostic_failure_classes(observation.get("diagnostics"))
                     for observation in matches
                 )
             ):
@@ -1585,11 +1815,19 @@ def _validate_coverage(
                     f"coverage.fatal[{position}] failure_class is not recorded by its observation",
                 )
         if fatal:
-            _issue(issues, "coverage.fatal", f"coverage contains fatal observations: {len(fatal)}")
+            _issue(
+                issues,
+                "coverage.fatal",
+                f"coverage contains fatal observations: {len(fatal)}",
+            )
     for observation in optional_privacy_observations:
         provider_id = observation.get("provider_id")
         repository_id = observation.get("repository_id")
-        provider = indexes.get("providers", {}).get(provider_id) if isinstance(provider_id, str) else None
+        provider = (
+            indexes.get("providers", {}).get(provider_id)
+            if isinstance(provider_id, str)
+            else None
+        )
         fatal_match = any(
             isinstance(item, dict)
             and isinstance(provider, dict)
@@ -1619,7 +1857,9 @@ def _validate_coverage(
             if isinstance(provider_kind, str) and isinstance(instance, str)
             else None
         )
-        if expected_provider_id and expected_provider_id not in indexes.get("providers", {}):
+        if expected_provider_id and expected_provider_id not in indexes.get(
+            "providers", {}
+        ):
             _issue(
                 issues,
                 "coverage.group_failure_provenance",
@@ -1671,7 +1911,10 @@ def _validate_coverage(
                     )
                 diagnostics = observation.get("diagnostics")
                 diagnostic_classes: set[str] = set()
-                def collect_diagnostic_classes(value: Any, accumulator: set[str]) -> None:
+
+                def collect_diagnostic_classes(
+                    value: Any, accumulator: set[str]
+                ) -> None:
                     if isinstance(value, dict):
                         diagnostic_class = value.get("failure_class")
                         if isinstance(diagnostic_class, str):
@@ -1688,7 +1931,10 @@ def _validate_coverage(
                             collect_diagnostic_classes(child, accumulator)
 
                 collect_diagnostic_classes(diagnostics, diagnostic_classes)
-                if isinstance(failure_class, str) and failure_class not in diagnostic_classes:
+                if (
+                    isinstance(failure_class, str)
+                    and failure_class not in diagnostic_classes
+                ):
                     _issue(
                         issues,
                         "coverage.group_failure_diagnostics",
@@ -1739,14 +1985,22 @@ def _validate_privacy(bundle: dict[str, Any], issues: list[ValidationIssue]) -> 
         _issue(issues, "privacy.policy_shape", "privacy must be an object")
         return
     if policy.get("actor_display") != "anonymous":
-        _issue(issues, "privacy.actor_display", "bundle actor display policy must be anonymous")
+        _issue(
+            issues,
+            "privacy.actor_display",
+            "bundle actor display policy must be anonymous",
+        )
     if policy.get("source_urls") != "sanitized":
         _issue(issues, "privacy.source_urls", "bundle source URLs must be sanitized")
     if policy.get("auth_redaction") is not True:
-        _issue(issues, "privacy.auth_redaction", "bundle auth redaction must be enabled")
+        _issue(
+            issues, "privacy.auth_redaction", "bundle auth redaction must be enabled"
+        )
 
 
-def _validate_collection_transport(bundle: dict[str, Any], issues: list[ValidationIssue]) -> None:
+def _validate_collection_transport(
+    bundle: dict[str, Any], issues: list[ValidationIssue]
+) -> None:
     collection_data = bundle.get("collection")
     if not isinstance(collection_data, dict):
         return
@@ -1814,8 +2068,12 @@ def _validate_v01_intrinsic(
     _validate_coverage(bundle, indexes, scope_repository_ids, issues, contract)
     run = bundle.get("run")
     window = run.get("window") if isinstance(run, dict) else None
-    window_start = _parse_timestamp(window.get("start")) if isinstance(window, dict) else None
-    window_end = _parse_timestamp(window.get("end")) if isinstance(window, dict) else None
+    window_start = (
+        _parse_timestamp(window.get("start")) if isinstance(window, dict) else None
+    )
+    window_end = (
+        _parse_timestamp(window.get("end")) if isinstance(window, dict) else None
+    )
     for key in COLLECTION_KEYS:
         for entity_id, item in indexes.get(key, {}).items():
             if "occurred_at" not in item:
@@ -1823,7 +2081,11 @@ def _validate_v01_intrinsic(
             occurred_at = item.get("occurred_at")
             parsed_at = _parse_timestamp(occurred_at)
             if parsed_at is None:
-                _issue(issues, "entity.timestamp", f"{key} {entity_id} has an invalid occurred_at")
+                _issue(
+                    issues,
+                    "entity.timestamp",
+                    f"{key} {entity_id} has an invalid occurred_at",
+                )
             elif (
                 window_start is not None
                 and window_end is not None
@@ -1839,10 +2101,18 @@ def _validate_v01_intrinsic(
         sha = item.get("sha")
         algorithm = git_object_id_algorithm(sha)
         if algorithm is None or not is_verifiable_sha(sha):
-            code = "commit.sha_missing" if not isinstance(sha, str) or not sha.strip() else "commit.sha_unverifiable"
+            code = (
+                "commit.sha_missing"
+                if not isinstance(sha, str) or not sha.strip()
+                else "commit.sha_unverifiable"
+            )
             _issue(issues, code, f"commit {entity_id} has no verifiable sha")
         elif not entity_id.endswith(f":{sha}"):
-            _issue(issues, "commit.sha_mismatch", f"commit {entity_id} sha does not match its canonical id")
+            _issue(
+                issues,
+                "commit.sha_mismatch",
+                f"commit {entity_id} sha does not match its canonical id",
+            )
         if algorithm is not None and item.get("hash_algorithm") != algorithm:
             _issue(
                 issues,
@@ -1852,7 +2122,11 @@ def _validate_v01_intrinsic(
     for entity_id, item in indexes.get("ref_changes", {}).items():
         association = item.get("change_association")
         if not isinstance(association, str) or association not in ASSOCIATION_STATES:
-            _issue(issues, "association.state", f"ref_change {entity_id} has invalid change_association")
+            _issue(
+                issues,
+                "association.state",
+                f"ref_change {entity_id} has invalid change_association",
+            )
     return issues
 
 
@@ -1973,7 +2247,11 @@ def _validate_v02_identity_and_retrievals(
     if isinstance(invocation, dict):
         started_at = _parse_timestamp(invocation.get("started_at"))
         finished_at = _parse_timestamp(invocation.get("finished_at"))
-        if started_at is not None and finished_at is not None and started_at > finished_at:
+        if (
+            started_at is not None
+            and finished_at is not None
+            and started_at > finished_at
+        ):
             _issue(
                 issues,
                 "invocation.order",
@@ -2055,7 +2333,9 @@ def _validate_v02_identity_and_retrievals(
             if isinstance(provider_id, str) and isinstance(source, str):
                 observed_sources.setdefault(provider_id, set()).add(source)
     for provider_id in set(plan_sources) | set(observed_sources):
-        if plan_sources.get(provider_id, set()) != observed_sources.get(provider_id, set()):
+        if plan_sources.get(provider_id, set()) != observed_sources.get(
+            provider_id, set()
+        ):
             _issue(
                 issues,
                 "plan.sources_mismatch",
@@ -2084,7 +2364,12 @@ def _validate_v02_identity_and_retrievals(
         if isinstance(repository, dict) and isinstance(repository.get("id"), str):
             subject_repositories[repository["id"]] = repository["id"]
     for key in (
-        "work_items", "change_requests", "interactions", "commits", "ref_changes", "releases"
+        "work_items",
+        "change_requests",
+        "interactions",
+        "commits",
+        "ref_changes",
+        "releases",
     ):
         for subject in bundle.get(key, []):
             if (
@@ -2133,9 +2418,15 @@ def _validate_v02_identity_and_retrievals(
                     f"retrieval {retrieval_id} has inconsistent cache timestamps",
                     path=f"$.retrievals[{position}]",
                 )
-            if stored_at is not None and replayed_at is not None and isinstance(age, (int, float)):
+            if (
+                stored_at is not None
+                and replayed_at is not None
+                and isinstance(age, (int, float))
+            ):
                 expected_age = (replayed_at - stored_at).total_seconds()
-                if not math.isclose(float(age), expected_age, rel_tol=0.0, abs_tol=1e-6):
+                if not math.isclose(
+                    float(age), expected_age, rel_tol=0.0, abs_tol=1e-6
+                ):
                     _issue(
                         issues,
                         "retrieval.cache_age_mismatch",
@@ -2149,7 +2440,11 @@ def _validate_v02_identity_and_retrievals(
                         f"retrieval {retrieval_id} exceeds its recorded cache TTL",
                         path=f"$.retrievals[{position}]",
                     )
-            elif isinstance(age, (int, float)) and isinstance(ttl, (int, float)) and age > ttl:
+            elif (
+                isinstance(age, (int, float))
+                and isinstance(ttl, (int, float))
+                and age > ttl
+            ):
                 _issue(
                     issues,
                     "retrieval.cache_stale",
@@ -2157,18 +2452,39 @@ def _validate_v02_identity_and_retrievals(
                     path=f"$.retrievals[{position}]",
                 )
         common_fields = {
-            "id", "provider_id", "mode", "endpoint_kind", "target_ref",
-            "repository_id", "page", "pagination_outcome", "etag", "last_modified",
-            "api_version", "payload_digest", "extensions",
+            "id",
+            "provider_id",
+            "mode",
+            "endpoint_kind",
+            "target_ref",
+            "repository_id",
+            "page",
+            "pagination_outcome",
+            "etag",
+            "last_modified",
+            "api_version",
+            "payload_digest",
+            "extensions",
         }
         mode_fields = {
             "live": common_fields | {"fetched_at"},
             "cache_replay": common_fields
-            | {"fetched_at", "stored_at", "replayed_at", "cache_age_seconds", "cache_ttl_seconds"},
+            | {
+                "fetched_at",
+                "stored_at",
+                "replayed_at",
+                "cache_age_seconds",
+                "cache_ttl_seconds",
+            },
             "recorded_replay": common_fields | {"replayed_at"},
             "legacy_import": {
-                "id", "provider_id", "mode", "endpoint_kind", "target_ref",
-                "source_artifact_digest", "extensions",
+                "id",
+                "provider_id",
+                "mode",
+                "endpoint_kind",
+                "target_ref",
+                "source_artifact_digest",
+                "extensions",
             },
         }
         allowed_fields = mode_fields.get(retrieval.get("mode"))
@@ -2211,8 +2527,13 @@ def _validate_v02_identity_and_retrievals(
     for position, assertion in enumerate(bundle.get("assertions", [])):
         if not isinstance(assertion, dict):
             continue
-        expected_subject_type = _SUBJECT_TYPE_BY_PREDICATE.get(assertion.get("predicate"))
-        if expected_subject_type is not None and assertion.get("subject_type") != expected_subject_type:
+        expected_subject_type = _SUBJECT_TYPE_BY_PREDICATE.get(
+            assertion.get("predicate")
+        )
+        if (
+            expected_subject_type is not None
+            and assertion.get("subject_type") != expected_subject_type
+        ):
             _issue(
                 issues,
                 "assertion.predicate_subject",

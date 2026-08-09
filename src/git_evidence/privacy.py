@@ -1,9 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
 import re
+from collections.abc import Iterable, Iterator
 from typing import Any
-from urllib.parse import parse_qsl, quote, quote_plus, unquote, urlencode, urlsplit, urlunsplit
+from urllib.parse import (
+    parse_qsl,
+    quote,
+    quote_plus,
+    unquote,
+    urlencode,
+    urlsplit,
+    urlunsplit,
+)
 
 
 class PrivacyError(ValueError):
@@ -112,16 +120,35 @@ def is_sensitive_field(name: Any) -> bool:
     return (
         normalized in SENSITIVE_FIELD_NAMES
         or _is_auth_suffix(normalized)
-        or normalized in {"auth", "auth_header", "authentication_header", "authorization_header"}
+        or normalized
+        in {"auth", "auth_header", "authentication_header", "authorization_header"}
         or (
             normalized.startswith("auth_")
             and normalized.removeprefix("auth_")
-            in {"header", "headers", "token", "key", "secret", "password", "credential", "credentials", "authorization"}
+            in {
+                "header",
+                "headers",
+                "token",
+                "key",
+                "secret",
+                "password",
+                "credential",
+                "credentials",
+                "authorization",
+            }
         )
         or (
             normalized.startswith("x_")
             and normalized.removeprefix("x_")
-            in {"api_key", "auth", "auth_token", "token", "secret", "password", "authorization"}
+            in {
+                "api_key",
+                "auth",
+                "auth_token",
+                "token",
+                "secret",
+                "password",
+                "authorization",
+            }
         )
     )
 
@@ -134,7 +161,9 @@ def _additional_auth_query_names(names: Iterable[Any] | None) -> set[str]:
     return {_normalized_key(name) for name in names}
 
 
-def is_auth_query_name(name: Any, *, additional_query_names: Iterable[Any] | None = None) -> bool:
+def is_auth_query_name(
+    name: Any, *, additional_query_names: Iterable[Any] | None = None
+) -> bool:
     normalized = _normalized_key(name)
     return (
         normalized in AUTH_QUERY_NAMES
@@ -176,7 +205,9 @@ def has_auth_material(
         for key, _ in parse_qsl(parts.query, keep_blank_values=True)
     ):
         return True
-    return _fragment_contains_auth(parts.fragment, additional_query_names=additional_query_names)
+    return _fragment_contains_auth(
+        parts.fragment, additional_query_names=additional_query_names
+    )
 
 
 def is_redacted_public_url(
@@ -241,7 +272,9 @@ def redact_public_url(
                     (
                         key,
                         "[REDACTED]"
-                        if is_auth_query_name(key, additional_query_names=additional_query_names)
+                        if is_auth_query_name(
+                            key, additional_query_names=additional_query_names
+                        )
                         else item,
                     )
                     for key, item in fragment_pairs
@@ -314,8 +347,7 @@ def _sanitize_url_field(
     if not isinstance(value, str) or not value:
         raise PrivacyError(f"public payload contains a malformed URL at {path}")
     if _INVALID_PERCENT_ESCAPE.search(value) or any(
-        ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F
-        for character in value
+        ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F for character in value
     ):
         raise PrivacyError(f"public payload contains a malformed URL at {path}")
     try:
@@ -323,10 +355,11 @@ def _sanitize_url_field(
         unquote(parts.path, errors="strict")
         unquote(parts.query, errors="strict")
         unquote(parts.fragment, errors="strict")
-        hostname = parts.hostname
-        parts.port
+        hostname, _port = parts.hostname, parts.port
     except (UnicodeDecodeError, ValueError) as exc:
-        raise PrivacyError(f"public payload contains a malformed URL at {path}") from exc
+        raise PrivacyError(
+            f"public payload contains a malformed URL at {path}"
+        ) from exc
     if parts.scheme not in {"http", "https"} or not parts.netloc or not hostname:
         raise PrivacyError(f"public payload contains a malformed URL at {path}")
     sanitized = sanitize_public_url(value)
@@ -406,7 +439,9 @@ def sanitize_public_payload(
         for key, child in value.items():
             child_path = f"{path}.{key}"
             if is_sensitive_field(key):
-                raise PrivacyError(f"public payload contains a sensitive field at {child_path}")
+                raise PrivacyError(
+                    f"public payload contains a sensitive field at {child_path}"
+                )
             result[key] = (
                 _sanitize_url_field(
                     child,

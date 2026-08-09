@@ -95,9 +95,13 @@ class ResponseBoundTests(unittest.TestCase):
         self.assertEqual(caught.exception.failure_class, "limit_exceeded")
         self.assertEqual(declared.read_sizes, [])
 
-    def test_compressed_response_is_rejected_and_identity_response_at_limit_passes(self) -> None:
+    def test_compressed_response_is_rejected_and_identity_response_at_limit_passes(
+        self,
+    ) -> None:
         transport = UrllibTransport("https://api.example.test", max_retries=0)
-        compressed = FakeHttpResponse(b"compressed", headers={"Content-Encoding": "gzip"})
+        compressed = FakeHttpResponse(
+            b"compressed", headers={"Content-Encoding": "gzip"}
+        )
         with (
             patch("git_evidence.providers.transport.urlopen", return_value=compressed),
             self.assertRaises(ResponseShapeError) as caught,
@@ -110,7 +114,9 @@ class ResponseBoundTests(unittest.TestCase):
         valid = FakeHttpResponse(body, headers={"Content-Length": str(len(body))})
         with (
             patch("git_evidence.providers.transport.MAX_RESPONSE_BYTES", len(body)),
-            patch("git_evidence.providers.transport.urlopen", return_value=valid) as opened,
+            patch(
+                "git_evidence.providers.transport.urlopen", return_value=valid
+            ) as opened,
         ):
             response = transport.get("/items")
         self.assertEqual(response.body, {"x": 1})
@@ -122,13 +128,18 @@ class ResponseBoundTests(unittest.TestCase):
         with patch("git_evidence.providers.transport.MAX_JSON_DEPTH", 3):
             self.assertEqual(UrllibTransport._decode_body(b'{"a":[1]}'), {"a": [1]})
             with self.assertRaises(ResponseShapeError) as caught:
-                UrllibTransport._decode_body(b'[[[[]]]]')
+                UrllibTransport._decode_body(b"[[[[]]]]")
             self.assertEqual(caught.exception.failure_class, "limit_exceeded")
 
         with patch("git_evidence.providers.transport.MAX_JSON_STRING_CHARS", 4):
-            self.assertEqual(UrllibTransport._decode_body(b'{"key":"abcd"}'), {"key": "abcd"})
+            self.assertEqual(
+                UrllibTransport._decode_body(b'{"key":"abcd"}'), {"key": "abcd"}
+            )
             for body in (b'{"key":"abcde"}', b'{"abcde":1}'):
-                with self.subTest(body=body), self.assertRaises(ResponseShapeError) as caught:
+                with (
+                    self.subTest(body=body),
+                    self.assertRaises(ResponseShapeError) as caught,
+                ):
                     UrllibTransport._decode_body(body)
                 self.assertEqual(caught.exception.failure_class, "limit_exceeded")
 
@@ -162,7 +173,9 @@ class ResponseBoundTests(unittest.TestCase):
 
 
 class PageAndEntityBoundTests(unittest.TestCase):
-    def test_page_and_paginated_item_limits_keep_valid_siblings_at_boundary(self) -> None:
+    def test_page_and_paginated_item_limits_keep_valid_siblings_at_boundary(
+        self,
+    ) -> None:
         page = MappingTransport(
             {
                 "/items": ApiResponse(
@@ -324,7 +337,10 @@ class PageAndEntityBoundTests(unittest.TestCase):
         )
         self.assertFalse(bundle["coverage"]["render_eligible"])
         self.assertEqual(
-            {failure["failure_class"] for failure in bundle["coverage"]["group_failures"]},
+            {
+                failure["failure_class"]
+                for failure in bundle["coverage"]["group_failures"]
+            },
             {"limit_exceeded"},
         )
 
@@ -378,7 +394,9 @@ class AggregateBoundTests(unittest.TestCase):
 
 
 class ReplayInputBoundTests(unittest.TestCase):
-    def test_cache_file_and_replayed_body_cannot_bypass_live_response_limits(self) -> None:
+    def test_cache_file_and_replayed_body_cannot_bypass_live_response_limits(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "cache.json"
             path.write_bytes(b'{"entries":{}}' + b" " * 32)

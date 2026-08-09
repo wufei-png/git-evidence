@@ -7,10 +7,10 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 from git_evidence.providers.transport import (
-    ApiError,
-    ApiResponse,
     HEADER_CURSOR_PAGINATION,
     LINK_PAGINATION,
+    ApiError,
+    ApiResponse,
     MappingTransport,
     PaginationCursor,
     UrllibTransport,
@@ -50,7 +50,9 @@ def two_page_transport() -> MappingTransport:
 
 
 class PaginationCursorTests(unittest.TestCase):
-    def test_each_step_performs_at_most_one_request_and_can_be_interleaved(self) -> None:
+    def test_each_step_performs_at_most_one_request_and_can_be_interleaved(
+        self,
+    ) -> None:
         transport = two_page_transport()
         first = PaginationCursor(transport, "/a", per_page=1)
         second = PaginationCursor(transport, "/b", per_page=1)
@@ -74,7 +76,9 @@ class PaginationCursorTests(unittest.TestCase):
             ],
         )
 
-    def test_paginate_wrapper_is_behaviorally_equivalent_to_completed_cursor(self) -> None:
+    def test_paginate_wrapper_is_behaviorally_equivalent_to_completed_cursor(
+        self,
+    ) -> None:
         cursor_transport = two_page_transport()
         cursor = PaginationCursor(cursor_transport, "/a", per_page=1)
         while not cursor.done:
@@ -106,7 +110,11 @@ class PaginationCursorTests(unittest.TestCase):
 
     def test_failed_step_is_terminal_and_preserves_original_error(self) -> None:
         transport = MappingTransport(
-            {"/items": ApiResponse("https://example.test/items?page=1", 200, {}, {"bad": True})}
+            {
+                "/items": ApiResponse(
+                    "https://example.test/items?page=1", 200, {}, {"bad": True}
+                )
+            }
         )
         cursor = PaginationCursor(transport, "/items")
 
@@ -226,7 +234,11 @@ class PaginationCursorTests(unittest.TestCase):
         full_page = [{"id": index} for index in range(2)]
         link_result = paginate(
             MappingTransport(
-                {"/items": ApiResponse("https://example.test/items", 200, {}, full_page)}
+                {
+                    "/items": ApiResponse(
+                        "https://example.test/items", 200, {}, full_page
+                    )
+                }
             ),
             "/items",
             per_page=2,

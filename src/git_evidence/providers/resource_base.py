@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import datetime
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -32,8 +33,8 @@ from .base import (
     validate_instance,
 )
 from .transport import (
-    ApiError,
     DOCUMENTED_SHORT_PAGE_PAGINATION,
+    ApiError,
     JsonTransport,
     PageResult,
     PaginationCursor,
@@ -41,9 +42,9 @@ from .transport import (
     ResponseShapeError,
     failure_class_for_status,
     is_success_status,
-    response_status_error,
-    response_retrieval_provenance,
     new_response_correlation_key,
+    response_retrieval_provenance,
+    response_status_error,
     transport_metrics,
     validate_json_value_limits,
 )
@@ -51,19 +52,19 @@ from .transport import (
 
 @dataclass
 class SourceResult:
-    items: list[dict[str, Any]] = field(default_factory=list)
+    items: list[dict[str, Any]] = dataclass_field(default_factory=list)
     status: str = "supported"
     note: str = ""
-    diagnostics: dict[str, Any] = field(default_factory=dict)
-    retrievals: list[dict[str, Any]] = field(default_factory=list)
-    item_retrieval_keys: list[str] = field(default_factory=list)
+    diagnostics: dict[str, Any] = dataclass_field(default_factory=dict)
+    retrievals: list[dict[str, Any]] = dataclass_field(default_factory=list)
+    item_retrieval_keys: list[str] = dataclass_field(default_factory=list)
 
 
 @dataclass
 class RepositorySnapshot:
     repository: dict[str, Any] | None = None
-    sources: dict[str, SourceResult] = field(default_factory=dict)
-    retrievals: list[dict[str, Any]] = field(default_factory=list)
+    sources: dict[str, SourceResult] = dataclass_field(default_factory=dict)
+    retrievals: list[dict[str, Any]] = dataclass_field(default_factory=list)
 
 
 @dataclass
@@ -114,10 +115,16 @@ def validate_repository_identity(
         raise ResponseShapeError("repository response must be an object")
     expected_full_name = f"{target.owner}/{target.name}"
     if raw.get(identity_field) != expected_full_name or raw.get("name") != target.name:
-        raise ResponseShapeError("repository response identity does not match the requested target")
+        raise ResponseShapeError(
+            "repository response identity does not match the requested target"
+        )
     for value in _direct_identity_url_values(raw):
-        if not isinstance(value, str) or not repository_url_matches_target(value, target):
-            raise ResponseShapeError("repository response URL does not match the requested target")
+        if not isinstance(value, str) or not repository_url_matches_target(
+            value, target
+        ):
+            raise ResponseShapeError(
+                "repository response URL does not match the requested target"
+            )
 
 
 def native_id(item: dict[str, Any], *fields: str) -> Any:
@@ -146,7 +153,7 @@ def parse_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None else None
@@ -178,18 +185,32 @@ def actor_from(item: dict[str, Any], *fields: str) -> dict[str, Any] | None:
     for field in fields:
         value = item.get(field)
         if isinstance(value, dict):
-            source_id = value.get("id") or value.get("node_id") or value.get("login") or value.get("username")
+            source_id = (
+                value.get("id")
+                or value.get("node_id")
+                or value.get("login")
+                or value.get("username")
+            )
             if source_id is not None:
                 return {
                     "source_id": str(source_id),
-                    "handle": value.get("login") or value.get("username") or value.get("name"),
+                    "handle": value.get("login")
+                    or value.get("username")
+                    or value.get("name"),
                 }
     return None
 
 
 def page_result_to_source(result: PageResult, source: str) -> SourceResult:
     if result.complete:
-        return SourceResult(result.items, "supported", f"{result.pages} page(s)", result.diagnostics or {}, result.retrievals, result.item_retrieval_keys)
+        return SourceResult(
+            result.items,
+            "supported",
+            f"{result.pages} page(s)",
+            result.diagnostics or {},
+            result.retrievals,
+            result.item_retrieval_keys,
+        )
     return SourceResult(
         result.items,
         "incomplete",
@@ -310,7 +331,9 @@ def _effective_port(scheme: str, port: int | None) -> int | None:
     return {"http": 80, "https": 443}.get(scheme)
 
 
-def _authority_matches(parsed: Any, *, scheme: str, hostname: str, port: int | None) -> bool:
+def _authority_matches(
+    parsed: Any, *, scheme: str, hostname: str, port: int | None
+) -> bool:
     return (
         parsed.scheme == scheme
         and isinstance(parsed.hostname, str)
@@ -336,7 +359,9 @@ def repository_url_matches_target(value: str, target: RepositoryTarget) -> bool:
     if not base.hostname:
         return False
     path_segments = _url_segments(parsed.path)
-    repository_segments = [segment for segment in f"{target.owner}/{target.name}".split("/") if segment]
+    repository_segments = [
+        segment for segment in f"{target.owner}/{target.name}".split("/") if segment
+    ]
     if not repository_segments:
         return False
     base_segments = _url_segments(base.path)
@@ -348,7 +373,9 @@ def repository_url_matches_target(value: str, target: RepositoryTarget) -> bool:
         api_base_segments.append("v3")
         api_prefix = [*api_base_segments, "repos", *repository_segments]
         if target.instance == "github.com":
-            authorities.append(("https", "api.github.com", None, ["repos", *repository_segments]))
+            authorities.append(
+                ("https", "api.github.com", None, ["repos", *repository_segments])
+            )
     elif target.provider_kind == "gitlab":
         api_base_segments.append("v4")
         encoded_repository = "/".join(repository_segments)
@@ -356,7 +383,9 @@ def repository_url_matches_target(value: str, target: RepositoryTarget) -> bool:
             [*api_base_segments, "projects", encoded_repository],
             [*api_base_segments, "projects", *repository_segments],
         ]
-        authorities.extend((base.scheme, base.hostname, base.port, prefix) for prefix in api_prefixes)
+        authorities.extend(
+            (base.scheme, base.hostname, base.port, prefix) for prefix in api_prefixes
+        )
         api_prefix = None
     elif target.provider_kind == "gitee":
         api_base_segments.append("v5")
@@ -418,9 +447,7 @@ def _url_candidate_values(candidate: Any) -> list[Any]:
     if not isinstance(candidate, dict):
         return [candidate]
     extracted = [
-        candidate[key]
-        for key in ("href", "url")
-        if isinstance(candidate.get(key), str)
+        candidate[key] for key in ("href", "url") if isinstance(candidate.get(key), str)
     ]
     return extracted or [candidate]
 
@@ -442,28 +469,48 @@ def validate_native_item_repository_identity(
                 continue
             identity = container[field]
             if not isinstance(identity, str) or identity.strip() != expected_full_name:
-                raise StrictNormalizationError("native item repository identity does not match the requested target")
+                raise StrictNormalizationError(
+                    "native item repository identity does not match the requested target"
+                )
 
         if provider_kind == "gitlab" and container is not raw:
             path = container.get("path")
-            if path is not None and (
-                "path_with_namespace" in container
-                or "project_id" in container
-                or "namespace" in container
-            ) and (not isinstance(path, str) or path.strip() != target.name):
-                raise StrictNormalizationError("native item project path does not match the requested target")
+            if (
+                path is not None
+                and (
+                    "path_with_namespace" in container
+                    or "project_id" in container
+                    or "namespace" in container
+                )
+                and (not isinstance(path, str) or path.strip() != target.name)
+            ):
+                raise StrictNormalizationError(
+                    "native item project path does not match the requested target"
+                )
 
     for container in containers:
-        for relation in ("repository", "project", "repo", "source_project", "target_project"):
+        for relation in (
+            "repository",
+            "project",
+            "repo",
+            "source_project",
+            "target_project",
+        ):
             nested = container.get(relation)
-            if not isinstance(nested, dict) or "name" not in nested or nested["name"] is None:
+            if (
+                not isinstance(nested, dict)
+                or "name" not in nested
+                or nested["name"] is None
+            ):
                 continue
             nested_name = nested["name"]
             if not isinstance(nested_name, str) or nested_name.strip() not in {
                 expected_full_name,
                 target.name,
             }:
-                raise StrictNormalizationError("native item repository name does not match the requested target")
+                raise StrictNormalizationError(
+                    "native item repository name does not match the requested target"
+                )
 
     for container in containers:
         owner = container.get("owner")
@@ -483,7 +530,9 @@ def validate_native_item_repository_identity(
         if owner_name is None or name is None:
             continue
         if owner_name != target.owner or name != target.name:
-            raise StrictNormalizationError("native item owner/name does not match the requested target")
+            raise StrictNormalizationError(
+                "native item owner/name does not match the requested target"
+            )
 
     urls = _identity_url_values(raw)
     if isinstance(normalized, dict) and "web_url" in normalized:
@@ -491,8 +540,12 @@ def validate_native_item_repository_identity(
     for value in urls:
         if value is None:
             continue
-        if not isinstance(value, str) or not repository_url_matches_target(value, target):
-            raise StrictNormalizationError("native item URL does not match the requested target")
+        if not isinstance(value, str) or not repository_url_matches_target(
+            value, target
+        ):
+            raise StrictNormalizationError(
+                "native item URL does not match the requested target"
+            )
 
 
 def merge_diagnostics(target: dict[str, Any], incoming: dict[str, Any]) -> None:
@@ -580,12 +633,18 @@ def _append_normalization_diagnostics(
     note = f"{source} response dropped {dropped} malformed item(s)"
     result.note = f"{result.note}; {note}" if result.note else note
     diagnostics = {
-        "failure_class": next(iter(failure_classes)) if len(failure_classes) == 1 else None,
-        "failure_classes": sorted(failure_classes) if len(failure_classes) > 1 else None,
+        "failure_class": next(iter(failure_classes))
+        if len(failure_classes) == 1
+        else None,
+        "failure_classes": sorted(failure_classes)
+        if len(failure_classes) > 1
+        else None,
         "dropped_count": dropped,
         "malformed_items": dropped,
     }
-    diagnostics = {key: value for key, value in diagnostics.items() if value is not None}
+    diagnostics = {
+        key: value for key, value in diagnostics.items() if value is not None
+    }
     merge_diagnostics(result.diagnostics, diagnostics)
 
 
@@ -596,7 +655,10 @@ def coerce_optional_source_result(source: str, value: Any) -> SourceResult:
             [],
             "incomplete",
             f"{source} optional source returned an invalid SourceResult",
-            {"failure_class": "malformed_response", "returned_type": type(value).__name__},
+            {
+                "failure_class": "malformed_response",
+                "returned_type": type(value).__name__,
+            },
         )
     if value.status not in CAPABILITY_STATES:
         return SourceResult(
@@ -610,14 +672,20 @@ def coerce_optional_source_result(source: str, value: Any) -> SourceResult:
             [],
             "incomplete",
             f"{source} optional source returned invalid diagnostics",
-            {"failure_class": "malformed_response", "diagnostics_type": type(value.diagnostics).__name__},
+            {
+                "failure_class": "malformed_response",
+                "diagnostics_type": type(value.diagnostics).__name__,
+            },
         )
     if not isinstance(value.note, str):
         return SourceResult(
             [],
             "incomplete",
             f"{source} optional source returned an invalid note",
-            {"failure_class": "malformed_response", "note_type": type(value.note).__name__},
+            {
+                "failure_class": "malformed_response",
+                "note_type": type(value.note).__name__,
+            },
         )
     return value
 
@@ -648,14 +716,19 @@ class BundleBuilder:
                     "end": request.window_end,
                     "timezone": request.timezone,
                 },
-                "scope": {"repositories": list(request.repository_ids), "actors": list(request.actor_ids)},
+                "scope": {
+                    "repositories": list(request.repository_ids),
+                    "actors": list(request.actor_ids),
+                },
             },
-            "providers": [{
-                "id": self.provider_id,
-                "kind": descriptor.kind,
-                "instance": request.instance,
-                "capabilities": {},
-            }],
+            "providers": [
+                {
+                    "id": self.provider_id,
+                    "kind": descriptor.kind,
+                    "instance": request.instance,
+                    "capabilities": {},
+                }
+            ],
             "repositories": [],
             "actors": [],
             "work_items": [],
@@ -695,7 +768,9 @@ class BundleBuilder:
                 "allow_publish": True,
             },
         }
-        self._seen: dict[str, set[str]] = {key: set() for key in self.bundle if isinstance(self.bundle[key], list)}
+        self._seen: dict[str, set[str]] = {
+            key: set() for key in self.bundle if isinstance(self.bundle[key], list)
+        }
         self._actor_ids: dict[str, str] = {}
         self._commit_ids_by_sha: dict[tuple[str, str], set[str]] = {}
         self._change_request_ids_by_sha: dict[tuple[str, str], set[str]] = {}
@@ -704,10 +779,13 @@ class BundleBuilder:
         self._retrieval_ids: dict[str, str] = {}
         self._retrieval_provenance: dict[str, dict[str, Any]] = {}
         self._entity_count = 1
-        self._bundle_size_estimate = json_size_with_limit(
-            self.bundle,
-            max_bytes=MAX_BUNDLE_BYTES - 1,
-        ) + 1
+        self._bundle_size_estimate = (
+            json_size_with_limit(
+                self.bundle,
+                max_bytes=MAX_BUNDLE_BYTES - 1,
+            )
+            + 1
+        )
 
     def checkpoint(self) -> dict[str, Any]:
         """Snapshot all mutable builder state for one source-level transaction."""
@@ -749,10 +827,13 @@ class BundleBuilder:
         if self._bundle_size_estimate <= MAX_BUNDLE_BYTES:
             return
         try:
-            self._bundle_size_estimate = json_size_with_limit(
-                self.bundle,
-                max_bytes=MAX_BUNDLE_BYTES - 1,
-            ) + 1
+            self._bundle_size_estimate = (
+                json_size_with_limit(
+                    self.bundle,
+                    max_bytes=MAX_BUNDLE_BYTES - 1,
+                )
+                + 1
+            )
         except (InputLimitError, TypeError, ValueError) as exc:
             raise ResponseShapeError(
                 f"evidence bundle exceeds {MAX_BUNDLE_BYTES} bytes",
@@ -762,6 +843,7 @@ class BundleBuilder:
     @staticmethod
     def _failure_classes(diagnostics: dict[str, Any]) -> set[str]:
         values: set[str] = set()
+
         def visit(value: Any) -> None:
             if isinstance(value, dict):
                 failure_class = value.get("failure_class")
@@ -769,7 +851,11 @@ class BundleBuilder:
                     values.add(failure_class)
                 failure_classes = value.get("failure_classes")
                 if isinstance(failure_classes, list):
-                    values.update(item for item in failure_classes if isinstance(item, str) and item)
+                    values.update(
+                        item
+                        for item in failure_classes
+                        if isinstance(item, str) and item
+                    )
                 for child in value.values():
                     visit(child)
             elif isinstance(value, list):
@@ -779,7 +865,9 @@ class BundleBuilder:
         visit(diagnostics)
         return values
 
-    def add_coverage(self, source: str, target: RepositoryTarget, result: SourceResult) -> None:
+    def add_coverage(
+        self, source: str, target: RepositoryTarget, result: SourceResult
+    ) -> None:
         self._add_retrievals(source, target, result.retrievals)
         ledgers = self.bundle["coverage"]
         starting_lengths = {
@@ -788,11 +876,20 @@ class BundleBuilder:
         }
         diagnostics = dict(result.diagnostics)
         metrics = transport_metrics(self.transport)
-        if metrics["retry_count"] or metrics["budget_exhausted"] or metrics["cache_hits"] or metrics["cache_misses"]:
+        if (
+            metrics["retry_count"]
+            or metrics["budget_exhausted"]
+            or metrics["cache_hits"]
+            or metrics["cache_misses"]
+        ):
             diagnostics.setdefault("metrics", metrics)
         failure_classes = self._failure_classes(diagnostics)
         group_failure_classes = failure_classes & OPERATIONAL_FAILURE_CLASSES
-        if source in RESOURCE_SOURCES and result.status == "supported" and group_failure_classes:
+        if (
+            source in RESOURCE_SOURCES
+            and result.status == "supported"
+            and group_failure_classes
+        ):
             result.status = "incomplete"
             classes = ", ".join(sorted(group_failure_classes))
             result.note = (
@@ -878,15 +975,26 @@ class BundleBuilder:
                         failure_class="malformed_response",
                     )
                 continue
-            retrieval_id = f"retrieval:{self.provider_id}:{len(self.bundle['retrievals']) + 1}"
+            retrieval_id = (
+                f"retrieval:{self.provider_id}:{len(self.bundle['retrievals']) + 1}"
+            )
             record = {
                 field: value
                 for field, value in raw.items()
                 if field
                 in {
-                    "mode", "target_ref", "fetched_at", "replayed_at", "stored_at",
-                    "cache_age_seconds", "cache_ttl_seconds", "page",
-                    "pagination_outcome", "etag", "last_modified", "api_version",
+                    "mode",
+                    "target_ref",
+                    "fetched_at",
+                    "replayed_at",
+                    "stored_at",
+                    "cache_age_seconds",
+                    "cache_ttl_seconds",
+                    "page",
+                    "pagination_outcome",
+                    "etag",
+                    "last_modified",
+                    "api_version",
                 }
             }
             record.update(
@@ -902,7 +1010,10 @@ class BundleBuilder:
                     "repository_id": target.canonical_id,
                 }
             )
-            if not isinstance(record.get("target_ref"), str) or not record["target_ref"]:
+            if (
+                not isinstance(record.get("target_ref"), str)
+                or not record["target_ref"]
+            ):
                 record["target_ref"] = source
             self._add_entity("retrievals", sanitize_public_payload(record))
             self._retrieval_ids[key] = retrieval_id
@@ -1009,7 +1120,9 @@ class BundleBuilder:
             actor = record.pop("_actor", None)
             association_shas = self._unique_strings(record.pop("_association_shas", []))
             commit_shas = self._unique_strings(record.pop("_commit_shas", []))
-            explicit_change_request_ids = self._unique_strings(record.pop("_change_request_ids", []))
+            explicit_change_request_ids = self._unique_strings(
+                record.pop("_change_request_ids", [])
+            )
             association_attempted = bool(record.pop("_association_attempted", False))
             association_complete = bool(record.pop("_association_complete", False))
             native_identity = record.pop("_native_id", None)
@@ -1022,7 +1135,11 @@ class BundleBuilder:
                 self._record_duplicate(category, target.canonical_id)
                 continue
             actor_id = self._actor_id(actor)
-            if self.request.actor_ids and actor is not None and actor_id not in self.request.actor_ids:
+            if (
+                self.request.actor_ids
+                and actor is not None
+                and actor_id not in self.request.actor_ids
+            ):
                 if category in {"work_items", "change_requests"}:
                     self._filtered_subjects[entity_id] = {
                         key: record[key]
@@ -1037,10 +1154,7 @@ class BundleBuilder:
                     "work_item": "work_items",
                     "change_request": "change_requests",
                 }.get(subject_type)
-                if (
-                    not isinstance(subject_id, str)
-                    or subject_collection is None
-                ):
+                if not isinstance(subject_id, str) or subject_collection is None:
                     raise ResponseShapeError(
                         "interaction has no canonical subject",
                         failure_class="malformed_response",
@@ -1058,11 +1172,15 @@ class BundleBuilder:
                         )
             if category == "change_requests":
                 for sha in association_shas:
-                    self._change_request_ids_by_sha.setdefault((target.canonical_id, sha), set()).add(entity_id)
+                    self._change_request_ids_by_sha.setdefault(
+                        (target.canonical_id, sha), set()
+                    ).add(entity_id)
             elif category == "commits":
                 sha = record.get("sha")
                 if isinstance(sha, str) and sha:
-                    self._commit_ids_by_sha.setdefault((target.canonical_id, sha), set()).add(entity_id)
+                    self._commit_ids_by_sha.setdefault(
+                        (target.canonical_id, sha), set()
+                    ).add(entity_id)
                     algorithm = git_object_id_algorithm(sha)
                     if algorithm is not None:
                         record["hash_algorithm"] = algorithm
@@ -1072,7 +1190,9 @@ class BundleBuilder:
                     for change_request_id in explicit_change_request_ids
                     if change_request_id in self._seen.get("change_requests", set())
                 ]
-                if association_attempted and len(known_change_request_ids) != len(explicit_change_request_ids):
+                if association_attempted and len(known_change_request_ids) != len(
+                    explicit_change_request_ids
+                ):
                     association_complete = False
                 if known_change_request_ids:
                     record["change_request_ids"] = known_change_request_ids
@@ -1082,7 +1202,9 @@ class BundleBuilder:
                         {
                             commit_id
                             for sha in commit_shas
-                            for commit_id in self._commit_ids_by_sha.get((target.canonical_id, sha), set())
+                            for commit_id in self._commit_ids_by_sha.get(
+                                (target.canonical_id, sha), set()
+                            )
                         }
                     )
                     if commit_ids:
@@ -1113,7 +1235,7 @@ class BundleBuilder:
             evidence = {
                 "id": evidence_id,
                 "provider_id": self.provider_id,
-                "subject_type": category[:-1] if category.endswith("s") else category,
+                "subject_type": category.removesuffix("s"),
                 "subject_id": entity_id,
                 "source": evidence_source,
                 "retrieval_id": self._retrieval_ids.get(str(retrieval_key), ""),
@@ -1133,10 +1255,12 @@ class BundleBuilder:
                 "work_items": ("work_item_observed", "project"),
                 "change_requests": (
                     "change_request_merged"
-                    if record.get("merged_at") is not None or record.get("state") == "merged"
+                    if record.get("merged_at") is not None
+                    or record.get("state") == "merged"
                     else "change_request_observed",
                     "release"
-                    if record.get("merged_at") is not None or record.get("state") == "merged"
+                    if record.get("merged_at") is not None
+                    or record.get("state") == "merged"
                     else "change",
                 ),
                 "interactions": ("interaction_observed", "project"),
@@ -1161,7 +1285,9 @@ class BundleBuilder:
     def _unique_strings(values: Any) -> list[str]:
         if not isinstance(values, (list, tuple, set)):
             return []
-        return list(dict.fromkeys(value for value in values if isinstance(value, str) and value))
+        return list(
+            dict.fromkeys(value for value in values if isinstance(value, str) and value)
+        )
 
     def _associate_ref_change(
         self,
@@ -1176,7 +1302,9 @@ class BundleBuilder:
             if not commit_shas or not association_complete:
                 return "unknown"
             if explicit_change_request_ids:
-                return "linked" if len(explicit_change_request_ids) == 1 else "ambiguous"
+                return (
+                    "linked" if len(explicit_change_request_ids) == 1 else "ambiguous"
+                )
             return "unlinked"
         if explicit_change_request_ids:
             return "linked" if len(explicit_change_request_ids) == 1 else "ambiguous"
@@ -1185,7 +1313,9 @@ class BundleBuilder:
         candidates: set[str] = set()
         unresolved = False
         for sha in commit_shas:
-            matches = self._change_request_ids_by_sha.get((target.canonical_id, sha), set())
+            matches = self._change_request_ids_by_sha.get(
+                (target.canonical_id, sha), set()
+            )
             if len(matches) > 1:
                 return "ambiguous"
             if not matches:
@@ -1209,7 +1339,8 @@ class BundleBuilder:
             return None
         source_id = str(actor["source_id"])
         self._actor_ids.setdefault(
-            source_id, f"actor:{self.descriptor.kind}:{self.request.instance}:{source_id}"
+            source_id,
+            f"actor:{self.descriptor.kind}:{self.request.instance}:{source_id}",
         )
         if actor_id not in self._seen["actors"]:
             self._add_entity(
@@ -1294,7 +1425,9 @@ class BundleBuilder:
         if not isinstance(entity_id, str) or not entity_id:
             return False
         if entity_id in self._seen.setdefault(category, set()):
-            duplicate_source = source or (category if category in RESOURCE_SOURCES else None)
+            duplicate_source = source or (
+                category if category in RESOURCE_SOURCES else None
+            )
             duplicate_repository = repository_id or record.get("repository_id")
             if duplicate_repository is None and category == "repositories":
                 duplicate_repository = entity_id
@@ -1356,7 +1489,9 @@ class BundleBuilder:
                         )
                     )
                 else:
-                    append_optional_coverage_warning(self.bundle["coverage"], observation)
+                    append_optional_coverage_warning(
+                        self.bundle["coverage"], observation
+                    )
         for observation in self.bundle["coverage"]["observations"]:
             if isinstance(observation, dict):
                 append_optional_coverage_warning(self.bundle["coverage"], observation)
@@ -1380,9 +1515,11 @@ class ResourceProvider:
     descriptor: ProviderDescriptor
     pagination_strategy: PaginationStrategy = DOCUMENTED_SHORT_PAGE_PAGINATION
 
-    def __init__(self, transport: JsonTransport, instance: str, *, max_pages: int = 100) -> None:
+    def __init__(
+        self, transport: JsonTransport, instance: str, *, max_pages: int = 100
+    ) -> None:
         if isinstance(max_pages, bool) or not isinstance(max_pages, int):
-            raise ValueError("max_pages must be an integer")
+            raise TypeError("max_pages must be an integer")
         if max_pages < 1 or max_pages > MAX_PAGES:
             raise ValueError(f"max_pages must be in [1, {MAX_PAGES}]")
         self.transport = transport
@@ -1411,9 +1548,13 @@ class ResourceProvider:
                 or target.provider_kind != request.provider_kind
                 or target.instance != request.instance
             ):
-                raise ValueError("repository target provider and instance must match the collection request")
-        if isinstance(request.max_pages, bool) or not isinstance(request.max_pages, int):
-            raise ValueError("request.max_pages must be an integer")
+                raise ValueError(
+                    "repository target provider and instance must match the collection request"
+                )
+        if isinstance(request.max_pages, bool) or not isinstance(
+            request.max_pages, int
+        ):
+            raise TypeError("request.max_pages must be an integer")
         if request.max_pages < 1 or request.max_pages > MAX_PAGES:
             raise ValueError(f"request.max_pages must be in [1, {MAX_PAGES}]")
         self.max_pages = request.max_pages
@@ -1426,17 +1567,21 @@ class ResourceProvider:
                     result = SourceResult(
                         [snapshot.repository] if snapshot.repository else [],
                         "supported" if snapshot.repository else "unavailable",
-                        "repository resource observed" if snapshot.repository else "repository resource unavailable",
+                        "repository resource observed"
+                        if snapshot.repository
+                        else "repository resource unavailable",
                         retrievals=snapshot.retrievals,
                     )
                 else:
                     result = snapshot.sources.get(
                         source,
-                        SourceResult([], "unavailable", "provider did not return this resource source"),
+                        SourceResult(
+                            [],
+                            "unavailable",
+                            "provider did not return this resource source",
+                        ),
                     )
-                self._emit_core_source(
-                    builder, target, source, result, request
-                )
+                self._emit_core_source(builder, target, source, result, request)
         # Optional activity/ref work starts only after every repository's core queue.
         for target in request.repositories:
             if request.include_activity_api:
@@ -1444,14 +1589,20 @@ class ResourceProvider:
                 try:
                     activity_sources = self._collect_activity(target, request)
                     if not isinstance(activity_sources, dict):
-                        raise ResponseShapeError("provider returned invalid optional activity sources")
+                        raise ResponseShapeError(
+                            "provider returned invalid optional activity sources"
+                        )
                 except Exception as exc:  # noqa: BLE001 - optional boundary must preserve the core snapshot
                     activity_boundary_error = exc
                     activity_sources = optional_activity_failure_sources(exc)
             else:
                 activity_boundary_error = None
                 activity_sources = {
-                    source: SourceResult([], "unavailable", "activity API disabled; push/ref completeness is not claimed")
+                    source: SourceResult(
+                        [],
+                        "unavailable",
+                        "activity API disabled; push/ref completeness is not claimed",
+                    )
                     for source in ACTIVITY_SOURCES
                 }
             for source in ACTIVITY_SOURCES:
@@ -1461,7 +1612,11 @@ class ResourceProvider:
                         source,
                         activity_sources.get(
                             source,
-                            SourceResult([], "unsupported", "provider did not return this activity source"),
+                            SourceResult(
+                                [],
+                                "unsupported",
+                                "provider did not return this activity source",
+                            ),
                         ),
                     )
                     result = self._strict_source_result(result, source, target, request)
@@ -1473,14 +1628,15 @@ class ResourceProvider:
                             target=target,
                             evidence_source="activity_api",
                         )
-                    if (
-                        "privacy_violation" in builder._failure_classes(result.diagnostics)
-                        and not isinstance(activity_boundary_error, PrivacyError)
-                    ):
+                    if "privacy_violation" in builder._failure_classes(
+                        result.diagnostics
+                    ) and not isinstance(activity_boundary_error, PrivacyError):
                         builder.record_optional_failure(
                             source,
                             target,
-                            PrivacyError("optional source reported a privacy violation"),
+                            PrivacyError(
+                                "optional source reported a privacy violation"
+                            ),
                             fail_closed=True,
                         )
                 except Exception as exc:  # noqa: BLE001 - optional per-source boundary
@@ -1584,14 +1740,20 @@ class ResourceProvider:
                         )
         self._run_page_rounds(top_level, interaction_rounds=False)
         for task in top_level:
-            snapshots[task.target.canonical_id].sources[task.source] = task.result or SourceResult(
-                [], "incomplete", "scheduled source did not produce a result"
+            snapshots[task.target.canonical_id].sources[task.source] = (
+                task.result
+                or SourceResult(
+                    [], "incomplete", "scheduled source did not produce a result"
+                )
             )
 
         interactions: list[PageSourceRequest] = []
         for target in targets:
             snapshot = snapshots[target.canonical_id]
-            if snapshot.repository is not None and "interactions" not in snapshot.sources:
+            if (
+                snapshot.repository is not None
+                and "interactions" not in snapshot.sources
+            ):
                 try:
                     planned = self._scheduled_interaction_requests(
                         target, snapshot, request
@@ -1651,8 +1813,12 @@ class ResourceProvider:
         if not isinstance(planned, list):
             raise TypeError("provider returned a non-list scheduled task set")
         required = ("work_items", "change_requests", "commits", "releases")
-        if not interaction_tasks and sorted(task.source for task in planned) != sorted(required):
-            raise ValueError("provider must return exactly one task per top-level source")
+        if not interaction_tasks and sorted(task.source for task in planned) != sorted(
+            required
+        ):
+            raise ValueError(
+                "provider must return exactly one task per top-level source"
+            )
         for task in planned:
             if (
                 not isinstance(task, PageSourceRequest)
@@ -1670,7 +1836,9 @@ class ResourceProvider:
                 isinstance(value, str)
                 for value in (task.subject_type, task.subject_id, task.endpoint_kind)
             ):
-                raise ValueError("provider returned invalid interaction ordering fields")
+                raise ValueError(
+                    "provider returned invalid interaction ordering fields"
+                )
 
     def _step_root_request(self, task: _RootRequest) -> None:
         try:
@@ -1691,7 +1859,9 @@ class ResourceProvider:
                     redact_url=getattr(self.transport, "_redact_url", None),
                 )
             if not isinstance(response.body, dict):
-                raise ResponseShapeError(f"expected repository object from {response.url}")
+                raise ResponseShapeError(
+                    f"expected repository object from {response.url}"
+                )
             repository = self._scheduled_repository(task.target, response.body)
             if not isinstance(repository, dict):
                 raise TypeError("provider returned an invalid normalized repository")
@@ -1727,9 +1897,7 @@ class ResourceProvider:
         return RepositorySnapshot(
             None,
             {
-                source: SourceResult(
-                    [], "incomplete", note, dict(diagnostics)
-                )
+                source: SourceResult([], "incomplete", note, dict(diagnostics))
                 for source in RESOURCE_SOURCES
             },
         )
@@ -1740,18 +1908,18 @@ class ResourceProvider:
         *,
         interaction_rounds: bool,
     ) -> None:
-        source_order = {source: index for index, source in enumerate(
-            ("work_items", "change_requests", "commits", "releases")
-        )}
+        source_order = {
+            source: index
+            for index, source in enumerate(
+                ("work_items", "change_requests", "commits", "releases")
+            )
+        }
         for task in tasks:
             try:
                 if (
                     interaction_rounds
                     and task.source != "interactions"
-                    or (
-                        not interaction_rounds
-                        and task.source not in source_order
-                    )
+                    or (not interaction_rounds and task.source not in source_order)
                 ):
                     raise ValueError("provider returned an invalid scheduled source")
                 task.cursor = PaginationCursor(
@@ -1803,7 +1971,9 @@ class ResourceProvider:
                         task, task.cursor.result()
                     )
                     if not isinstance(normalized, SourceResult):
-                        raise TypeError("provider returned an invalid normalized source")
+                        raise TypeError(
+                            "provider returned an invalid normalized source"
+                        )
                     task.result = normalized
                 except Exception as exc:  # noqa: BLE001 - source isolation boundary
                     diagnostics = exception_diagnostics(exc)
@@ -1931,11 +2101,21 @@ class ResourceProvider:
                     valid_retrieval_keys.append(result.item_retrieval_keys[position])
             except PrivacyError:
                 raise
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - classify unknown normalizer failures
                 dropped += 1
                 failure_classes.add(
                     "malformed_response"
-                    if isinstance(exc, (StrictNormalizationError, ResponseShapeError, AttributeError, KeyError, TypeError, ValueError))
+                    if isinstance(
+                        exc,
+                        (
+                            StrictNormalizationError,
+                            ResponseShapeError,
+                            AttributeError,
+                            KeyError,
+                            TypeError,
+                            ValueError,
+                        ),
+                    )
                     else "unexpected_normalizer_error"
                 )
         result.items = valid
@@ -1951,7 +2131,9 @@ class ResourceProvider:
         del event_id
         occurred_at = first_timestamp(item, "created_at", "occurred_at", "updated_at")
         if parse_timestamp(occurred_at) is None or not in_window(occurred_at, request):
-            raise StrictNormalizationError("activity item has an invalid or out-of-window timestamp")
+            raise StrictNormalizationError(
+                "activity item has an invalid or out-of-window timestamp"
+            )
 
     @staticmethod
     def _validate_canonical_item(
@@ -1963,19 +2145,29 @@ class ResourceProvider:
         if not isinstance(item, dict):
             raise StrictNormalizationError(f"{source} item must be an object")
         entity_id = item.get("id")
-        if not isinstance(entity_id, str) or not entity_id.strip() or "None" in entity_id:
+        if (
+            not isinstance(entity_id, str)
+            or not entity_id.strip()
+            or "None" in entity_id
+        ):
             raise StrictNormalizationError(f"{source} item has no stable canonical id")
         if source == "repositories":
             if entity_id != target.canonical_id:
-                raise StrictNormalizationError("repository identity does not match the allowlist")
+                raise StrictNormalizationError(
+                    "repository identity does not match the allowlist"
+                )
             if not isinstance(item.get("provider_id"), str) or not item["provider_id"]:
-                raise StrictNormalizationError("repository item has no provider identity")
+                raise StrictNormalizationError(
+                    "repository item has no provider identity"
+                )
             for field in ("full_name", "name"):
                 if not isinstance(item.get(field), str) or not item[field].strip():
                     raise StrictNormalizationError(f"repository item has no {field}")
             return
         if item.get("repository_id") != target.canonical_id:
-            raise StrictNormalizationError(f"{source} item has the wrong repository identity")
+            raise StrictNormalizationError(
+                f"{source} item has the wrong repository identity"
+            )
         if not is_valid_native_id(item.get("_native_id")):
             raise StrictNormalizationError(f"{source} item has no stable native id")
         if source == "commits":
@@ -1986,27 +2178,39 @@ class ResourceProvider:
                 or native_sha != sha
                 or not entity_id.endswith(f":{sha}")
             ):
-                raise StrictNormalizationError("commit SHA does not match its canonical/native identity")
+                raise StrictNormalizationError(
+                    "commit SHA does not match its canonical/native identity"
+                )
         occurred_at = item.get("occurred_at")
         if parse_timestamp(occurred_at) is None or not in_window(occurred_at, request):
-            raise StrictNormalizationError(f"{source} item has an invalid or out-of-window occurred_at")
-        if source in {"work_items", "change_requests", "interactions"} and not is_valid_native_id(
-            item.get("number") if source != "interactions" else item.get("subject_number")
+            raise StrictNormalizationError(
+                f"{source} item has an invalid or out-of-window occurred_at"
+            )
+        if source in {
+            "work_items",
+            "change_requests",
+            "interactions",
+        } and not is_valid_native_id(
+            item.get("number")
+            if source != "interactions"
+            else item.get("subject_number")
         ):
-            raise StrictNormalizationError(f"{source} item has no stable subject number")
+            raise StrictNormalizationError(
+                f"{source} item has no stable subject number"
+            )
         if source == "interactions":
             subject_type = item.get("subject_type")
             subject_id = item.get("subject_id")
             if subject_type not in {"work_item", "change_request"}:
                 raise StrictNormalizationError("interaction has no valid subject type")
-            expected_subject_id = target.canonical_id.replace(
-                "repo:", f"{subject_type}:", 1
-            ) + f":{item.get('subject_number')}"
-            if (
-                not isinstance(subject_id, str)
-                or subject_id != expected_subject_id
-            ):
-                raise StrictNormalizationError("interaction has no canonical subject identity")
+            expected_subject_id = (
+                target.canonical_id.replace("repo:", f"{subject_type}:", 1)
+                + f":{item.get('subject_number')}"
+            )
+            if not isinstance(subject_id, str) or subject_id != expected_subject_id:
+                raise StrictNormalizationError(
+                    "interaction has no canonical subject identity"
+                )
 
     def _normalize_items(
         self,
@@ -2045,11 +2249,21 @@ class ResourceProvider:
                 normalized.append(normalized_item)
             except PrivacyError:
                 raise
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - classify unknown normalizer failures
                 dropped += 1
                 failure_classes.add(
                     "malformed_response"
-                    if isinstance(exc, (ResponseShapeError, AttributeError, IndexError, KeyError, TypeError, ValueError))
+                    if isinstance(
+                        exc,
+                        (
+                            ResponseShapeError,
+                            AttributeError,
+                            IndexError,
+                            KeyError,
+                            TypeError,
+                            ValueError,
+                        ),
+                    )
                     else "unexpected_normalizer_error"
                 )
         result.items = normalized
@@ -2067,17 +2281,26 @@ class ResourceProvider:
         except ApiError as exc:
             diagnostics = api_error_diagnostics(exc)
             diagnostics["metrics"] = transport_metrics(self.transport)
-            return SourceResult([], "incomplete", "provider request failed", diagnostics)
+            return SourceResult(
+                [], "incomplete", "provider request failed", diagnostics
+            )
         for retrieval in result.retrievals:
             retrieval.setdefault("endpoint_kind", source)
         diagnostics = dict(result.diagnostics or {})
         metrics = transport_metrics(self.transport)
-        if metrics["retry_count"] or metrics["budget_exhausted"] or metrics["cache_hits"] or metrics["cache_misses"]:
+        if (
+            metrics["retry_count"]
+            or metrics["budget_exhausted"]
+            or metrics["cache_hits"]
+            or metrics["cache_misses"]
+        ):
             diagnostics.setdefault("metrics", metrics)
         return SourceResult(
             result.items,
             "supported" if result.complete else "incomplete",
-            f"{result.pages} page(s)" if result.complete else f"{source} pagination reached the configured page limit",
+            f"{result.pages} page(s)"
+            if result.complete
+            else f"{source} pagination reached the configured page limit",
             diagnostics,
             result.retrievals,
             result.item_retrieval_keys,
@@ -2086,24 +2309,32 @@ class ResourceProvider:
     def _collect_repository(
         self, target: RepositoryTarget, request: CollectionRequest
     ) -> RepositorySnapshot:
-        raise ProviderNotReady(f"{self.descriptor.kind} resource collector is not implemented")
+        raise ProviderNotReady(
+            f"{self.descriptor.kind} resource collector is not implemented"
+        )
 
     def _scheduled_root_path(self, target: RepositoryTarget) -> str:
-        raise ProviderNotReady(f"{self.descriptor.kind} root scheduling is not implemented")
+        raise ProviderNotReady(
+            f"{self.descriptor.kind} root scheduling is not implemented"
+        )
 
     def _scheduled_repository(
         self,
         target: RepositoryTarget,
         raw: dict[str, Any],
     ) -> dict[str, Any]:
-        raise ProviderNotReady(f"{self.descriptor.kind} root normalization is not implemented")
+        raise ProviderNotReady(
+            f"{self.descriptor.kind} root normalization is not implemented"
+        )
 
     def _scheduled_top_level_requests(
         self,
         target: RepositoryTarget,
         request: CollectionRequest,
     ) -> list[PageSourceRequest]:
-        raise ProviderNotReady(f"{self.descriptor.kind} source scheduling is not implemented")
+        raise ProviderNotReady(
+            f"{self.descriptor.kind} source scheduling is not implemented"
+        )
 
     def _scheduled_interaction_requests(
         self,
@@ -2111,12 +2342,18 @@ class ResourceProvider:
         snapshot: RepositorySnapshot,
         request: CollectionRequest,
     ) -> list[PageSourceRequest]:
-        raise ProviderNotReady(f"{self.descriptor.kind} interaction scheduling is not implemented")
+        raise ProviderNotReady(
+            f"{self.descriptor.kind} interaction scheduling is not implemented"
+        )
 
     def _collect_activity(
         self, target: RepositoryTarget, request: CollectionRequest
     ) -> dict[str, SourceResult]:
         return {
-            source: SourceResult([], "unsupported", "activity/ref collection is not implemented for this provider")
+            source: SourceResult(
+                [],
+                "unsupported",
+                "activity/ref collection is not implemented for this provider",
+            )
             for source in ACTIVITY_SOURCES
         }

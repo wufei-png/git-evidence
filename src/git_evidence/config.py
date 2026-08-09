@@ -239,7 +239,7 @@ def _aware_timestamp(value: Any, field: str) -> datetime:
     if not isinstance(value, str) or not value:
         raise ConfigError(f"{field} must be a non-empty ISO timestamp")
     try:
-        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        timestamp = datetime.fromisoformat(value)
     except ValueError as exc:
         raise ConfigError(f"{field} is not a valid ISO timestamp") from exc
     if timestamp.tzinfo is None:
