@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import secrets
 import sys
 from pathlib import Path
 
@@ -21,13 +22,15 @@ from .validation import ValidationIssue, format_issues, validate_bundle
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="git-evidence")
+    parser = argparse.ArgumentParser(prog="git-evidence", allow_abbrev=False)
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    validate = subparsers.add_parser("validate", help="validate an evidence bundle")
+    validate = subparsers.add_parser(
+        "validate", help="validate an evidence bundle", allow_abbrev=False
+    )
     validate.add_argument("bundle", type=Path)
     validate.add_argument(
         "--diagnostics-format",
@@ -35,7 +38,9 @@ def _parser() -> argparse.ArgumentParser:
         default="text",
     )
 
-    render = subparsers.add_parser("render", help="render a validated evidence bundle")
+    render = subparsers.add_parser(
+        "render", help="render a validated evidence bundle", allow_abbrev=False
+    )
     render.add_argument("bundle", type=Path)
     render.add_argument(
         "--config",
@@ -46,13 +51,19 @@ def _parser() -> argparse.ArgumentParser:
     render.add_argument("--language", choices=LANGUAGES)
     render.add_argument("--output", "-o", type=Path)
 
-    subparsers.add_parser("providers", help="list provider contracts")
+    subparsers.add_parser(
+        "providers", help="list provider contracts", allow_abbrev=False
+    )
 
-    doctor = subparsers.add_parser("doctor", help="validate a collection configuration")
+    doctor = subparsers.add_parser(
+        "doctor", help="validate a collection configuration", allow_abbrev=False
+    )
     doctor.add_argument("--config", required=True, type=Path)
 
     collect = subparsers.add_parser(
-        "collect", help="collect an evidence bundle from a configuration"
+        "collect",
+        help="collect an evidence bundle from a configuration",
+        allow_abbrev=False,
     )
     collect.add_argument("--config", required=True, type=Path)
     collect.add_argument("--output", "-o", type=Path)
@@ -123,7 +134,18 @@ def _write_output(path: Path, text: str) -> bool:
     return True
 
 
-def main(argv: list[str] | None = None) -> int:
+def _requested_diagnostics_format(argv: list[str] | None) -> str:
+    values = list(sys.argv[1:] if argv is None else argv)
+    requested = "text"
+    for position, value in enumerate(values):
+        if value == "--diagnostics-format" and position + 1 < len(values):
+            requested = values[position + 1]
+        if value.startswith("--diagnostics-format="):
+            requested = value.partition("=")[2]
+    return requested
+
+
+def _main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "providers":
         print(
@@ -250,3 +272,29 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(rendered, end="")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the CLI while keeping unknown failures out of user-visible output."""
+    try:
+        return _main(argv)
+    except Exception:  # noqa: BLE001 - the process boundary must redact internals
+        error_id = secrets.token_hex(8)
+        if _requested_diagnostics_format(argv) == "json":
+            print(
+                json.dumps(
+                    {
+                        "status": "internal_failure",
+                        "issues": [],
+                        "error_id": error_id,
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"ERROR: internal failure; error_id={error_id}",
+                file=sys.stderr,
+            )
+        return 70

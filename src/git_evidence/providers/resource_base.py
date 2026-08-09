@@ -100,6 +100,10 @@ class StrictNormalizationError(ResponseShapeError):
     """A native item cannot be represented without inventing identity or time."""
 
 
+EXPECTED_PROVIDER_FAILURES = (ApiError, ProviderNotReady, PrivacyError)
+MALFORMED_NORMALIZATION_ERRORS = (ResponseShapeError,)
+
+
 def is_valid_native_id(value: Any) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, str)):
         return False
@@ -264,10 +268,7 @@ def exception_diagnostics(error: Exception) -> dict[str, Any]:
         return {"failure_class": "provider_not_ready"}
     if isinstance(error, PrivacyError):
         return {"failure_class": "privacy_violation"}
-    return {
-        "failure_class": "unexpected_error",
-        "exception_type": type(error).__name__,
-    }
+    raise error
 
 
 def optional_activity_failure_sources(error: Exception) -> dict[str, SourceResult]:
@@ -1087,7 +1088,7 @@ class BundleBuilder:
             "instance": self.request.instance,
             "repository": target.canonical_id,
             "source": source,
-            "failure_class": diagnostics.get("failure_class", "unexpected_error"),
+            "failure_class": diagnostics["failure_class"],
         }
         if not any(
             isinstance(existing, dict)
@@ -1596,7 +1597,7 @@ class ResourceProvider:
                         raise ResponseShapeError(
                             "provider returned invalid optional activity sources"
                         )
-                except Exception as exc:  # noqa: BLE001 - optional boundary must preserve the core snapshot
+                except EXPECTED_PROVIDER_FAILURES as exc:
                     activity_boundary_error = exc
                     activity_sources = optional_activity_failure_sources(exc)
             else:
@@ -1643,7 +1644,7 @@ class ResourceProvider:
                             ),
                             fail_closed=True,
                         )
-                except Exception as exc:  # noqa: BLE001 - optional per-source boundary
+                except EXPECTED_PROVIDER_FAILURES as exc:
                     builder.restore(checkpoint)
                     builder.record_optional_failure(
                         source,
@@ -1681,7 +1682,7 @@ class ResourceProvider:
                 result.items,
                 target=target,
             )
-        except Exception as exc:  # noqa: BLE001 - transactional source boundary
+        except EXPECTED_PROVIDER_FAILURES as exc:
             builder.restore(checkpoint)
             builder.add_coverage(
                 source,
@@ -1716,7 +1717,7 @@ class ResourceProvider:
                     )
                 builder.add_coverage(source, target, coverage_result)
             builder.add_records("change_requests", result.items, target=target)
-        except Exception as exc:  # noqa: BLE001 - transactional source boundary
+        except EXPECTED_PROVIDER_FAILURES as exc:
             builder.restore(checkpoint)
             for source in CHANGE_REQUEST_COVERAGE_SOURCES:
                 builder.add_coverage(
@@ -1740,8 +1741,13 @@ class ResourceProvider:
         roots: list[_RootRequest] = []
         for target in targets:
             try:
-                roots.append(_RootRequest(target, self._scheduled_root_path(target)))
-            except Exception as exc:  # noqa: BLE001 - repository isolation boundary
+                path = self._scheduled_root_path(target)
+                if not isinstance(path, str) or not path:
+                    raise ResponseShapeError(
+                        "provider returned an invalid repository root path"
+                    )
+                roots.append(_RootRequest(target, path))
+            except EXPECTED_PROVIDER_FAILURES as exc:
                 snapshots[target.canonical_id] = self._failed_repository_snapshot(exc)
         while any(not task.done for task in roots):
             for task in roots:
@@ -1761,8 +1767,8 @@ class ResourceProvider:
                         planned, target, interaction_tasks=False
                     )
                     top_level.extend(planned)
-                except Exception as exc:  # noqa: BLE001 - repository isolation boundary
-                    failure = self._unexpected_source_result(
+                except EXPECTED_PROVIDER_FAILURES as exc:
+                    failure = self._failed_source_result(
                         exc, "top-level source planning failed"
                     )
                     for source in (
@@ -1802,8 +1808,8 @@ class ResourceProvider:
                         planned, target, interaction_tasks=True
                     )
                     interactions.extend(planned)
-                except Exception as exc:  # noqa: BLE001 - repository isolation boundary
-                    snapshot.sources["interactions"] = self._unexpected_source_result(
+                except EXPECTED_PROVIDER_FAILURES as exc:
+                    snapshot.sources["interactions"] = self._failed_source_result(
                         exc, "interaction planning failed"
                     )
         self._run_page_rounds(interactions, interaction_rounds=True)
@@ -1851,12 +1857,12 @@ class ResourceProvider:
         interaction_tasks: bool,
     ) -> None:
         if not isinstance(planned, list):
-            raise TypeError("provider returned a non-list scheduled task set")
+            raise ResponseShapeError("provider returned a non-list scheduled task set")
         required = ("work_items", "change_requests", "commits", "releases")
         if not interaction_tasks and sorted(task.source for task in planned) != sorted(
             required
         ):
-            raise ValueError(
+            raise ResponseShapeError(
                 "provider must return exactly one task per top-level source"
             )
         for task in planned:
@@ -1871,12 +1877,12 @@ class ResourceProvider:
                 or (interaction_tasks and task.source != "interactions")
                 or (not interaction_tasks and task.source not in required)
             ):
-                raise ValueError("provider returned an invalid scheduled task")
+                raise ResponseShapeError("provider returned an invalid scheduled task")
             if interaction_tasks and not all(
                 isinstance(value, str)
                 for value in (task.subject_type, task.subject_id, task.endpoint_kind)
             ):
-                raise ValueError(
+                raise ResponseShapeError(
                     "provider returned invalid interaction ordering fields"
                 )
 
@@ -1904,7 +1910,9 @@ class ResourceProvider:
                 )
             repository = self._scheduled_repository(task.target, response.body)
             if not isinstance(repository, dict):
-                raise TypeError("provider returned an invalid normalized repository")
+                raise ResponseShapeError(
+                    "provider returned an invalid normalized repository"
+                )
             retrieval_key = new_response_correlation_key()
             repository["_retrieval_key"] = retrieval_key
             task.snapshot = RepositorySnapshot(
@@ -1918,12 +1926,12 @@ class ResourceProvider:
                     )
                 ],
             )
-        except Exception as exc:  # noqa: BLE001 - repository isolation boundary
+        except EXPECTED_PROVIDER_FAILURES as exc:
             task.snapshot = self._failed_repository_snapshot(exc)
         task.done = True
 
     @staticmethod
-    def _unexpected_source_result(error: Exception, note: str) -> SourceResult:
+    def _failed_source_result(error: Exception, note: str) -> SourceResult:
         return SourceResult([], "incomplete", note, exception_diagnostics(error))
 
     @classmethod
@@ -1932,7 +1940,7 @@ class ResourceProvider:
         note = (
             "provider request failed"
             if isinstance(error, ApiError)
-            else "repository collection failed unexpectedly"
+            else "provider collection failed"
         )
         return RepositorySnapshot(
             None,
@@ -1961,7 +1969,9 @@ class ResourceProvider:
                     and task.source != "interactions"
                     or (not interaction_rounds and task.source not in source_order)
                 ):
-                    raise ValueError("provider returned an invalid scheduled source")
+                    raise ResponseShapeError(
+                        "provider returned an invalid scheduled source"
+                    )
                 task.cursor = PaginationCursor(
                     self.transport,
                     task.path,
@@ -1970,8 +1980,8 @@ class ResourceProvider:
                     max_pages=self.max_pages,
                     strategy=self.pagination_strategy,
                 )
-            except Exception as exc:  # noqa: BLE001 - source isolation boundary
-                task.result = self._unexpected_source_result(
+            except EXPECTED_PROVIDER_FAILURES as exc:
+                task.result = self._failed_source_result(
                     exc, "scheduled source initialization failed"
                 )
         interaction_subject_offsets: dict[str, int] = {}
@@ -2017,7 +2027,9 @@ class ResourceProvider:
             for task in selected:
                 try:
                     if task.cursor is None:
-                        raise RuntimeError("scheduled source cursor is unavailable")
+                        raise ResponseShapeError(
+                            "scheduled source cursor is unavailable"
+                        )
                     task.cursor.step()
                     if not task.cursor.done:
                         continue
@@ -2025,11 +2037,11 @@ class ResourceProvider:
                         task, task.cursor.result()
                     )
                     if not isinstance(normalized, SourceResult):
-                        raise TypeError(
+                        raise ResponseShapeError(
                             "provider returned an invalid normalized source"
                         )
                     task.result = normalized
-                except Exception as exc:  # noqa: BLE001 - source isolation boundary
+                except EXPECTED_PROVIDER_FAILURES as exc:
                     diagnostics = exception_diagnostics(exc)
                     diagnostics["metrics"] = transport_metrics(self.transport)
                     if isinstance(exc, ApiError) and task.cursor is not None:
@@ -2046,15 +2058,15 @@ class ResourceProvider:
                                 ),
                             )
                             if not isinstance(task.result, SourceResult):
-                                raise TypeError(
+                                raise ResponseShapeError(
                                     "provider returned an invalid normalized source"
                                 )
                             task.result.note = (
                                 "provider request failed after "
                                 f"{task.cursor.pages} accepted page(s)"
                             )
-                        except Exception as normalization_error:  # noqa: BLE001
-                            task.result = self._unexpected_source_result(
+                        except EXPECTED_PROVIDER_FAILURES as normalization_error:
+                            task.result = self._failed_source_result(
                                 normalization_error,
                                 "scheduled source normalization failed",
                             )
@@ -2155,23 +2167,9 @@ class ResourceProvider:
                     valid_retrieval_keys.append(result.item_retrieval_keys[position])
             except PrivacyError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - classify unknown normalizer failures
+            except MALFORMED_NORMALIZATION_ERRORS:
                 dropped += 1
-                failure_classes.add(
-                    "malformed_response"
-                    if isinstance(
-                        exc,
-                        (
-                            StrictNormalizationError,
-                            ResponseShapeError,
-                            AttributeError,
-                            KeyError,
-                            TypeError,
-                            ValueError,
-                        ),
-                    )
-                    else "unexpected_normalizer_error"
-                )
+                failure_classes.add("malformed_response")
         result.items = valid
         result.item_retrieval_keys = valid_retrieval_keys
         _append_normalization_diagnostics(result, source, dropped, failure_classes)
@@ -2299,23 +2297,9 @@ class ResourceProvider:
                 normalized.append(normalized_item)
             except PrivacyError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - classify unknown normalizer failures
+            except MALFORMED_NORMALIZATION_ERRORS:
                 dropped += 1
-                failure_classes.add(
-                    "malformed_response"
-                    if isinstance(
-                        exc,
-                        (
-                            ResponseShapeError,
-                            AttributeError,
-                            IndexError,
-                            KeyError,
-                            TypeError,
-                            ValueError,
-                        ),
-                    )
-                    else "unexpected_normalizer_error"
-                )
+                failure_classes.add("malformed_response")
         result.items = normalized
         result.item_retrieval_keys = normalized_retrieval_keys
         _append_normalization_diagnostics(result, source, dropped, failure_classes)

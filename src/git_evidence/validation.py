@@ -51,8 +51,6 @@ FAILURE_CLASSES = {
     "fixture_missing",
     "http_error",
     "provider_not_ready",
-    "unexpected_error",
-    "unexpected_normalizer_error",
     "budget_exhausted",
     "insecure_transport",
     "limit_exceeded",

@@ -7,7 +7,11 @@ from git_evidence.config import (
     PlanBudgetInfeasibleConfigError,
     validate_collection_config,
 )
-from git_evidence.providers.base import CollectionRequest, RepositoryTarget
+from git_evidence.providers.base import (
+    CollectionRequest,
+    ProviderNotReady,
+    RepositoryTarget,
+)
 
 
 def config_for(
@@ -137,7 +141,7 @@ class FairPreflightTests(unittest.TestCase):
         class FailedProvider:
             def collect(self, request: CollectionRequest) -> dict[str, object]:
                 del request
-                raise RuntimeError("fixture failure")
+                raise ProviderNotReady("fixture provider unavailable")
 
         for permutation in (repositories, list(reversed(repositories))):
             with self.subTest(permutation=permutation):

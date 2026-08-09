@@ -23,7 +23,12 @@ from .identity import (
 from .limits import MAX_BUNDLE_BYTES, MAX_NORMALIZED_ENTITIES
 from .model import ALL_COLLECTION_KEYS
 from .privacy import PrivacyError, sanitize_public_payload
-from .providers import PROVIDER_REGISTRY, CollectionRequest, RepositoryTarget
+from .providers import (
+    PROVIDER_REGISTRY,
+    CollectionRequest,
+    ProviderNotReady,
+    RepositoryTarget,
+)
 from .providers.base import (
     ACTIVITY_SOURCES,
     RESOURCE_SOURCES,
@@ -32,7 +37,7 @@ from .providers.base import (
     merge_optional_coverage_warning,
 )
 from .providers.resource_base import exception_diagnostics, merge_diagnostics
-from .providers.transport import ResponseShapeError, empty_transport_metrics
+from .providers.transport import ApiError, ResponseShapeError, empty_transport_metrics
 from .time import TimeValueError, normalize_utc
 from .validation import (
     has_blocking_core_coverage,
@@ -67,7 +72,7 @@ def _timestamp_text(value: Any, field: str) -> str:
 
 def _group_failure_diagnostics(error: Exception) -> tuple[str, dict[str, Any]]:
     diagnostics = exception_diagnostics(error)
-    return diagnostics.get("failure_class", "unexpected_error"), diagnostics
+    return str(diagnostics["failure_class"]), diagnostics
 
 
 def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
@@ -925,7 +930,7 @@ def collect_config(
             collected.append(_validate_provider_bundle_shape(provider.collect(request)))
         except CollectionError:
             raise
-        except Exception as exc:  # noqa: BLE001 - isolate one provider-instance group
+        except (ApiError, ProviderNotReady, PrivacyError) as exc:
             collected.append(
                 _failed_group_bundle(
                     kind=kind,

@@ -74,8 +74,6 @@ OPERATIONAL_FAILURE_CLASSES = frozenset(
         "http_error",
         "malformed_response",
         "provider_not_ready",
-        "unexpected_error",
-        "unexpected_normalizer_error",
         "budget_exhausted",
         "insecure_transport",
         "limit_exceeded",

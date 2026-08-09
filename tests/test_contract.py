@@ -826,6 +826,35 @@ class ContractTests(unittest.TestCase):
                         foreign_url, {item.get("url") for item in bundle["evidence"]}
                     )
 
+    def test_gitee_missing_native_id_is_malformed_and_keeps_valid_sibling(
+        self,
+    ) -> None:
+        transport = gitee_transport()
+        issues = transport.responses["/repos/example/project/issues"][0].body
+        valid_sibling = deepcopy(issues[0])
+        valid_sibling["number"] = 2
+        valid_sibling["id"] = 2
+        issues.append(valid_sibling)
+        issues[0].pop("number", None)
+        issues[0].pop("id", None)
+
+        bundle = GiteeProvider(transport).collect(request_for("gitee", "gitee.com"))
+
+        self.assertEqual(
+            [item["id"] for item in bundle["work_items"]],
+            ["work_item:gitee:gitee.com:example/project:2"],
+        )
+        observation = next(
+            item
+            for item in bundle["coverage"]["observations"]
+            if item["source"] == "work_items"
+        )
+        self.assertEqual(observation["status"], "incomplete")
+        self.assertEqual(
+            observation["diagnostics"]["failure_class"], "malformed_response"
+        )
+        self.assertEqual(observation["diagnostics"]["dropped_count"], 1)
+
     def test_github_base_repository_identity_mismatch_is_malformed(self) -> None:
         transport = github_transport()
         for pull in transport.responses["/repos/example/project/pulls"][0].body:
@@ -1215,8 +1244,20 @@ class ContractTests(unittest.TestCase):
     def test_optional_activity_typed_exceptions_preserve_class_and_core_snapshot(
         self,
     ) -> None:
+        provider = GitHubProvider(github_transport())
+        with (
+            patch.object(
+                provider,
+                "_collect_activity",
+                side_effect=RuntimeError("synthetic activity failure"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "synthetic activity failure"),
+        ):
+            provider.collect(
+                request_for("github", "github.com", include_activity_api=True)
+            )
+
         cases = (
-            (RuntimeError("synthetic activity failure"), "unexpected_error", True),
             (
                 ProviderNotReady("activity collector is not ready"),
                 "provider_not_ready",

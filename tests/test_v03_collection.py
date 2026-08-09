@@ -272,6 +272,34 @@ class V03CollectionTests(unittest.TestCase):
             {"malformed_response"},
         )
 
+    def test_collect_config_does_not_hide_unknown_provider_failures(self) -> None:
+        class FailingProvider:
+            def collect(self, request: object) -> dict[str, object]:
+                del request
+                raise RuntimeError("synthetic provider bug")
+
+        config = {
+            "window": {"start": WINDOW_START, "end": WINDOW_END, "timezone": "UTC"},
+            "scope": {
+                "repositories": [
+                    {
+                        "provider_ref": "public-github",
+                        "owner": "example",
+                        "name": "project",
+                    }
+                ],
+                "actors": [],
+            },
+            "providers": {
+                "public-github": {"kind": "github", "instance": "github.com"}
+            },
+        }
+        with self.assertRaisesRegex(RuntimeError, "synthetic provider bug"):
+            collect_config(
+                validate_collection_config(config),
+                provider_factory=lambda *args: FailingProvider(),
+            )
+
     def test_provider_fragment_rejects_nested_unknown_fields_and_offset_times(
         self,
     ) -> None:

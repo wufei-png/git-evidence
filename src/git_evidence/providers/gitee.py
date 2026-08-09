@@ -98,7 +98,7 @@ class GiteeProvider(ResourceProvider):
     @staticmethod
     def _id(target: RepositoryTarget, kind: str, native_id: Any) -> str:
         if not is_valid_native_id(native_id):
-            raise ValueError(f"{kind} response omitted a stable native id")
+            raise ResponseShapeError(f"{kind} response omitted a stable native id")
         return (
             f"{kind}:gitee:{target.instance}:{target.owner}/{target.name}:{native_id}"
         )

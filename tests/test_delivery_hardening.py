@@ -183,6 +183,49 @@ class AtomicOutputTests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertIn("synthetic output failure", stderr.getvalue())
 
+    def test_cli_redacts_unknown_failures_behind_an_opaque_error_id(self) -> None:
+        for diagnostics_format in ("text", "json"):
+            with self.subTest(diagnostics_format=diagnostics_format):
+                stderr = StringIO()
+                argv = ["collect", "--config", "ignored.toml"]
+                if diagnostics_format == "json":
+                    argv.extend(
+                        [
+                            "--diagnostics-format",
+                            "text",
+                            "--diagnostics-format",
+                            "json",
+                        ]
+                    )
+                with (
+                    patch(
+                        "git_evidence.cli.load_collection_config",
+                        side_effect=RuntimeError("synthetic internal secret"),
+                    ),
+                    patch(
+                        "git_evidence.cli.secrets.token_hex",
+                        return_value="0123456789abcdef",
+                    ),
+                    patch("sys.stderr", stderr),
+                ):
+                    status = cli_main(argv)
+                self.assertEqual(status, 70)
+                if diagnostics_format == "json":
+                    self.assertEqual(
+                        json.loads(stderr.getvalue()),
+                        {
+                            "status": "internal_failure",
+                            "issues": [],
+                            "error_id": "0123456789abcdef",
+                        },
+                    )
+                else:
+                    self.assertEqual(
+                        stderr.getvalue(),
+                        "ERROR: internal failure; error_id=0123456789abcdef\n",
+                    )
+                self.assertNotIn("synthetic internal secret", stderr.getvalue())
+
     def test_collect_json_diagnostics_are_single_documents_for_all_outcomes(
         self,
     ) -> None:

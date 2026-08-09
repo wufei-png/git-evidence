@@ -82,7 +82,9 @@ stable `status`, an `issues` array, and collection summary counts; it never
 mixes prose into that document. Exit statuses are stable: `0` success (possibly with
 non-blocking warnings), `1` validation/render-eligibility failure, `2`
 configuration/input/I/O failure, and `3` a core provider-group collection
-failure. Bundle, report, and cache files use atomic replacement and mode
+failure. An unknown program failure exits `70`; text mode exposes only an
+opaque `error_id`, while JSON mode emits `status: internal_failure`, an empty
+`issues` array, and that same opaque ID. Bundle, report, and cache files use atomic replacement and mode
 `0600`; stdout remains available when no output path is supplied.
 
 `collect` emits the strict Schema 0.3 contract directly, including its retained

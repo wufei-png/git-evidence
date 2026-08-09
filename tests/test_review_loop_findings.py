@@ -508,7 +508,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
         for failure_class in (
             "permission_denied",
             "malformed_response",
-            "unexpected_normalizer_error",
+            "provider_not_ready",
         ):
             with self.subTest(failure_class=failure_class):
                 bundle = load_bundle(FIXTURE)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from collections.abc import Mapping
 from typing import Any
+from unittest.mock import patch
 
 from test_contract import (
     WINDOW_END,
@@ -307,7 +308,7 @@ class FairSchedulerTests(unittest.TestCase):
                     "fixture_missing",
                 )
 
-    def test_unexpected_root_failure_does_not_abort_sibling_repository(self) -> None:
+    def test_unexpected_root_failure_fails_fast(self) -> None:
         class RootFailingProvider(GitHubProvider):
             def _scheduled_repository(
                 self, target: RepositoryTarget, raw: dict[str, Any]
@@ -316,56 +317,62 @@ class FairSchedulerTests(unittest.TestCase):
                     raise RuntimeError("synthetic secret must not enter the bundle")
                 return super()._scheduled_repository(target, raw)
 
-        bundle = RootFailingProvider(fair_transport()).collect(two_repository_request())
-        self.assertEqual(
-            [item["full_name"] for item in bundle["repositories"]],
-            ["z/small"],
-        )
-        large_failures = [
-            item
-            for item in bundle["coverage"]["group_failures"]
-            if item["repository"] == "repo:github:github.com:a/large"
-        ]
-        self.assertTrue(large_failures)
-        self.assertTrue(
-            all(item["failure_class"] == "unexpected_error" for item in large_failures)
-        )
-        self.assertNotIn("synthetic secret", str(bundle))
+        with self.assertRaisesRegex(RuntimeError, "synthetic secret"):
+            RootFailingProvider(fair_transport()).collect(two_repository_request())
 
-    def test_unexpected_source_failure_is_scoped_and_privacy_stays_fatal(self) -> None:
-        for error, failure_class in (
-            (RuntimeError("synthetic source failure"), "unexpected_error"),
-            (PrivacyError("synthetic private payload"), "privacy_violation"),
+    def test_unexpected_source_failure_fails_fast(self) -> None:
+        recorded = fair_transport(with_issues=True)
+        transport = PathFailureTransport(
+            recorded.responses,
+            "/repos/a/large/issues",
+            RuntimeError("synthetic source failure"),
+        )
+        with self.assertRaisesRegex(RuntimeError, "synthetic source failure"):
+            GitHubProvider(transport).collect(two_repository_request())
+
+    def test_unexpected_normalizer_failure_fails_fast(self) -> None:
+        for error in (
+            RuntimeError("synthetic scheduled normalizer failure"),
+            TypeError("synthetic item normalizer bug"),
+            ValueError("synthetic item normalizer value bug"),
         ):
-            with self.subTest(failure_class=failure_class):
-                recorded = fair_transport(with_issues=True)
-                transport = PathFailureTransport(
-                    recorded.responses,
-                    "/repos/a/large/issues",
-                    error,
+            with self.subTest(error_type=type(error).__name__):
+                provider = GitHubProvider(fair_transport(with_issues=True))
+                target = (
+                    "_normalize_scheduled_page"
+                    if isinstance(error, RuntimeError)
+                    else "_normalize_issue"
                 )
-                bundle = GitHubProvider(transport).collect(two_repository_request())
-                observations = {
-                    (item["repository_id"], item["source"]): item
-                    for item in bundle["coverage"]["observations"]
-                }
-                large = "repo:github:github.com:a/large"
-                small = "repo:github:github.com:z/small"
-                self.assertEqual(
-                    observations[(large, "work_items")]["status"], "incomplete"
-                )
-                self.assertEqual(
-                    observations[(large, "work_items")]["diagnostics"]["failure_class"],
-                    failure_class,
-                )
-                self.assertEqual(
-                    observations[(small, "work_items")]["status"], "supported"
-                )
-                self.assertEqual(
-                    observations[(small, "interactions")]["status"], "supported"
-                )
-                self.assertFalse(bundle["coverage"]["render_eligible"])
-                self.assertNotIn(str(error), str(bundle))
+                with (
+                    patch.object(provider, target, side_effect=error),
+                    self.assertRaisesRegex(type(error), "synthetic"),
+                ):
+                    provider.collect(two_repository_request())
+
+    def test_privacy_source_failure_is_scoped_and_fatal(self) -> None:
+        error = PrivacyError("synthetic private payload")
+        recorded = fair_transport(with_issues=True)
+        transport = PathFailureTransport(
+            recorded.responses,
+            "/repos/a/large/issues",
+            error,
+        )
+        bundle = GitHubProvider(transport).collect(two_repository_request())
+        observations = {
+            (item["repository_id"], item["source"]): item
+            for item in bundle["coverage"]["observations"]
+        }
+        large = "repo:github:github.com:a/large"
+        small = "repo:github:github.com:z/small"
+        self.assertEqual(observations[(large, "work_items")]["status"], "incomplete")
+        self.assertEqual(
+            observations[(large, "work_items")]["diagnostics"]["failure_class"],
+            "privacy_violation",
+        )
+        self.assertEqual(observations[(small, "work_items")]["status"], "supported")
+        self.assertEqual(observations[(small, "interactions")]["status"], "supported")
+        self.assertFalse(bundle["coverage"]["render_eligible"])
+        self.assertNotIn(str(error), str(bundle))
 
     def test_invalid_hook_returns_are_scoped_to_the_repository(self) -> None:
         class InvalidHookProvider(GitHubProvider):
@@ -414,7 +421,7 @@ class FairSchedulerTests(unittest.TestCase):
                     observations[(large, failed_source)]["diagnostics"][
                         "failure_class"
                     ],
-                    "unexpected_error",
+                    "malformed_response",
                 )
                 self.assertEqual(
                     observations[(small, "work_items")]["status"], "supported"

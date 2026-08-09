@@ -23,6 +23,7 @@ from git_evidence.config import (
 )
 from git_evidence.providers.base import (
     CollectionRequest,
+    ProviderNotReady,
     RepositoryTarget,
     instance_web_base,
     validate_instance,
@@ -203,7 +204,7 @@ class StrictConfigTests(unittest.TestCase):
         class FailedProvider:
             def collect(self, request: CollectionRequest) -> dict[str, object]:
                 del request
-                raise RuntimeError("fixture failure")
+                raise ProviderNotReady("fixture provider unavailable")
 
         def factory(
             kind: str,
