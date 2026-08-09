@@ -275,13 +275,27 @@ def optional_coverage_warning(observation: Mapping[str, Any]) -> dict[str, Any] 
     }
     note = observation.get("note")
     if isinstance(note, str) and note.strip():
-        warning["message"] = note
+        warning["message"] = canonical_warning_message(note)
     failure_classes = sorted(_coverage_failure_classes(observation.get("diagnostics")))
     if len(failure_classes) == 1:
         warning["failure_class"] = failure_classes[0]
     elif failure_classes:
         warning["failure_classes"] = failure_classes
     return warning
+
+
+def canonical_warning_message(*messages: str) -> str:
+    """Return an order-independent union of semicolon-delimited warning notes."""
+    return "; ".join(
+        sorted(
+            {
+                part.strip()
+                for message in messages
+                for part in message.split(";")
+                if part.strip()
+            }
+        )
+    )
 
 
 def append_optional_coverage_warning(
@@ -333,14 +347,13 @@ def merge_optional_coverage_warning(
             existing["failure_classes"] = sorted(failure_classes)
         existing_message = existing.get("message")
         incoming_message = warning.get("message")
-        if isinstance(existing_message, str) and existing_message.strip():
-            if isinstance(incoming_message, str) and incoming_message.strip():
-                if existing_message in incoming_message:
-                    existing["message"] = incoming_message
-                elif incoming_message not in existing_message:
-                    existing["message"] = f"{existing_message}; {incoming_message}"
-        elif isinstance(incoming_message, str) and incoming_message.strip():
-            existing["message"] = incoming_message
+        messages = [
+            message
+            for message in (existing_message, incoming_message)
+            if isinstance(message, str) and message.strip()
+        ]
+        if messages:
+            existing["message"] = canonical_warning_message(*messages)
         if statuses:
             observations = coverage.get("observations")
             if isinstance(observations, list):

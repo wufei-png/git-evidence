@@ -28,6 +28,7 @@ from .providers.base import (
     OPTIONAL_COVERAGE_WARNING_CODE,
     RESOURCE_SOURCES,
     RepositoryTarget,
+    canonical_warning_message,
     git_object_id_algorithm,
     is_verifiable_sha,
     merge_capability_status,
@@ -1576,7 +1577,7 @@ def _validate_coverage(
             warning_message = warning.get("message")
             if observed_notes and (
                 not isinstance(warning_message, str)
-                or any(note not in warning_message for note in observed_notes)
+                or warning_message != canonical_warning_message(*observed_notes)
             ):
                 _issue(
                     issues,
