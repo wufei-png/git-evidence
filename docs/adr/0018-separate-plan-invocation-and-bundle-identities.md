@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded_by: 0022
 date: 2026-08-08
 ---
 

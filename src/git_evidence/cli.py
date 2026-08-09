@@ -3,12 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from io import StringIO
 from pathlib import Path
 
 from . import __version__
 from .atomic_io import AtomicWriteError, atomic_write_text
-from .bounds import InputLimitError, read_bounded_bytes
 from .collect import CollectionError, collect_config
 from .config import (
     ConfigError,
@@ -16,9 +14,6 @@ from .config import (
     load_collection_config,
     load_report_config,
 )
-from .identity import compute_artifact_bytes_digest
-from .limits import MAX_BUNDLE_BYTES
-from .migration import MigrationError, migrate_v01_to_v02
 from .model import BundleLoadError, load_bundle
 from .providers import RESOURCE_SOURCES, provider_catalog
 from .render import LANGUAGES, PROFILES, RenderError, render_bundle
@@ -50,12 +45,6 @@ def _parser() -> argparse.ArgumentParser:
     render.add_argument("--profile", choices=PROFILES)
     render.add_argument("--language", choices=LANGUAGES)
     render.add_argument("--output", "-o", type=Path)
-
-    migrate = subparsers.add_parser(
-        "migrate", help="explicitly migrate a schema 0.1 bundle to 0.2"
-    )
-    migrate.add_argument("bundle", type=Path)
-    migrate.add_argument("--output", "-o", type=Path)
 
     subparsers.add_parser("providers", help="list provider contracts")
 
@@ -119,8 +108,8 @@ def _emit_collect_diagnostics(
     messages = {
         "group_failure": "COLLECTION: one or more provider groups failed",
         "invalid": "COLLECTION: validation failed",
-        "publishable_with_warnings": "COLLECTION: publishable with coverage warnings",
-        "publishable": "COLLECTION: publishable",
+        "render_eligible_with_warnings": "COLLECTION: render eligible with coverage warnings",
+        "render_eligible": "COLLECTION: render eligible",
     }
     print(messages[status], file=sys.stderr)
 
@@ -196,36 +185,14 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         _emit_collect_diagnostics(
-            status="publishable_with_warnings" if warnings or issues else "publishable",
+            status="render_eligible_with_warnings"
+            if warnings or issues
+            else "render_eligible",
             issues=issues,
             diagnostics_format=args.diagnostics_format,
             group_failure_count=0,
             coverage_warning_count=len(warnings),
         )
-        return 0
-    if args.command == "migrate":
-        try:
-            raw = read_bounded_bytes(args.bundle, max_bytes=MAX_BUNDLE_BYTES)
-            bundle = load_bundle(StringIO(raw.decode("utf-8")))
-            migrated = migrate_v01_to_v02(
-                bundle,
-                source_artifact_digest=compute_artifact_bytes_digest(raw),
-            )
-        except (
-            BundleLoadError,
-            InputLimitError,
-            MigrationError,
-            OSError,
-            UnicodeDecodeError,
-        ) as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            return 2
-        serialized = json.dumps(migrated, ensure_ascii=False, indent=2) + "\n"
-        if args.output:
-            if not _write_output(args.output, serialized):
-                return 2
-        else:
-            print(serialized, end="")
         return 0
     try:
         bundle = load_bundle(args.bundle)

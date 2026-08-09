@@ -16,10 +16,12 @@ The runtime fairness unit is one physical HTTP attempt; retry attempts re-enter
 the queue instead of running invisibly inside one repository's turn. Cache hits
 consume no request budget and may therefore complete without an HTTP attempt.
 After roots, top-level sources are queued by page depth, canonical repository
-ID, and the fixed source order `work_items`, `change_requests`, `commits`,
+ID, and the fixed fetch order `work_items`, `change_requests`, `commits`,
 `releases`. Interaction requests discovered from those lists are queued by
 canonical repository ID, subject type, subject ID, and endpoint kind, with one
-request per repository per round. Optional activity/ref work is admitted only
+request per repository per round. Within a repository, scheduling rotates
+across subjects before returning to another endpoint or page of the same
+subject. Optional activity/ref work is admitted only
 after every required source is complete; it may use the remaining budget but
 has no reservation of its own. At runtime, an exhausted required queue marks
 its affected observations `incomplete` with `budget_exhausted` and adds typed

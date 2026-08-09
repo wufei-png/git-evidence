@@ -14,11 +14,11 @@ run all of the following gates:
    `fixtures/provider_contract/*.json` responses through every registered
    provider and exercise the provider registry. No `MappingTransport` fixture
    is evidence of live API compatibility.
-2. **Schema gate** — validate `fixtures/example_bundle.json` against the
-   versioned bundle schema, including the privacy policy shape.
+2. **Schema gate** — validate `fixtures/example_bundle.json` against sole
+   Schema 0.3, including the privacy policy shape.
 3. **Semantic/render gate** — exercise required-source coverage,
    evidence references, timestamps, scope ownership, failure classes, and the
-   fail-closed legacy `allow_publish` decision. Per ADR-0017, this means render
+   fail-closed `render_eligible` decision. Per ADR-0017, this means render
    eligibility and never grants disclosure approval.
 4. **Renderer/privacy gate** — render valid bundles offline, keep actors
    anonymous by default, accept only explicit actor labels, and reject or
@@ -88,7 +88,7 @@ core resources are complete, but its `coverage.warnings[]` entry must remain
 visible. An optional `privacy_violation` is fail-closed and is a failed
 canary even when core resources are complete. A diagnostic bundle with a
 core failure may be retained outside the repository, but it must keep
-`coverage.allow_publish: false` and never be described as render-eligible. A
+`coverage.render_eligible: false` and never be described as render-eligible. A
 canary that was not executed is simply **unverified**; offline CI cannot
 substitute for it.
 

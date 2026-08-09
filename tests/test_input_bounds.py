@@ -10,6 +10,8 @@ from typing import Self
 from unittest.mock import patch
 from urllib.error import HTTPError
 
+from test_contract import github_transport, request_for, validate_output
+
 from git_evidence.bounds import json_size_with_limit
 from git_evidence.collect import _merge_bundles, collect_config
 from git_evidence.config import validate_collection_config
@@ -30,7 +32,6 @@ from git_evidence.providers.transport import (
     UrllibTransport,
     paginate,
 )
-from git_evidence.validation import validate_bundle
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "example_bundle.json"
 
@@ -263,7 +264,7 @@ class PageAndEntityBoundTests(unittest.TestCase):
         self.assertEqual(caught.exception.failure_class, "limit_exceeded")
 
         exact_builder, _ = make_builder()
-        exact_builder.bundle["coverage"]["allow_publish"] = False
+        exact_builder.bundle["coverage"]["render_eligible"] = False
         exact_size = json_size_with_limit(exact_builder.bundle, max_bytes=1_000_000) + 1
         with patch(
             "git_evidence.providers.resource_base.MAX_BUNDLE_BYTES",
@@ -296,7 +297,7 @@ class PageAndEntityBoundTests(unittest.TestCase):
         builder, target = make_builder()
         builder.add_coverage("commits", target, result)
         bundle = builder.finish()
-        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertFalse(bundle["coverage"]["render_eligible"])
         self.assertTrue(
             any(
                 failure["failure_class"] == "limit_exceeded"
@@ -349,11 +350,13 @@ class PageAndEntityBoundTests(unittest.TestCase):
 
 class AggregateBoundTests(unittest.TestCase):
     def test_aggregate_overflow_returns_a_bounded_typed_diagnostic(self) -> None:
-        bundle = load_bundle(FIXTURE)
+        bundle = GitHubProvider(github_transport()).collect(
+            request_for("github", "github.com")
+        )
         prior_failure = {
             "provider": "github",
             "instance": "github.com",
-            "repository": bundle["run"]["scope"]["repositories"][0],
+            "repository": bundle["scope"]["repositories"][0],
             "source": "activities",
             "failure_class": "privacy_violation",
         }
@@ -364,18 +367,18 @@ class AggregateBoundTests(unittest.TestCase):
         }
         bundle["coverage"]["fatal"].append(prior_blocker)
         bundle["coverage"]["group_failures"] = [prior_failure]
-        bundle["coverage"]["allow_publish"] = False
+        bundle["coverage"]["render_eligible"] = False
         with patch("git_evidence.collect.MAX_BUNDLE_BYTES", 9_000):
             merged = _merge_bundles(
                 [bundle],
-                window_start=bundle["run"]["window"]["start"],
-                window_end=bundle["run"]["window"]["end"],
-                timezone=bundle["run"]["window"]["timezone"],
-                repository_ids=bundle["run"]["scope"]["repositories"],
-                actor_ids=bundle["run"]["scope"]["actors"],
+                window_start=bundle["window"]["start"],
+                window_end=bundle["window"]["end"],
+                timezone=bundle["window"]["timezone"],
+                repository_ids=bundle["scope"]["repositories"],
+                actor_ids=bundle["scope"]["actors"],
             )
         self.assertEqual(merged["collection"]["failure_class"], "limit_exceeded")
-        self.assertFalse(merged["coverage"]["allow_publish"])
+        self.assertFalse(merged["coverage"]["render_eligible"])
         self.assertIn(prior_failure, merged["coverage"]["group_failures"])
         self.assertIn(prior_blocker, merged["coverage"]["fatal"])
         self.assertNotIn(
@@ -390,7 +393,7 @@ class AggregateBoundTests(unittest.TestCase):
             len(json.dumps(merged, ensure_ascii=False, indent=2).encode("utf-8")) + 1,
             9_000,
         )
-        codes = {issue.code for issue in validate_bundle(merged)}
+        codes = {issue.code for issue in validate_output(merged)}
         self.assertIn("collection.limit_exceeded", codes)
         self.assertIn("scope.repository_missing", codes)
 
@@ -469,8 +472,14 @@ class ReplayInputBoundTests(unittest.TestCase):
         ):
             load_bundle(StringIO('{"providers":[{}],"repositories":[{}]}'))
 
-        with patch("git_evidence.model.MAX_BUNDLE_BYTES", 8):
-            self.assertEqual(load_bundle(StringIO('{"é":1}')), {"é": 1})
+        utf8_bundle = '{"schema_version":"0.3","é":1}'
+        with patch(
+            "git_evidence.model.MAX_BUNDLE_BYTES", len(utf8_bundle.encode("utf-8"))
+        ):
+            self.assertEqual(
+                load_bundle(StringIO(utf8_bundle)),
+                {"schema_version": "0.3", "é": 1},
+            )
         with (
             patch("git_evidence.model.MAX_BUNDLE_BYTES", 10),
             self.assertRaises(BundleLoadError),

@@ -56,8 +56,8 @@ external operator decision.
 - Actors are anonymous by default, credentials are environment-only, and
   source URLs are retained only after auth material is redacted.
 
-See [CONTEXT.md](CONTEXT.md), the [accepted ADRs](docs/adr/), and the current
-[MVP plan](docs/plans/2026-08-01-open-source-mvp.md).
+See [STATUS.md](STATUS.md), [CONTEXT.md](CONTEXT.md), and the
+[accepted ADRs](docs/adr/).
 
 ## Quick start
 
@@ -72,8 +72,6 @@ git-evidence doctor --config config.example.toml
 git-evidence collect --config config.example.toml \
   --output evidence/bundle.json
 git-evidence validate fixtures/example_bundle.json
-git-evidence migrate fixtures/example_bundle.json \
-  --output evidence/bundle-0.2.json
 git-evidence render fixtures/example_bundle.json \
   --config config.example.toml --profile project-first --output report.md
 ```
@@ -87,16 +85,11 @@ configuration/input/I/O failure, and `3` a core provider-group collection
 failure. Bundle, report, and cache files use atomic replacement and mode
 `0600`; stdout remains available when no output path is supplied.
 
-`collect` emits the strict Schema 0.2 contract directly, including its retained
+`collect` emits the strict Schema 0.3 contract directly, including its retained
 plan, unique invocation, response-level Retrieval records, typed Assertions,
-and recomputable Bundle digest. Schema 0.1 remains readable for one
-compatibility window; converting a stored 0.1 artifact is always an explicit
-migration that records the source artifact digest. See the
-[0.1 to 0.2 migration guide](docs/migration/0.1-to-0.2.md).
-
-The v0.1 CLI status word `publishable` is legacy wording for render eligibility
-only. A successful collect, validate, or render command does not approve
-disclosure of the sensitive Bundle or its report.
+and recomputable Bundle digest. It does not read, recognize, migrate, or
+coordinate any earlier Bundle format. A successful collect, validate, or
+render command does not approve disclosure of the sensitive Bundle or report.
 
 The example configuration names `GITHUB_TOKEN`; set that environment variable
 before `collect`, or remove `token_env` for an intentionally anonymous public
@@ -138,11 +131,11 @@ does close render eligibility.
 
 ## Status
 
-The P2 contract slice includes the provider registry, typed TOML configuration,
+The current contract includes the provider registry, typed TOML configuration,
 fail-closed privacy render gate, provenance-linked coverage
 failures, private cache replay, strict cache status/header handling, duplicate
 record diagnostics, and bounded transport budgets. No provider is advertised
-as production-complete: this checkout's offline fixtures and renderer tests do
-not constitute a live-provider canary, and no current live canary is claimed.
+as production-complete. See [STATUS.md](STATUS.md) for the distinction between
+offline contract evidence and dated live smoke evidence.
 A provider becomes supported only when its capability declaration, contract
 fixtures, coverage behavior, live replay gates, and report replay tests pass.

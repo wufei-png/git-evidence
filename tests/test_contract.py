@@ -20,6 +20,7 @@ from git_evidence.config import (
     load_collection_config,
     validate_collection_config,
 )
+from git_evidence.identity import compute_plan_id
 from git_evidence.model import load_bundle
 from git_evidence.privacy import PrivacyError
 from git_evidence.providers import (
@@ -50,15 +51,23 @@ from git_evidence.providers.transport import (
 )
 from git_evidence.render import render_bundle
 from git_evidence.validation import (
+    ValidationIssue,
     compute_render_eligibility,
-    recompute_allow_publish,
+    recompute_render_eligibility,
     validate_bundle,
+    validate_provider_fragment,
 )
 
 FIXTURE = ROOT / "fixtures" / "example_bundle.json"
 WINDOW_START = "2026-07-27T00:00:00Z"
 WINDOW_END = "2026-08-03T00:00:00Z"
 EVENT_TIME = "2026-07-30T12:00:00Z"
+
+
+def validate_output(value: dict[str, object]) -> list[ValidationIssue]:
+    if value.get("fragment_version") == "0.3":
+        return validate_provider_fragment(value)
+    return validate_bundle(value)
 
 
 def response(
@@ -202,26 +211,26 @@ def gitee_transport() -> MappingTransport:
 
 
 class ContractTests(unittest.TestCase):
-    def test_public_fixture_is_publishable(self) -> None:
+    def test_public_fixture_is_render_eligible(self) -> None:
         bundle = load_bundle(FIXTURE)
-        self.assertEqual(validate_bundle(bundle), [])
+        self.assertEqual(validate_output(bundle), [])
 
     def test_publication_decision_is_authoritatively_recomputed(self) -> None:
         bundle = load_bundle(FIXTURE)
         bundle["interactions"][0]["subject_id"] = "work_item:missing"
-        bundle["coverage"]["allow_publish"] = True
+        bundle["coverage"]["render_eligible"] = True
         self.assertFalse(compute_render_eligibility(bundle))
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("interaction.subject_missing", codes)
-        self.assertIn("coverage.publish_mismatch", codes)
-        self.assertFalse(recompute_allow_publish(bundle))
-        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertIn("coverage.render_mismatch", codes)
+        self.assertFalse(recompute_render_eligibility(bundle))
+        self.assertFalse(bundle["coverage"]["render_eligible"])
 
     def test_validation_issues_are_structured_for_automation(self) -> None:
         bundle = load_bundle(FIXTURE)
-        bundle["run"].pop("run_id")
+        bundle["invocation"].pop("id")
         issue = next(
-            item for item in validate_bundle(bundle) if item.code == "schema.required"
+            item for item in validate_output(bundle) if item.code == "schema.required"
         )
         self.assertEqual(
             set(issue.as_dict()),
@@ -253,7 +262,7 @@ class ContractTests(unittest.TestCase):
         bundle["providers"][0]["capabilities"]["invented"] = "supported"
         self.assertIn(
             "coverage.capability_source",
-            {issue.code for issue in validate_bundle(bundle)},
+            {issue.code for issue in validate_output(bundle)},
         )
 
     def test_typed_blocker_must_resolve_to_its_observation(self) -> None:
@@ -268,8 +277,8 @@ class ContractTests(unittest.TestCase):
                 "status": "incomplete",
             }
         ]
-        bundle["coverage"]["allow_publish"] = False
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        bundle["coverage"]["render_eligible"] = False
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("coverage.fatal_scope", codes)
         self.assertIn("coverage.fatal_observation", codes)
 
@@ -280,7 +289,7 @@ class ContractTests(unittest.TestCase):
         bundle["coverage"]["warnings"] = []
         self.assertIn(
             "coverage.warning_missing",
-            {issue.code for issue in validate_bundle(bundle)},
+            {issue.code for issue in validate_output(bundle)},
         )
         report = render_bundle(load_bundle(FIXTURE))
         self.assertIn("### Coverage warnings", report)
@@ -288,66 +297,87 @@ class ContractTests(unittest.TestCase):
         self.assertIn(r"provider=provider:github:github\.com", report)
         self.assertIn(r"repository=repo:github:github\.com:example/project", report)
 
-    def test_run_id_must_be_a_non_empty_string(self) -> None:
+    def test_invocation_id_must_be_a_non_empty_string(self) -> None:
         bundle = load_bundle(FIXTURE)
-        bundle["run"].pop("run_id")
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        bundle["invocation"].pop("id")
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("schema.required", codes)
-        self.assertIn("run.run_id", codes)
 
     def test_occurred_at_uses_half_open_run_window(self) -> None:
         bundle = load_bundle(FIXTURE)
-        bundle["facts"][0]["occurred_at"] = WINDOW_START
-        self.assertEqual(validate_bundle(bundle), [])
+        assertion = bundle["assertions"][0]
+        subject = next(
+            item
+            for item in bundle["change_requests"]
+            if item["id"] == assertion["subject_id"]
+        )
+        subject_time_field = (
+            "merged_at"
+            if assertion["predicate"] == "change_request.merged.v1"
+            else "occurred_at"
+        )
+        assertion["occurred_at"] = WINDOW_START
+        subject[subject_time_field] = WINDOW_START
+        recompute_render_eligibility(bundle)
+        self.assertEqual(validate_output(bundle), [])
 
-        bundle["facts"][0]["occurred_at"] = WINDOW_END
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        assertion["occurred_at"] = WINDOW_END
+        subject[subject_time_field] = WINDOW_END
+        recompute_render_eligibility(bundle)
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("entity.timestamp_window", codes)
         with self.assertRaises(ValueError):
             render_bundle(bundle)
 
     def test_fact_evidence_subject_must_match_fact_kind_and_repository(self) -> None:
         bundle = load_bundle(FIXTURE)
-        bundle["facts"][0]["evidence_ids"] = ["evidence:commit:a"]
-        codes = {issue.code for issue in validate_bundle(bundle)}
-        self.assertIn("fact.evidence_subject", codes)
+        commit_evidence = next(
+            evidence
+            for evidence in bundle["evidence"]
+            if evidence["subject_type"] == "commit"
+        )
+        bundle["assertions"][0]["evidence_ids"] = [commit_evidence["id"]]
+        codes = {issue.code for issue in validate_output(bundle)}
+        self.assertIn("assertion.evidence_subject", codes)
 
     def test_required_sources_cannot_be_reduced_below_resource_contract(self) -> None:
         bundle = load_bundle(FIXTURE)
         bundle["coverage"]["required_sources"] = ["repositories"]
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("coverage.required_source_contract", codes)
         with self.assertRaises(ValueError):
             render_bundle(bundle)
 
     def test_schema_shape_and_format_errors_are_fatal(self) -> None:
         bundle = load_bundle(FIXTURE)
-        bundle["facts"] = {}
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        bundle["assertions"] = {}
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("schema.type", codes)
         self.assertIn("collection.shape", codes)
 
         bundle = load_bundle(FIXTURE)
-        bundle["run"]["window"]["start"] = "2026-07-27"
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        bundle["plan"]["window"]["start"] = "2026-07-27"
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("schema.format", codes)
 
     def test_missing_fact_evidence_is_fatal(self) -> None:
         bundle = load_bundle(FIXTURE)
-        bundle["facts"][0]["evidence_ids"] = []
-        codes = {issue.code for issue in validate_bundle(bundle)}
-        self.assertIn("fact.evidence", codes)
+        bundle["assertions"][0]["evidence_ids"] = []
+        codes = {issue.code for issue in validate_output(bundle)}
+        self.assertIn("assertion.evidence", codes)
 
     def test_ref_change_commit_reference_must_resolve(self) -> None:
-        bundle = load_bundle(FIXTURE)
+        bundle = GitHubProvider(github_transport()).collect(
+            request_for("github", "github.com", include_activity_api=True)
+        )
         bundle["ref_changes"][0]["commit_ids"] = ["commit:missing"]
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("ref_change.commit_ref", codes)
 
     def test_required_source_failure_blocks_publication(self) -> None:
         bundle = load_bundle(FIXTURE)
         bundle["coverage"]["observations"][0]["status"] = "incomplete"
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("coverage.required_incomplete", codes)
         with self.assertRaises(ValueError):
             render_bundle(bundle)
@@ -355,7 +385,7 @@ class ContractTests(unittest.TestCase):
     def test_coverage_is_required_for_each_allowlisted_repository(self) -> None:
         bundle = load_bundle(FIXTURE)
         second_repository = "repo:github:github.com:example/second-project"
-        bundle["run"]["scope"]["repositories"].append(second_repository)
+        bundle["plan"]["scope"]["repositories"].append(second_repository)
         bundle["repositories"].append(
             {
                 "id": second_repository,
@@ -364,28 +394,22 @@ class ContractTests(unittest.TestCase):
                 "web_url": "https://github.com/example/second-project",
             }
         )
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("coverage.required_missing", codes)
 
     def test_entity_outside_allowlist_is_rejected(self) -> None:
         bundle = load_bundle(FIXTURE)
-        bundle["facts"].append(
-            {
-                "id": "fact:outside",
-                "kind": "commit_observed",
-                "repository_id": "repo:github:github.com:other/project",
-                "summary": "outside",
-                "evidence_ids": ["evidence:commit:a"],
-            }
+        bundle["assertions"][0]["repository_id"] = (
+            "repo:github:github.com:other/project"
         )
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("scope.entity_outside", codes)
 
     def test_scope_requires_repository_ownership_for_all_scoped_entities(self) -> None:
         bundle = load_bundle(FIXTURE)
-        bundle["facts"][0].pop("repository_id", None)
-        codes = {issue.code for issue in validate_bundle(bundle)}
-        self.assertIn("scope.entity_repository_missing", codes)
+        bundle["assertions"][0].pop("repository_id", None)
+        codes = {issue.code for issue in validate_output(bundle)}
+        self.assertIn("assertion.repository", codes)
 
         bundle = load_bundle(FIXTURE)
         bundle["repositories"].append(
@@ -395,7 +419,7 @@ class ContractTests(unittest.TestCase):
                 "full_name": "other/project",
             }
         )
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("scope.entity_outside", codes)
 
     def test_required_sources_must_be_nonempty_known_unique_values(self) -> None:
@@ -408,7 +432,7 @@ class ContractTests(unittest.TestCase):
             with self.subTest(required_sources=required_sources):
                 bundle = load_bundle(FIXTURE)
                 bundle["coverage"]["required_sources"] = required_sources
-                codes = {issue.code for issue in validate_bundle(bundle)}
+                codes = {issue.code for issue in validate_output(bundle)}
                 self.assertIn(expected_code, codes)
 
     def test_actor_allowlist_is_carried_and_narrows_attributed_records(self) -> None:
@@ -419,15 +443,16 @@ class ContractTests(unittest.TestCase):
                 actor_ids=("actor:github:github.com:999",),
             )
         )
-        self.assertEqual(
-            bundle["run"]["scope"]["actors"], ["actor:github:github.com:999"]
-        )
+        self.assertEqual(bundle["scope"]["actors"], ["actor:github:github.com:999"])
         self.assertEqual(bundle["actors"], [])
         self.assertTrue(
-            any(fact["kind"] == "release_observed" for fact in bundle["facts"])
+            any(
+                assertion["predicate"] == "release.observed.v1"
+                for assertion in bundle["assertions"]
+            )
         )
-        self.assertTrue(all("actor_id" not in fact for fact in bundle["facts"]))
-        self.assertEqual(validate_bundle(bundle), [])
+        self.assertTrue(all("actor_id" not in fact for fact in bundle["assertions"]))
+        self.assertEqual(validate_output(bundle), [])
 
     def test_actor_filtered_parent_is_retained_only_as_interaction_structure(
         self,
@@ -496,25 +521,25 @@ class ContractTests(unittest.TestCase):
                 )
                 self.assertFalse(
                     any(
-                        fact["id"] == f"fact:work_items:{subject['id']}"
-                        for fact in bundle["facts"]
+                        assertion["subject_id"] == subject["id"]
+                        for assertion in bundle["assertions"]
                     )
                 )
-                self.assertEqual(validate_bundle(bundle), [])
+                self.assertEqual(validate_output(bundle), [])
 
     def test_actor_allowlist_and_references_are_enforced_during_validation(
         self,
     ) -> None:
         bundle = load_bundle(FIXTURE)
-        bundle["run"]["scope"]["actors"] = ["actor:github:github.com:42"]
-        bundle["facts"][0]["actor_id"] = "actor:github:github.com:999"
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        bundle["plan"]["scope"]["actors"] = ["actor:github:github.com:42"]
+        bundle["assertions"][0]["actor_id"] = "actor:github:github.com:999"
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("scope.actor_outside", codes)
         self.assertIn("scope.actor_ref_missing", codes)
 
         bundle = load_bundle(FIXTURE)
-        bundle["run"]["scope"]["actors"] = ["actor:github:github.com:999"]
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        bundle["plan"]["scope"]["actors"] = ["actor:github:github.com:999"]
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("scope.actor_outside", codes)
 
     def test_profiles_render_offline(self) -> None:
@@ -532,9 +557,47 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(release_report.count("## Releases and changes"), 1)
         self.assertIn("anonymous actor", render_bundle(bundle, profile="actor-summary"))
 
+    def test_timeline_sorts_instants_and_groups_in_plan_timezone(self) -> None:
+        bundle = load_bundle(FIXTURE)
+        observed = [
+            assertion
+            for assertion in bundle["assertions"]
+            if assertion["predicate"] == "commit.observed.v1"
+        ]
+        subjects = {item["id"]: item for item in bundle["commits"]}
+        subjects[observed[0]["subject_id"]]["title"] = "Later instant"
+        subjects[observed[1]["subject_id"]]["title"] = "Earlier instant"
+        observed[0]["occurred_at"] = "2026-07-31T03:30:00Z"
+        observed[1]["occurred_at"] = "2026-07-30T23:00:00Z"
+        subjects[observed[0]["subject_id"]]["occurred_at"] = observed[0]["occurred_at"]
+        subjects[observed[1]["subject_id"]]["occurred_at"] = observed[1]["occurred_at"]
+        bundle["plan"]["window"]["timezone"] = "Asia/Tokyo"
+        bundle["plan_id"] = compute_plan_id(bundle["plan"])
+        recompute_render_eligibility(bundle)
+
+        report = render_bundle(bundle, profile="timeline")
+        self.assertLess(report.index("Earlier instant"), report.index("Later instant"))
+        self.assertIn("### 2026-07-31", report)
+
+    def test_entity_ids_may_contain_none_as_a_substring(self) -> None:
+        transport = github_transport()
+        release = transport.responses["/repos/example/project/releases"][0].body[0]
+        release["id"] = "vNone"
+        release["tag_name"] = "vNone"
+        release["html_url"] = "https://github.com/example/project/releases/tag/vNone"
+        bundle = GitHubProvider(transport).collect(request_for("github", "github.com"))
+        self.assertEqual(validate_output(bundle), [])
+        self.assertTrue(any("vNone" in release["id"] for release in bundle["releases"]))
+
     def test_renderer_only_displays_explicit_identity_map(self) -> None:
         bundle = load_bundle(FIXTURE)
         bundle["actors"][0]["display_name"] = "Leaked bundle name"
+        self.assertIn(
+            "schema.additionalProperties",
+            {issue.code for issue in validate_output(bundle)},
+        )
+
+        bundle = load_bundle(FIXTURE)
         anonymous = render_bundle(bundle, profile="actor-summary")
         self.assertNotIn("Leaked bundle name", anonymous)
 
@@ -542,7 +605,7 @@ class ContractTests(unittest.TestCase):
             bundle,
             profile="actor-summary",
             display_actor_names=True,
-            actor_labels={"actor:github:github.com:42": "Alice"},
+            actor_labels={"actor:github:github.com:7": "Alice"},
         )
         self.assertIn("Alice", labeled)
         self.assertNotIn("Leaked bundle name", labeled)
@@ -552,18 +615,19 @@ class ContractTests(unittest.TestCase):
             profile="actor-summary",
             display_actor_names=True,
             actor_labels={
-                "actor:github:github.com:42": "<script>alert(1)</script> `raw`"
+                "actor:github:github.com:7": "<script>alert(1)</script> `raw`"
             },
         )
         self.assertNotIn("<script>", escaped)
         self.assertNotIn("`raw`", escaped)
         self.assertIn("&lt;script&gt;", escaped)
 
-    def test_renderer_escapes_untrusted_fact_text(self) -> None:
+    def test_renderer_escapes_untrusted_subject_text(self) -> None:
         bundle = load_bundle(FIXTURE)
-        bundle["facts"][0]["summary"] = (
+        bundle["change_requests"][0]["title"] = (
             "<script>alert(1)</script> `raw` **bold** [link]"
         )
+        recompute_render_eligibility(bundle)
         report = render_bundle(bundle)
         self.assertNotIn("<script>", report)
         self.assertNotIn("`raw`", report)
@@ -577,7 +641,7 @@ class ContractTests(unittest.TestCase):
             '[report]\nprofile = "actor-summary"\n'
             "display_actor_names = true\n"
             "[report.actor_labels]\n"
-            '"actor:github:github.com:42" = "Alice"\n',
+            '"actor:github:github.com:7" = "Alice"\n',
             encoding="utf-8",
         )
         output = StringIO()
@@ -606,7 +670,7 @@ class ContractTests(unittest.TestCase):
                     [
                         "collect",
                         "--config",
-                        "ignored-config.yml",
+                        "ignored-config.toml",
                         "--output",
                         str(output_path),
                     ]
@@ -614,10 +678,8 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertTrue(output_path.exists())
             self.assertIn("coverage.required_source_contract", stderr.getvalue())
-            self.assertEqual(
-                validate_bundle(load_bundle(output_path))[0].code,
-                "coverage.required_source_contract",
-            )
+            codes = {issue.code for issue in validate_bundle(load_bundle(output_path))}
+            self.assertIn("coverage.required_source_contract", codes)
         finally:
             output_path.unlink(missing_ok=True)
 
@@ -639,7 +701,10 @@ class ContractTests(unittest.TestCase):
         )
         bundle = json.loads(serialized)
         bundle["providers"][0]["kind"] = "forge"
-        self.assertEqual(validate_bundle(bundle), [])
+        bundle["plan"]["providers"][0]["kind"] = "forge"
+        bundle["plan_id"] = compute_plan_id(bundle["plan"])
+        recompute_render_eligibility(bundle)
+        self.assertEqual(validate_output(bundle), [])
 
     def test_resource_collectors_replay_shared_minimum_contract(self) -> None:
         providers = (
@@ -652,10 +717,10 @@ class ContractTests(unittest.TestCase):
                 self.assertEqual(provider.probe()["kind"], kind)
                 self.assertEqual(provider.probe()["instance"], instance)
                 bundle = provider.collect(request_for(kind, instance))
-                self.assertEqual(validate_bundle(bundle), [])
-                self.assertEqual(bundle["coverage"]["allow_publish"], True)
+                self.assertEqual(validate_output(bundle), [])
+                self.assertEqual(bundle["coverage"]["render_eligible"], True)
                 self.assertEqual(len(bundle["repositories"]), 1)
-                self.assertGreaterEqual(len(bundle["facts"]), 5)
+                self.assertGreaterEqual(len(bundle["assertions"]), 5)
                 self.assertGreaterEqual(len(bundle["interactions"]), 1)
                 self.assertTrue(
                     all(
@@ -756,7 +821,7 @@ class ContractTests(unittest.TestCase):
                         observation["diagnostics"]["failure_class"],
                         "malformed_response",
                     )
-                    self.assertFalse(bundle["coverage"]["allow_publish"])
+                    self.assertFalse(bundle["coverage"]["render_eligible"])
                     self.assertNotIn(
                         foreign_url, {item.get("url") for item in bundle["evidence"]}
                     )
@@ -775,7 +840,7 @@ class ContractTests(unittest.TestCase):
         observation = next(
             item
             for item in bundle["coverage"]["observations"]
-            if item["source"] == "change_requests"
+            if item["source"] == "change_request_observations"
         )
         self.assertEqual(
             observation["diagnostics"]["failure_class"], "malformed_response"
@@ -792,8 +857,8 @@ class ContractTests(unittest.TestCase):
         )
         bundle = GiteeProvider(transport).collect(request_for("gitee", "gitee.com"))
 
-        self.assertEqual(validate_bundle(bundle), [])
-        self.assertTrue(bundle["coverage"]["allow_publish"])
+        self.assertEqual(validate_output(bundle), [])
+        self.assertTrue(bundle["coverage"]["render_eligible"])
         self.assertEqual(
             bundle["repositories"][0]["web_url"],
             "https://gitee.com/example/project.git",
@@ -814,8 +879,8 @@ class ContractTests(unittest.TestCase):
         }
         bundle = GitHubProvider(transport).collect(request_for("github", "github.com"))
 
-        self.assertEqual(validate_bundle(bundle), [])
-        self.assertTrue(bundle["coverage"]["allow_publish"])
+        self.assertEqual(validate_output(bundle), [])
+        self.assertTrue(bundle["coverage"]["render_eligible"])
         self.assertIn(2, {item["number"] for item in bundle["change_requests"]})
 
     def test_root_2xx_non_object_is_malformed_for_all_providers(self) -> None:
@@ -845,7 +910,7 @@ class ContractTests(unittest.TestCase):
                     repository_observation["diagnostics"]["failure_class"],
                     "malformed_response",
                 )
-                self.assertFalse(bundle["coverage"]["allow_publish"])
+                self.assertFalse(bundle["coverage"]["render_eligible"])
                 self.assertEqual(bundle["repositories"], [])
 
     def test_gitlab_root_numeric_self_link_is_not_repository_identity_url(self) -> None:
@@ -858,8 +923,8 @@ class ContractTests(unittest.TestCase):
             request_for("gitlab", "jihulab.com")
         )
 
-        self.assertEqual(validate_bundle(bundle), [])
-        self.assertTrue(bundle["coverage"]["allow_publish"])
+        self.assertEqual(validate_output(bundle), [])
+        self.assertTrue(bundle["coverage"]["render_eligible"])
         self.assertEqual(len(bundle["repositories"]), 1)
         self.assertTrue(
             all(
@@ -869,10 +934,10 @@ class ContractTests(unittest.TestCase):
                 in {
                     "repositories",
                     "work_items",
-                    "change_requests",
+                    "change_request_observations",
+                    "change_request_merges",
                     "commits",
                     "releases",
-                    "facts",
                     "interactions",
                 }
             )
@@ -881,7 +946,7 @@ class ContractTests(unittest.TestCase):
     def test_gitee_pull_request_query_uses_supported_parameters(self) -> None:
         transport = gitee_transport()
         bundle = GiteeProvider(transport).collect(request_for("gitee", "gitee.com"))
-        self.assertEqual(validate_bundle(bundle), [])
+        self.assertEqual(validate_output(bundle), [])
         pull_calls = [
             params
             for path, params in transport.calls
@@ -893,6 +958,26 @@ class ContractTests(unittest.TestCase):
         paths = [path for path, _ in transport.calls]
         self.assertIn("/repos/example/project/pulls/2/comments", paths)
         self.assertNotIn("/repos/example/project/issues/2/comments", paths)
+
+    def test_gitlab_merge_in_window_is_not_hidden_by_later_update(self) -> None:
+        transport = gitlab_transport()
+        merge_path = "/projects/example%2Fproject/merge_requests"
+        transport.responses[merge_path][0].body[0]["updated_at"] = (
+            "2026-08-04T12:00:00Z"
+        )
+        bundle = GitLabProvider(transport).collect(request_for("gitlab", "gitlab.com"))
+        params = next(params for path, params in transport.calls if path == merge_path)
+        self.assertNotIn("updated_before", dict(params))
+        merged = next(
+            item for item in bundle["change_requests"] if item["state"] == "merged"
+        )
+        self.assertTrue(
+            any(
+                assertion["subject_id"] == merged["id"]
+                and assertion["predicate"] == "change_request.merged.v1"
+                for assertion in bundle["assertions"]
+            )
+        )
 
     def test_provider_coverage_preserves_rate_limit_diagnostics_from_nested_requests(
         self,
@@ -935,7 +1020,7 @@ class ContractTests(unittest.TestCase):
         github_bundle = GitHubProvider(github_transport()).collect(
             request_for("github", "github.com", include_activity_api=True)
         )
-        self.assertEqual(validate_bundle(github_bundle), [])
+        self.assertEqual(validate_output(github_bundle), [])
         github_ref = github_bundle["ref_changes"][0]
         self.assertEqual(github_ref["change_association"], "linked")
         self.assertEqual(
@@ -977,7 +1062,7 @@ class ContractTests(unittest.TestCase):
         gitlab_bundle = GitLabProvider(gitlab_activity_transport).collect(
             request_for("gitlab", "gitlab.com", include_activity_api=True)
         )
-        self.assertEqual(validate_bundle(gitlab_bundle), [])
+        self.assertEqual(validate_output(gitlab_bundle), [])
         event_calls = [
             params
             for path, params in gitlab_activity_transport.calls
@@ -1007,7 +1092,7 @@ class ContractTests(unittest.TestCase):
         gitee_bundle = GiteeProvider(gitee_transport()).collect(
             request_for("gitee", "gitee.com", include_activity_api=True)
         )
-        self.assertEqual(validate_bundle(gitee_bundle), [])
+        self.assertEqual(validate_output(gitee_bundle), [])
         self.assertEqual(gitee_bundle["ref_changes"], [])
         self.assertTrue(
             all(
@@ -1057,7 +1142,7 @@ class ContractTests(unittest.TestCase):
         bundle = GitHubProvider(transport).collect(
             request_for("github", "github.com", include_activity_api=True)
         )
-        self.assertTrue(bundle["coverage"]["allow_publish"])
+        self.assertTrue(bundle["coverage"]["render_eligible"])
         self.assertTrue(
             any(
                 failure["source"] == "ref_changes"
@@ -1065,7 +1150,7 @@ class ContractTests(unittest.TestCase):
                 for failure in bundle["coverage"]["group_failures"]
             )
         )
-        self.assertEqual(validate_bundle(bundle), [])
+        self.assertEqual(validate_output(bundle), [])
         self.assertEqual(bundle["ref_changes"][0]["change_association"], "unknown")
         ref_coverage = next(
             item
@@ -1083,9 +1168,9 @@ class ContractTests(unittest.TestCase):
                 for warning in bundle["coverage"]["warnings"]
             )
         )
-        self.assertIn("Coverage warnings", render_bundle(bundle))
+        self.assertTrue(bundle["coverage"]["warnings"])
 
-    def test_optional_activity_permission_and_transport_failures_are_publishable_warnings(
+    def test_optional_activity_permission_and_transport_failures_are_render_eligible_warnings(
         self,
     ) -> None:
         for status_code, failure_class in (
@@ -1101,8 +1186,8 @@ class ContractTests(unittest.TestCase):
                 bundle = GitHubProvider(transport).collect(
                     request_for("github", "github.com", include_activity_api=True)
                 )
-                self.assertTrue(bundle["coverage"]["allow_publish"])
-                self.assertEqual(validate_bundle(bundle), [])
+                self.assertTrue(bundle["coverage"]["render_eligible"])
+                self.assertEqual(validate_output(bundle), [])
                 self.assertTrue(
                     all(
                         item["status"] == "supported"
@@ -1111,7 +1196,8 @@ class ContractTests(unittest.TestCase):
                         in {
                             "repositories",
                             "work_items",
-                            "change_requests",
+                            "change_request_observations",
+                            "change_request_merges",
                             "interactions",
                             "commits",
                             "releases",
@@ -1142,7 +1228,7 @@ class ContractTests(unittest.TestCase):
                 False,
             ),
         )
-        for error, failure_class, allow_publish in cases:
+        for error, failure_class, render_eligible in cases:
             with self.subTest(failure_class=failure_class):
                 provider = GitHubProvider(github_transport())
                 with patch.object(provider, "_collect_activity", side_effect=error):
@@ -1151,7 +1237,7 @@ class ContractTests(unittest.TestCase):
                     )
                 self.assertGreater(len(bundle["repositories"]), 0)
                 self.assertGreater(len(bundle["commits"]), 0)
-                self.assertEqual(bundle["coverage"]["allow_publish"], allow_publish)
+                self.assertEqual(bundle["coverage"]["render_eligible"], render_eligible)
                 warnings = bundle["coverage"]["warnings"]
                 self.assertEqual(
                     {warning["source"] for warning in warnings},
@@ -1163,12 +1249,12 @@ class ContractTests(unittest.TestCase):
                         for warning in warnings
                     )
                 )
-                if allow_publish:
-                    self.assertEqual(validate_bundle(bundle), [])
+                if render_eligible:
+                    self.assertEqual(validate_output(bundle), [])
                 else:
                     self.assertIn(
-                        "coverage.publish_blocked",
-                        {issue.code for issue in validate_bundle(bundle)},
+                        "coverage.render_blocked",
+                        {issue.code for issue in validate_output(bundle)},
                     )
 
     def test_optional_activity_malformed_source_shape_preserves_core_snapshot(
@@ -1185,8 +1271,8 @@ class ContractTests(unittest.TestCase):
             )
         self.assertGreater(len(bundle["repositories"]), 0)
         self.assertGreater(len(bundle["commits"]), 0)
-        self.assertTrue(bundle["coverage"]["allow_publish"])
-        self.assertEqual(validate_bundle(bundle), [])
+        self.assertTrue(bundle["coverage"]["render_eligible"])
+        self.assertEqual(validate_output(bundle), [])
         self.assertEqual(
             {
                 warning["source"]: warning["failure_class"]
@@ -1196,14 +1282,10 @@ class ContractTests(unittest.TestCase):
             {"activities": "malformed_response", "ref_changes": "malformed_response"},
         )
 
-    def test_collect_cli_returns_publishable_for_optional_group_failure(self) -> None:
-        transport = github_transport()
-        transport.responses.pop(
-            "/repos/example/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/pulls"
-        )
-        bundle = GitHubProvider(transport).collect(
-            request_for("github", "github.com", include_activity_api=True)
-        )
+    def test_collect_cli_returns_render_eligible_for_optional_group_failure(
+        self,
+    ) -> None:
+        bundle = load_bundle(FIXTURE)
         stdout = StringIO()
         stderr = StringIO()
         with (
@@ -1212,9 +1294,9 @@ class ContractTests(unittest.TestCase):
             patch("sys.stdout", stdout),
             patch("sys.stderr", stderr),
         ):
-            result = cli_main(["collect", "--config", "ignored-config.yml"])
+            result = cli_main(["collect", "--config", "ignored-config.toml"])
         self.assertEqual(result, 0)
-        self.assertIn("publishable with coverage warnings", stderr.getvalue())
+        self.assertIn("render eligible with coverage warnings", stderr.getvalue())
 
     def test_collect_config_preserves_core_gate_when_optional_group_fails(self) -> None:
         transport = github_transport()
@@ -1252,7 +1334,7 @@ class ContractTests(unittest.TestCase):
             validate_collection_config(config), provider_factory=factory
         )
         self.assertTrue(bundle["coverage"]["render_eligible"])
-        self.assertEqual(validate_bundle(bundle), [])
+        self.assertEqual(validate_output(bundle), [])
         self.assertTrue(
             any(
                 item["source"] == "ref_changes"
@@ -1276,11 +1358,11 @@ class ContractTests(unittest.TestCase):
             provider, "_normalize_commit", return_value=mismatched_commit
         ):
             bundle = provider.collect(request_for("github", "github.com"))
-        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertFalse(bundle["coverage"]["render_eligible"])
         self.assertTrue(
             any(
-                issue.code == "coverage.publish_blocked"
-                for issue in validate_bundle(bundle)
+                issue.code == "coverage.render_blocked"
+                for issue in validate_output(bundle)
             )
         )
         commits = next(
@@ -1307,15 +1389,15 @@ class ContractTests(unittest.TestCase):
         )
         self.assertIn(
             "coverage.required_incomplete",
-            {issue.code for issue in validate_bundle(bundle)},
+            {issue.code for issue in validate_output(bundle)},
         )
         self.assertEqual(bundle["commits"], [])
 
-    def test_canonical_commit_sha_mismatch_is_not_publishable(self) -> None:
+    def test_canonical_commit_sha_mismatch_is_not_render_eligible(self) -> None:
         bundle = load_bundle(FIXTURE)
         bundle["commits"][0]["sha"] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         self.assertIn(
-            "commit.sha_mismatch", {issue.code for issue in validate_bundle(bundle)}
+            "commit.sha_mismatch", {issue.code for issue in validate_output(bundle)}
         )
 
     def test_canonical_commit_sentinel_sha_is_not_verifiable(self) -> None:
@@ -1337,7 +1419,7 @@ class ContractTests(unittest.TestCase):
                         evidence["subject_id"] = commit_id
                 self.assertIn(
                     "commit.sha_unverifiable",
-                    {issue.code for issue in validate_bundle(bundle)},
+                    {issue.code for issue in validate_output(bundle)},
                 )
 
     def test_repository_scoped_canonical_ids_bind_to_repository(self) -> None:
@@ -1350,21 +1432,29 @@ class ContractTests(unittest.TestCase):
             "releases",
         ):
             with self.subTest(collection=collection_key):
-                bundle = load_bundle(FIXTURE)
+                bundle = (
+                    GitHubProvider(github_transport()).collect(
+                        request_for("github", "github.com", include_activity_api=True)
+                    )
+                    if collection_key == "ref_changes"
+                    else load_bundle(FIXTURE)
+                )
                 item = bundle[collection_key][0]
                 item["id"] = item["id"].replace(
                     ":example/project:", ":other/project:", 1
                 )
                 self.assertIn(
                     "entity.repository_binding",
-                    {issue.code for issue in validate_bundle(bundle)},
+                    {issue.code for issue in validate_output(bundle)},
                 )
 
-    def test_facts_remain_bound_to_the_allowlisted_repository(self) -> None:
+    def test_assertions_remain_bound_to_the_allowlisted_repository(self) -> None:
         bundle = load_bundle(FIXTURE)
-        bundle["facts"][0]["repository_id"] = "repo:github:github.com:other/project"
+        bundle["assertions"][0]["repository_id"] = (
+            "repo:github:github.com:other/project"
+        )
         self.assertIn(
-            "scope.entity_outside", {issue.code for issue in validate_bundle(bundle)}
+            "scope.entity_outside", {issue.code for issue in validate_output(bundle)}
         )
 
     def test_repository_binding_handles_instance_path_and_colon_native_id(self) -> None:
@@ -1374,7 +1464,7 @@ class ContractTests(unittest.TestCase):
         bundle = GitHubProvider(transport, instance=instance).collect(
             request_for("github", instance)
         )
-        self.assertEqual(validate_bundle(bundle), [])
+        self.assertEqual(validate_output(bundle), [])
         self.assertTrue(
             any(":issue_comment:" in item["id"] for item in bundle["interactions"])
         )
@@ -1417,7 +1507,7 @@ class ContractTests(unittest.TestCase):
         bundle = collect_config(
             validate_collection_config(config), provider_factory=factory
         )
-        self.assertEqual(validate_bundle(bundle), [])
+        self.assertEqual(validate_output(bundle), [])
         self.assertEqual(len(bundle["providers"]), 2)
         self.assertEqual(len(bundle["repositories"]), 2)
         self.assertEqual(
@@ -1489,8 +1579,8 @@ class ContractTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                issue.code == "coverage.publish_blocked"
-                for issue in validate_bundle(bundle)
+                issue.code == "coverage.render_blocked"
+                for issue in validate_output(bundle)
             )
         )
 
@@ -1502,9 +1592,9 @@ class ContractTests(unittest.TestCase):
             patch("sys.stdout", stdout),
             patch("sys.stderr", stderr),
         ):
-            result = cli_main(["collect", "--config", "ignored-config.yml"])
+            result = cli_main(["collect", "--config", "ignored-config.toml"])
         self.assertEqual(result, 3)
-        self.assertIn("coverage.publish_blocked", stderr.getvalue())
+        self.assertIn("coverage.render_blocked", stderr.getvalue())
         self.assertIn("one or more provider groups failed", stderr.getvalue())
         self.assertEqual(
             json.loads(stdout.getvalue())["coverage"]["render_eligible"], False
@@ -1675,7 +1765,7 @@ class ContractTests(unittest.TestCase):
             github_coverage["diagnostics"]["failure_class"], "malformed_response"
         )
         self.assertGreater(len(github_bundle["commits"]), 0)
-        self.assertFalse(github_bundle["coverage"]["allow_publish"])
+        self.assertFalse(github_bundle["coverage"]["render_eligible"])
 
         gitlab = gitlab_transport()
         gitlab.responses["/projects/example%2Fproject/repository/commits"][
@@ -1726,7 +1816,7 @@ class ContractTests(unittest.TestCase):
         self.assertNotIn(
             f" {original_sha} ", {item["sha"] for item in bundle["commits"]}
         )
-        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertFalse(bundle["coverage"]["render_eligible"])
 
     def test_out_of_window_malformed_commits_do_not_block_the_source(self) -> None:
         github = github_transport()

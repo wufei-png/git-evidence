@@ -67,6 +67,7 @@ from ..privacy import (
     is_url_field,
     redact_public_url,
 )
+from ..time import TimeValueError, parse_instant
 from .base import (
     canonicalize_base_path,
     canonicalize_hostname,
@@ -1143,10 +1144,8 @@ def _timestamp_epoch(value: Any) -> float | None:
     if not isinstance(value, str):
         return None
     try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
+        parsed = parse_instant(value)
+    except TimeValueError:
         return None
     return _finite_cache_timestamp(parsed.timestamp())
 
@@ -1938,6 +1937,7 @@ class PaginationCursor:
         self.complete = False
         self._failure: Exception | None = None
         self._request_cursor: Any | None = None
+        self._step_response_identity: str | None = None
 
     def _validate_limits(self) -> None:
         per_page = self.per_page
@@ -1970,17 +1970,20 @@ class PaginationCursor:
             raise self._failure
         if self.done:
             raise RuntimeError("pagination cursor is already complete")
+        request_identity = _pagination_request_identity(
+            self.current_path, self.current_params
+        )
+        request_was_visited = request_identity in self.visited_requests
+        self._step_response_identity = None
         snapshot = (
-            set(self.visited_requests),
-            set(self.visited_responses),
-            list(self.items),
-            deepcopy(self.retrievals),
-            list(self.item_retrieval_keys),
+            len(self.items),
+            len(self.retrievals),
+            len(self.item_retrieval_keys),
             self.item_bytes,
             dict(self.diagnostics),
             self.pages,
             self.current_path,
-            deepcopy(self.current_params),
+            dict(self.current_params) if self.current_params is not None else None,
             self.done,
             self.complete,
         )
@@ -1988,11 +1991,9 @@ class PaginationCursor:
             self._step_once()
         except Exception as exc:
             (
-                self.visited_requests,
-                self.visited_responses,
-                self.items,
-                self.retrievals,
-                self.item_retrieval_keys,
+                item_length,
+                retrieval_length,
+                retrieval_key_length,
                 self.item_bytes,
                 self.diagnostics,
                 self.pages,
@@ -2001,6 +2002,14 @@ class PaginationCursor:
                 self.done,
                 self.complete,
             ) = snapshot
+            del self.items[item_length:]
+            del self.retrievals[retrieval_length:]
+            del self.item_retrieval_keys[retrieval_key_length:]
+            if not request_was_visited:
+                self.visited_requests.discard(request_identity)
+            if self._step_response_identity is not None:
+                self.visited_responses.discard(self._step_response_identity)
+            self._step_response_identity = None
             self._failure = exc
             self.done = True
             self.complete = False
@@ -2059,6 +2068,7 @@ class PaginationCursor:
                     pagination_outcome="cycle_detected",
                 )
             self.visited_responses.add(response_identity)
+            self._step_response_identity = response_identity
         page_items = [dict(item) for item in response.body if isinstance(item, dict)]
         if len(page_items) != len(response.body):
             raise ResponseShapeError(

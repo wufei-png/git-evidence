@@ -218,6 +218,25 @@ class FairSchedulerTests(unittest.TestCase):
         self.assertLess(first_comment, second_comment)
         self.assertLess(second_comment, first_optional)
 
+    def test_interactions_rotate_subjects_before_draining_one_change_request(
+        self,
+    ) -> None:
+        transport = github_transport()
+        GitHubProvider(transport).collect(request_for("github", "github.com"))
+        interaction_paths = [
+            path
+            for path, _ in transport.calls
+            if "/comments" in path or "/reviews" in path
+        ]
+        self.assertEqual(
+            interaction_paths[:3],
+            [
+                "/repos/example/project/issues/2/comments",
+                "/repos/example/project/issues/3/comments",
+                "/repos/example/project/issues/1/comments",
+            ],
+        )
+
     def test_runtime_budget_exhaustion_is_scoped_to_unfinished_source(self) -> None:
         recorded = large_first_page_transport()
         transport = BudgetTransport(recorded.responses, max_requests=10)
@@ -238,7 +257,7 @@ class FairSchedulerTests(unittest.TestCase):
         )
         self.assertEqual(observations[(small, "work_items")]["status"], "supported")
         self.assertEqual(len(bundle["work_items"]), 1)
-        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertFalse(bundle["coverage"]["render_eligible"])
 
     def test_incomplete_parent_makes_interactions_incomplete(self) -> None:
         cases = (
@@ -345,7 +364,7 @@ class FairSchedulerTests(unittest.TestCase):
                 self.assertEqual(
                     observations[(small, "interactions")]["status"], "supported"
                 )
-                self.assertFalse(bundle["coverage"]["allow_publish"])
+                self.assertFalse(bundle["coverage"]["render_eligible"])
                 self.assertNotIn(str(error), str(bundle))
 
     def test_invalid_hook_returns_are_scoped_to_the_repository(self) -> None:
@@ -431,7 +450,7 @@ class FairSchedulerTests(unittest.TestCase):
             [small],
         )
         self.assertNotIn("must-not-leak", str(bundle))
-        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertFalse(bundle["coverage"]["render_eligible"])
 
     def test_optional_normalizer_privacy_error_cannot_fail_open(self) -> None:
         class OptionalPrivacyProvider(GitHubProvider):
@@ -451,7 +470,7 @@ class FairSchedulerTests(unittest.TestCase):
         bundle = OptionalPrivacyProvider(fair_transport()).collect(
             two_repository_request(include_activity_api=True)
         )
-        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertFalse(bundle["coverage"]["render_eligible"])
         privacy_failures = [
             item
             for item in bundle["coverage"]["group_failures"]

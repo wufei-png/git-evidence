@@ -15,6 +15,6 @@ with custom certificate authorities must establish trust through the runtime CA
 configuration rather than weakening collection transport checks.
 
 Credentialless HTTP is limited to an explicit loopback-only development mode.
-Its output is diagnostic and not publishable. This preserves bounded local
+Its output is diagnostic and not render-eligible. This preserves bounded local
 development without allowing a publication warning to stand in for preventing
 credential disclosure or evidence tampering before collection occurs.

@@ -24,7 +24,11 @@ from git_evidence.providers.base import (
 from git_evidence.providers.resource_base import BundleBuilder
 from git_evidence.providers.transport import MappingTransport, UrllibTransport
 from git_evidence.render import LABELS, render_bundle
-from git_evidence.validation import compute_render_eligibility, validate_bundle
+from git_evidence.validation import (
+    compute_render_eligibility,
+    recompute_render_eligibility,
+    validate_bundle,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "fixtures" / "example_bundle.json"
@@ -66,8 +70,8 @@ class PrivacyBoundaryTests(unittest.TestCase):
         )
         with self.assertRaises(PrivacyError):
             builder._add_entity(
-                "facts",
-                {"id": "fact:secret", "summary": f"echo {quote(token, safe='')}"},
+                "work_items",
+                {"id": "work_item:secret", "title": f"echo {quote(token, safe='')}"},
             )
 
         for url in (
@@ -87,7 +91,8 @@ class PrivacyBoundaryTests(unittest.TestCase):
 
     def test_low_confidence_secret_text_warns_without_claiming_safety(self) -> None:
         bundle = load_bundle(FIXTURE)
-        bundle["facts"][0]["summary"] = "rotation note token=possibly-redacted"
+        bundle["change_requests"][0]["title"] = "rotation note token=possibly-redacted"
+        recompute_render_eligibility(bundle)
         issues = validate_bundle(bundle)
         self.assertEqual({issue.severity for issue in issues}, {"warning"})
         self.assertTrue(compute_render_eligibility(bundle))
@@ -124,7 +129,7 @@ class AtomicOutputTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             bundle = load_bundle(FIXTURE)
-            bundle["run"].pop("run_id")
+            bundle["invocation"].pop("id")
             path = Path(directory) / "invalid.json"
             path.write_text(json.dumps(bundle), encoding="utf-8")
             stdout = StringIO()
@@ -181,12 +186,12 @@ class AtomicOutputTests(unittest.TestCase):
     def test_collect_json_diagnostics_are_single_documents_for_all_outcomes(
         self,
     ) -> None:
-        publishable = load_bundle(FIXTURE)
+        render_eligible = load_bundle(FIXTURE)
         stdout = StringIO()
         stderr = StringIO()
         with (
             patch("git_evidence.cli.load_collection_config", return_value={}),
-            patch("git_evidence.cli.collect_config", return_value=publishable),
+            patch("git_evidence.cli.collect_config", return_value=render_eligible),
             patch("sys.stdout", stdout),
             patch("sys.stderr", stderr),
         ):
@@ -194,17 +199,17 @@ class AtomicOutputTests(unittest.TestCase):
                 [
                     "collect",
                     "--config",
-                    "ignored.yml",
+                    "ignored.toml",
                     "--diagnostics-format",
                     "json",
                 ]
             )
         self.assertEqual(status, 0)
         diagnostics = json.loads(stderr.getvalue())
-        self.assertEqual(diagnostics["status"], "publishable_with_warnings")
+        self.assertEqual(diagnostics["status"], "render_eligible_with_warnings")
         self.assertEqual(diagnostics["issues"], [])
         self.assertEqual(
-            json.loads(stdout.getvalue())["coverage"]["allow_publish"], True
+            json.loads(stdout.getvalue())["coverage"]["render_eligible"], True
         )
 
         failed = load_bundle(FIXTURE)
@@ -228,7 +233,7 @@ class AtomicOutputTests(unittest.TestCase):
                 [
                     "collect",
                     "--config",
-                    "ignored.yml",
+                    "ignored.toml",
                     "--diagnostics-format",
                     "json",
                 ]
@@ -348,7 +353,8 @@ class RenderingAndPackagingTests(unittest.TestCase):
         self,
     ) -> None:
         bundle = load_bundle(FIXTURE)
-        bundle["facts"][0]["summary"] = "safe\u202etxt\u200b"
+        bundle["change_requests"][0]["title"] = "safe\u202etxt\u200b"
+        recompute_render_eligibility(bundle)
         report = render_bundle(
             bundle,
             profile="actor-summary",

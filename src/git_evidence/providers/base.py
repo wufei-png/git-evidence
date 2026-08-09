@@ -31,10 +31,22 @@ CAPABILITY_STATUS_PRIORITY = {
     "unavailable": 2,
     "incomplete": 3,
 }
-RESOURCE_SOURCES = (
+CORE_RESOURCE_SOURCES = (
     "repositories",
     "work_items",
     "change_requests",
+    "interactions",
+    "commits",
+    "releases",
+)
+CHANGE_REQUEST_COVERAGE_SOURCES = (
+    "change_request_observations",
+    "change_request_merges",
+)
+RESOURCE_SOURCES = (
+    "repositories",
+    "work_items",
+    *CHANGE_REQUEST_COVERAGE_SOURCES,
     "interactions",
     "commits",
     "releases",

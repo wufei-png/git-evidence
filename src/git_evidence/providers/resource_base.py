@@ -15,9 +15,12 @@ from ..bounds import (
 )
 from ..limits import MAX_BUNDLE_BYTES, MAX_NORMALIZED_ENTITIES, MAX_PAGES
 from ..privacy import PrivacyError, sanitize_public_payload
+from ..time import TimeValueError, normalize_utc, parse_instant
 from .base import (
     ACTIVITY_SOURCES,
     CAPABILITY_STATES,
+    CHANGE_REQUEST_COVERAGE_SOURCES,
+    CORE_RESOURCE_SOURCES,
     OPERATIONAL_FAILURE_CLASSES,
     RESOURCE_SOURCES,
     CollectionRequest,
@@ -153,10 +156,9 @@ def parse_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
     try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
+        return parse_instant(value)
+    except TimeValueError:
         return None
-    return parsed if parsed.tzinfo is not None else None
 
 
 def in_window(value: Any, request: CollectionRequest) -> bool:
@@ -172,12 +174,15 @@ def occurrence_timestamp(item: dict[str, Any], *fields: str) -> str | None:
     for field in fields:
         value = item.get(field)
         if isinstance(value, str) and value:
-            return value
+            try:
+                return normalize_utc(value)
+            except TimeValueError:
+                return value
     return None
 
 
 def first_timestamp(item: dict[str, Any], *fields: str) -> str | None:
-    """Backward-compatible name for the canonical occurrence selector."""
+    """Select and UTC-normalize the first declared occurrence timestamp."""
     return occurrence_timestamp(item, *fields)
 
 
@@ -708,18 +713,15 @@ class BundleBuilder:
             else ()
         )
         self.bundle: dict[str, Any] = {
-            "schema_version": "0.1",
-            "run": {
-                "run_id": f"run:{descriptor.kind}:{request.instance}",
-                "window": {
-                    "start": request.window_start,
-                    "end": request.window_end,
-                    "timezone": request.timezone,
-                },
-                "scope": {
-                    "repositories": list(request.repository_ids),
-                    "actors": list(request.actor_ids),
-                },
+            "fragment_version": "0.3",
+            "window": {
+                "start": request.window_start,
+                "end": request.window_end,
+                "timezone": request.timezone,
+            },
+            "scope": {
+                "repositories": list(request.repository_ids),
+                "actors": list(request.actor_ids),
             },
             "providers": [
                 {
@@ -738,7 +740,7 @@ class BundleBuilder:
             "ref_changes": [],
             "releases": [],
             "evidence": [],
-            "facts": [],
+            "assertions": [],
             "retrievals": [],
             "collection": {
                 "provider": descriptor.kind,
@@ -754,18 +756,12 @@ class BundleBuilder:
                 },
                 "metrics": transport_metrics(transport),
             },
-            "privacy": {
-                "actor_display": "anonymous",
-                "source_urls": "sanitized",
-                "auth_redaction": True,
-            },
             "coverage": {
                 "required_sources": list(RESOURCE_SOURCES),
                 "observations": [],
                 "fatal": [],
                 "group_failures": [],
                 "warnings": [],
-                "allow_publish": True,
             },
         }
         self._seen: dict[str, set[str]] = {
@@ -788,26 +784,47 @@ class BundleBuilder:
         )
 
     def checkpoint(self) -> dict[str, Any]:
-        """Snapshot all mutable builder state for one source-level transaction."""
-        return deepcopy(
-            {
-                "bundle": self.bundle,
-                "seen": self._seen,
-                "actor_ids": self._actor_ids,
-                "commit_ids_by_sha": self._commit_ids_by_sha,
-                "change_request_ids_by_sha": self._change_request_ids_by_sha,
-                "duplicate_counts": self._duplicate_counts,
-                "filtered_subjects": self._filtered_subjects,
-                "retrieval_ids": self._retrieval_ids,
-                "retrieval_provenance": self._retrieval_provenance,
-                "entity_count": self._entity_count,
-                "bundle_size_estimate": self._bundle_size_estimate,
-            }
-        )
+        """Record bounded deltas for one source-level transaction."""
+        coverage = self.bundle["coverage"]
+        capabilities = self.bundle["providers"][0]["capabilities"]
+        return {
+            "collection_lengths": {
+                key: len(value)
+                for key, value in self.bundle.items()
+                if isinstance(value, list)
+            },
+            "coverage_lengths": {
+                key: len(coverage[key])
+                for key in ("observations", "fatal", "group_failures", "warnings")
+            },
+            "capabilities": dict(capabilities),
+            "seen": {key: set(value) for key, value in self._seen.items()},
+            "actor_ids": dict(self._actor_ids),
+            "commit_ids_by_sha": {
+                key: set(value) for key, value in self._commit_ids_by_sha.items()
+            },
+            "change_request_ids_by_sha": {
+                key: set(value)
+                for key, value in self._change_request_ids_by_sha.items()
+            },
+            "duplicate_counts": dict(self._duplicate_counts),
+            "filtered_subjects": dict(self._filtered_subjects),
+            "retrieval_ids": dict(self._retrieval_ids),
+            "retrieval_provenance": dict(self._retrieval_provenance),
+            "entity_count": self._entity_count,
+            "bundle_size_estimate": self._bundle_size_estimate,
+        }
 
     def restore(self, checkpoint: dict[str, Any]) -> None:
-        """Restore a checkpoint produced before an isolated source emission."""
-        self.bundle = checkpoint["bundle"]
+        """Truncate source deltas and restore indexes after failed emission."""
+        for key, length in checkpoint["collection_lengths"].items():
+            del self.bundle[key][length:]
+        coverage = self.bundle["coverage"]
+        for key, length in checkpoint["coverage_lengths"].items():
+            del coverage[key][length:]
+        capabilities = self.bundle["providers"][0]["capabilities"]
+        capabilities.clear()
+        capabilities.update(checkpoint["capabilities"])
         self._seen = checkpoint["seen"]
         self._actor_ids = checkpoint["actor_ids"]
         self._commit_ids_by_sha = checkpoint["commit_ids_by_sha"]
@@ -934,10 +951,7 @@ class BundleBuilder:
                             **failure,
                         )
                     )
-            if source in RESOURCE_SOURCES:
-                self.bundle["coverage"]["allow_publish"] = False
         elif source in RESOURCE_SOURCES and result.status != "supported":
-            self.bundle["coverage"]["allow_publish"] = False
             self.bundle["coverage"]["fatal"].append(
                 coverage_blocker(
                     code="required_source_incomplete",
@@ -1089,7 +1103,6 @@ class BundleBuilder:
             )
             if blocker not in self.bundle["coverage"]["fatal"]:
                 self.bundle["coverage"]["fatal"].append(blocker)
-            self.bundle["coverage"]["allow_publish"] = False
 
     def add_repository(
         self,
@@ -1127,12 +1140,12 @@ class BundleBuilder:
             association_complete = bool(record.pop("_association_complete", False))
             native_identity = record.pop("_native_id", None)
             retrieval_key = record.pop("_retrieval_key", None)
-            occurred_at = record.get("occurred_at")
             entity_id = record.get("id")
             if not isinstance(entity_id, str) or not entity_id:
                 continue
             if entity_id in self._seen.setdefault(category, set()):
-                self._record_duplicate(category, target.canonical_id)
+                for source in self._coverage_sources_for_category(category):
+                    self._record_duplicate(source, target.canonical_id)
                 continue
             actor_id = self._actor_id(actor)
             if (
@@ -1227,7 +1240,7 @@ class BundleBuilder:
             if not self._add_entity(
                 category,
                 record,
-                source=category,
+                source=self._coverage_sources_for_category(category)[0],
                 repository_id=target.canonical_id,
             ):
                 continue
@@ -1251,35 +1264,12 @@ class BundleBuilder:
             else:
                 evidence["source_ref"] = f"{self.provider_id}:{category}:{entity_id}"
             self._add_entity("evidence", evidence)
-            fact_kind, section = {
-                "work_items": ("work_item_observed", "project"),
-                "change_requests": (
-                    "change_request_merged"
-                    if record.get("merged_at") is not None
-                    or record.get("state") == "merged"
-                    else "change_request_observed",
-                    "release"
-                    if record.get("merged_at") is not None
-                    or record.get("state") == "merged"
-                    else "change",
-                ),
-                "interactions": ("interaction_observed", "project"),
-                "commits": ("commit_observed", "change"),
-                "ref_changes": ("ref_change_observed", "change"),
-                "releases": ("release_observed", "release"),
-            }[category]
-            fact = {
-                "id": f"fact:{category}:{entity_id}",
-                "kind": fact_kind,
-                "section": section,
-                "repository_id": target.canonical_id,
-                "occurred_at": occurred_at,
-                "summary": record.get("title") or record.get("name") or entity_id,
-                "evidence_ids": [evidence_id],
-            }
-            if actor_id:
-                fact["actor_id"] = actor_id
-            self._add_entity("facts", fact)
+
+    @staticmethod
+    def _coverage_sources_for_category(category: str) -> tuple[str, ...]:
+        if category == "change_requests":
+            return CHANGE_REQUEST_COVERAGE_SOURCES
+        return (category,)
 
     @staticmethod
     def _unique_strings(values: Any) -> list[str]:
@@ -1395,7 +1385,6 @@ class BundleBuilder:
             )
             append_optional_coverage_warning(self.bundle["coverage"], observation)
         if source in RESOURCE_SOURCES:
-            self.bundle["coverage"]["allow_publish"] = False
             fatal = coverage_blocker(
                 code="duplicate_records",
                 provider=self.descriptor.kind,
@@ -1426,7 +1415,11 @@ class BundleBuilder:
             return False
         if entity_id in self._seen.setdefault(category, set()):
             duplicate_source = source or (
-                category if category in RESOURCE_SOURCES else None
+                CHANGE_REQUEST_COVERAGE_SOURCES[0]
+                if category == "change_requests"
+                else category
+                if category in RESOURCE_SOURCES
+                else None
             )
             duplicate_repository = repository_id or record.get("repository_id")
             if duplicate_repository is None and category == "repositories":
@@ -1450,7 +1443,6 @@ class BundleBuilder:
         self.bundle["collection"]["metrics"] = metrics
         if metrics["insecure_transport"]:
             self.bundle["collection"]["group_status"] = "diagnostic_insecure_transport"
-            self.bundle["coverage"]["allow_publish"] = False
             seen_failures: set[tuple[str, str]] = set()
             for observation in self.bundle["coverage"]["observations"]:
                 if not isinstance(observation, dict):
@@ -1495,9 +1487,18 @@ class BundleBuilder:
         for observation in self.bundle["coverage"]["observations"]:
             if isinstance(observation, dict):
                 append_optional_coverage_warning(self.bundle["coverage"], observation)
-        from ..validation import recompute_allow_publish
+        from ..assertions import build_assertions
+        from ..validation import has_blocking_core_coverage
 
-        recompute_allow_publish(self.bundle)
+        self.bundle["assertions"] = build_assertions(self.bundle)
+        self.bundle["coverage"]["render_eligible"] = not has_blocking_core_coverage(
+            self.bundle["coverage"],
+            repository_ids=self.request.repository_ids,
+            provider_ids_by_repository={
+                repository_id: self.provider_id
+                for repository_id in self.request.repository_ids
+            },
+        )
         try:
             json_size_with_limit(
                 self.bundle,
@@ -1562,7 +1563,7 @@ class ResourceProvider:
         snapshots = self._collect_core_fair(request)
         for target in request.repositories:
             snapshot = snapshots[target.canonical_id]
-            for source in RESOURCE_SOURCES:
+            for source in CORE_RESOURCE_SOURCES:
                 if source == "repositories" and source not in snapshot.sources:
                     result = SourceResult(
                         [snapshot.repository] if snapshot.repository else [],
@@ -1581,7 +1582,10 @@ class ResourceProvider:
                             "provider did not return this resource source",
                         ),
                     )
-                self._emit_core_source(builder, target, source, result, request)
+                if source == "change_requests":
+                    self._emit_change_requests(builder, target, result, request)
+                else:
+                    self._emit_core_source(builder, target, source, result, request)
         # Optional activity/ref work starts only after every repository's core queue.
         for target in request.repositories:
             if request.include_activity_api:
@@ -1689,6 +1693,42 @@ class ResourceProvider:
                     exception_diagnostics(exc),
                 ),
             )
+
+    def _emit_change_requests(
+        self,
+        builder: BundleBuilder,
+        target: RepositoryTarget,
+        result: SourceResult,
+        request: CollectionRequest,
+    ) -> None:
+        checkpoint = builder.checkpoint()
+        try:
+            result = self._strict_source_result(
+                result, "change_requests", target, request
+            )
+            for position, source in enumerate(CHANGE_REQUEST_COVERAGE_SOURCES):
+                coverage_result = result
+                if position:
+                    coverage_result = SourceResult(
+                        status=result.status,
+                        note=result.note,
+                        diagnostics=deepcopy(result.diagnostics),
+                    )
+                builder.add_coverage(source, target, coverage_result)
+            builder.add_records("change_requests", result.items, target=target)
+        except Exception as exc:  # noqa: BLE001 - transactional source boundary
+            builder.restore(checkpoint)
+            for source in CHANGE_REQUEST_COVERAGE_SOURCES:
+                builder.add_coverage(
+                    source,
+                    target,
+                    SourceResult(
+                        [],
+                        "incomplete",
+                        "source emission failed",
+                        exception_diagnostics(exc),
+                    ),
+                )
 
     def _collect_core_fair(
         self,
@@ -1898,7 +1938,7 @@ class ResourceProvider:
             None,
             {
                 source: SourceResult([], "incomplete", note, dict(diagnostics))
-                for source in RESOURCE_SOURCES
+                for source in CORE_RESOURCE_SOURCES
             },
         )
 
@@ -1934,6 +1974,8 @@ class ResourceProvider:
                 task.result = self._unexpected_source_result(
                     exc, "scheduled source initialization failed"
                 )
+        interaction_subject_offsets: dict[str, int] = {}
+        interaction_endpoint_offsets: dict[tuple[str, str, str], int] = {}
         while any(task.result is None for task in tasks):
             active = [task for task in tasks if task.result is None]
             if interaction_rounds:
@@ -1945,12 +1987,24 @@ class ResourceProvider:
                         task.endpoint_kind,
                     )
                 )
-                selected: list[PageSourceRequest] = []
-                seen_repositories: set[str] = set()
+                selected = []
+                by_repository: dict[str, list[PageSourceRequest]] = {}
                 for task in active:
-                    if task.target.canonical_id not in seen_repositories:
-                        seen_repositories.add(task.target.canonical_id)
-                        selected.append(task)
+                    by_repository.setdefault(task.target.canonical_id, []).append(task)
+                for repository_id, candidates in by_repository.items():
+                    by_subject: dict[tuple[str, str], list[PageSourceRequest]] = {}
+                    for task in candidates:
+                        subject = (task.subject_type, task.subject_id)
+                        by_subject.setdefault(subject, []).append(task)
+                    subjects = list(by_subject)
+                    subject_offset = interaction_subject_offsets.get(repository_id, 0)
+                    subject = subjects[subject_offset % len(subjects)]
+                    interaction_subject_offsets[repository_id] = subject_offset + 1
+                    endpoints = by_subject[subject]
+                    endpoint_key = (repository_id, *subject)
+                    endpoint_offset = interaction_endpoint_offsets.get(endpoint_key, 0)
+                    selected.append(endpoints[endpoint_offset % len(endpoints)])
+                    interaction_endpoint_offsets[endpoint_key] = endpoint_offset + 1
             else:
                 selected = sorted(
                     active,
@@ -2145,11 +2199,7 @@ class ResourceProvider:
         if not isinstance(item, dict):
             raise StrictNormalizationError(f"{source} item must be an object")
         entity_id = item.get("id")
-        if (
-            not isinstance(entity_id, str)
-            or not entity_id.strip()
-            or "None" in entity_id
-        ):
+        if not isinstance(entity_id, str) or not entity_id.strip():
             raise StrictNormalizationError(f"{source} item has no stable canonical id")
         if source == "repositories":
             if entity_id != target.canonical_id:

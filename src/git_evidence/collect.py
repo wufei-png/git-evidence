@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 from collections import defaultdict
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
-from .assertions import build_assertions
 from .bounds import (
     InputLimitError,
     indented_json_growth_upper_bound,
@@ -36,10 +33,12 @@ from .providers.base import (
 )
 from .providers.resource_base import exception_diagnostics, merge_diagnostics
 from .providers.transport import ResponseShapeError, empty_transport_metrics
+from .time import TimeValueError, normalize_utc
 from .validation import (
     has_blocking_core_coverage,
-    recompute_allow_publish,
+    recompute_render_eligibility,
     validate_bundle,
+    validate_provider_fragment,
 )
 
 
@@ -58,27 +57,12 @@ ProviderFactory = Callable[[str, str, dict[str, Any], str | None], Any]
 
 
 def _timestamp_text(value: Any, field: str) -> str:
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            raise CollectionError(f"{field} must include a timezone")
-        return (
-            value.astimezone(UTC)
-            .isoformat(timespec="microseconds")
-            .replace("+00:00", "Z")
-        )
-    if isinstance(value, str) and value:
-        try:
-            parsed = datetime.fromisoformat(value)
-        except ValueError as exc:
-            raise CollectionError(f"{field} must be a valid timestamp") from exc
-        if parsed.tzinfo is None:
-            raise CollectionError(f"{field} must include a timezone")
-        return (
-            parsed.astimezone(UTC)
-            .isoformat(timespec="microseconds")
-            .replace("+00:00", "Z")
-        )
-    raise CollectionError(f"{field} must be a non-empty timestamp")
+    if not isinstance(value, (str, datetime)):
+        raise CollectionError(f"{field} must be a non-empty timestamp")
+    try:
+        return normalize_utc(value)
+    except TimeValueError as exc:
+        raise CollectionError(f"{field}: {exc}") from exc
 
 
 def _group_failure_diagnostics(error: Exception) -> tuple[str, dict[str, Any]]:
@@ -94,6 +78,25 @@ def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
         raise PrivacyResponseError(str(exc)) from exc
     if not isinstance(bundle, dict):
         raise ResponseShapeError("provider returned a non-object bundle")
+
+    allowed_keys = {
+        "fragment_version",
+        "window",
+        "scope",
+        *ALL_COLLECTION_KEYS,
+        "collection",
+        "coverage",
+    }
+    unknown_keys = set(bundle) - allowed_keys
+    missing_keys = allowed_keys - set(bundle)
+    if unknown_keys:
+        raise ResponseShapeError(
+            f"provider fragment has unknown fields: {', '.join(sorted(unknown_keys))}"
+        )
+    if missing_keys:
+        raise ResponseShapeError(
+            f"provider fragment is missing fields: {', '.join(sorted(missing_keys))}"
+        )
 
     for key in ALL_COLLECTION_KEYS:
         if key not in bundle:
@@ -127,12 +130,6 @@ def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
                 raise ResponseShapeError(
                     f"provider bundle coverage.{key} must be an array"
                 )
-        if "allow_publish" in coverage and not isinstance(
-            coverage["allow_publish"], bool
-        ):
-            raise ResponseShapeError(
-                "provider bundle coverage.allow_publish must be boolean"
-            )
 
     collection = bundle.get("collection")
     if collection is not None and not isinstance(collection, dict):
@@ -205,11 +202,7 @@ def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
                     failure_class="malformed_response",
                 )
 
-    # A provider group may legitimately be partial when its coverage ledger
-    # records a failed repository. Validate all other schema/semantic
-    # invariants before the aggregate merge; coverage and the corresponding
-    # missing repository are diagnosed by the final bundle gate.
-    validation_issues = validate_bundle(bundle)
+    validation_issues = validate_provider_fragment(bundle)
     group_failures = (bundle.get("coverage") or {}).get("group_failures", [])
     hard_issues = [
         issue
@@ -223,8 +216,10 @@ def _validate_provider_bundle_shape(bundle: Any) -> dict[str, Any]:
     if hard_issues:
         details = "; ".join(issue.code for issue in hard_issues[:4])
         raise ResponseShapeError(
-            f"provider bundle semantic validation failed: {details}"
+            f"provider fragment semantic validation failed: {details}",
+            failure_class="malformed_response",
         )
+
     return bundle
 
 
@@ -283,14 +278,11 @@ def _failed_group_bundle(
                     )
                 )
     return {
-        "schema_version": "0.1",
-        "run": {
-            "run_id": f"run:{kind}:{instance}:failed",
-            "window": {"start": window_start, "end": window_end, "timezone": timezone},
-            "scope": {
-                "repositories": [target.canonical_id for target in targets],
-                "actors": actor_ids,
-            },
+        "fragment_version": "0.3",
+        "window": {"start": window_start, "end": window_end, "timezone": timezone},
+        "scope": {
+            "repositories": [target.canonical_id for target in targets],
+            "actors": actor_ids,
         },
         "providers": [
             {
@@ -309,7 +301,8 @@ def _failed_group_bundle(
         "ref_changes": [],
         "releases": [],
         "evidence": [],
-        "facts": [],
+        "retrievals": [],
+        "assertions": [],
         "collection": {
             "provider": kind,
             "instance": instance,
@@ -330,18 +323,13 @@ def _failed_group_bundle(
                 cache_enabled=bool(runtime["cache_enabled"])
             ),
         },
-        "privacy": {
-            "actor_display": "anonymous",
-            "source_urls": "sanitized",
-            "auth_redaction": True,
-        },
         "coverage": {
             "required_sources": list(RESOURCE_SOURCES),
             "observations": observations,
             "fatal": fatal,
             "group_failures": group_failures,
             "warnings": [],
-            "allow_publish": False,
+            "render_eligible": False,
         },
     }
 
@@ -352,11 +340,7 @@ def _bundle_group_identity(bundle: dict[str, Any]) -> tuple[str, str, list[str]]
         provider = collection.get("provider")
         instance = collection.get("instance")
         if isinstance(provider, str) and isinstance(instance, str):
-            scope = (
-                (bundle.get("run") or {}).get("scope")
-                if isinstance(bundle.get("run"), dict)
-                else {}
-            )
+            scope = bundle.get("scope") if isinstance(bundle.get("scope"), dict) else {}
             repositories = (
                 scope.get("repositories", []) if isinstance(scope, dict) else []
             )
@@ -371,11 +355,7 @@ def _bundle_group_identity(bundle: dict[str, Any]) -> tuple[str, str, list[str]]
         kind = provider.get("kind")
         instance = provider.get("instance")
         if isinstance(kind, str) and isinstance(instance, str):
-            scope = (
-                (bundle.get("run") or {}).get("scope")
-                if isinstance(bundle.get("run"), dict)
-                else {}
-            )
+            scope = bundle.get("scope") if isinstance(bundle.get("scope"), dict) else {}
             repositories = (
                 scope.get("repositories", []) if isinstance(scope, dict) else []
             )
@@ -529,23 +509,10 @@ def _merge_bundles(
     repository_ids: list[str],
     actor_ids: list[str],
 ) -> dict[str, Any]:
-    identity = json.dumps(
-        {
-            "window": [window_start, window_end, timezone],
-            "repositories": repository_ids,
-            "actors": actor_ids,
-        },
-        ensure_ascii=True,
-        sort_keys=True,
-    ).encode("utf-8")
-    run_digest = hashlib.sha256(identity).hexdigest()[:12]
     merged: dict[str, Any] = {
-        "schema_version": "0.1",
-        "run": {
-            "run_id": f"run:aggregate:{run_digest}",
-            "window": {"start": window_start, "end": window_end, "timezone": timezone},
-            "scope": {"repositories": repository_ids, "actors": actor_ids},
-        },
+        "fragment_version": "0.3",
+        "window": {"start": window_start, "end": window_end, "timezone": timezone},
+        "scope": {"repositories": repository_ids, "actors": actor_ids},
         "providers": [],
         "repositories": [],
         "actors": [],
@@ -556,8 +523,8 @@ def _merge_bundles(
         "ref_changes": [],
         "releases": [],
         "evidence": [],
-        "facts": [],
         "retrievals": [],
+        "assertions": [],
         "collection": {
             "groups": [],
             "metrics": empty_transport_metrics(),
@@ -573,7 +540,7 @@ def _merge_bundles(
             "fatal": [],
             "group_failures": [],
             "warnings": [],
-            "allow_publish": True,
+            "render_eligible": True,
         },
     }
     collection_keys = (
@@ -587,8 +554,8 @@ def _merge_bundles(
         "ref_changes",
         "releases",
         "evidence",
-        "facts",
         "retrievals",
+        "assertions",
     )
     seen: dict[str, set[str]] = {key: set() for key in collection_keys}
     provider_gate_blocked = False
@@ -728,7 +695,7 @@ def _merge_bundles(
     for observation in merged["coverage"]["observations"]:
         if isinstance(observation, dict):
             append_optional_coverage_warning(merged["coverage"], observation)
-    merged["coverage"]["allow_publish"] = not (
+    merged["coverage"]["render_eligible"] = not (
         provider_gate_blocked
         or has_blocking_core_coverage(
             merged["coverage"],
@@ -748,14 +715,13 @@ def _merge_bundles(
                 merged[key] = []
         merged["collection"]["group_status"] = "failed"
         merged["collection"]["failure_class"] = "limit_exceeded"
-        merged["coverage"]["allow_publish"] = False
+        merged["coverage"]["render_eligible"] = False
         try:
             json_size_with_limit(merged, max_bytes=MAX_BUNDLE_BYTES - 1)
         except (InputLimitError, TypeError, ValueError) as exc:
             raise CollectionError(
                 "aggregate limit diagnostic exceeds the final bundle size limit"
             ) from exc
-    recompute_allow_publish(merged)
     return merged
 
 
@@ -824,7 +790,7 @@ def _collection_plan(
     )
 
 
-def _finalize_v02(
+def _finalize_v03(
     merged: dict[str, Any],
     *,
     plan: dict[str, Any],
@@ -832,9 +798,8 @@ def _finalize_v02(
     finished_at: str,
 ) -> dict[str, Any]:
     coverage = dict(merged["coverage"])
-    coverage["render_eligible"] = bool(coverage.pop("allow_publish", False))
     result: dict[str, Any] = {
-        "schema_version": "0.2",
+        "schema_version": "0.3",
         "canonicalization": dict(CANONICALIZATION),
         "plan_id": compute_plan_id(plan),
         "plan": plan,
@@ -858,14 +823,13 @@ def _finalize_v02(
                 "evidence",
             )
         },
-        "assertions": [],
+        "assertions": merged.get("assertions", []),
         "collection": merged.get("collection", {}),
         "privacy": merged.get("privacy", {}),
         "coverage": coverage,
     }
-    result["assertions"] = build_assertions(result)
     result["bundle_digest"] = compute_bundle_digest(result)
-    recompute_allow_publish(result)
+    recompute_render_eligibility(result)
     blockers = [
         issue
         for issue in validate_bundle(result)
@@ -881,7 +845,7 @@ def _finalize_v02(
     if blockers:
         codes = ", ".join(sorted({f"{issue.code}@{issue.path}" for issue in blockers}))
         raise CollectionError(
-            f"collector produced an invalid schema 0.2 bundle: {codes}"
+            f"collector produced an invalid schema 0.3 bundle: {codes}"
         )
     return result
 
@@ -995,7 +959,7 @@ def collect_config(
         repository_ids=repository_ids,
         actor_ids=actor_ids,
     )
-    return _finalize_v02(
+    return _finalize_v03(
         merged,
         plan=plan,
         started_at=started_at,

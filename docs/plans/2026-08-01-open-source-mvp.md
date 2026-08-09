@@ -1,6 +1,6 @@
 # Open-source MVP plan
 
-Status: P2 contract gates implemented locally; live canary remains unverified.
+Status: superseded by ADR-0022 and the current Schema 0.3 contract.
 
 The first collection slice is now implemented: canonical bundle loading,
 fail-closed validation, four deterministic offline report profiles, a

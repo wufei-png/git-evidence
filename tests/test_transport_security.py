@@ -6,6 +6,8 @@ from typing import Self
 from unittest.mock import patch
 from urllib.request import Request
 
+from test_contract import github_transport, request_for, validate_output
+
 from git_evidence.collect import _merge_bundles
 from git_evidence.config import ConfigError, validate_collection_config
 from git_evidence.model import load_bundle
@@ -28,7 +30,6 @@ from git_evidence.providers.transport import (
     paginate,
 )
 from git_evidence.render import RenderError, render_bundle
-from git_evidence.validation import validate_bundle
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "example_bundle.json"
 
@@ -226,7 +227,7 @@ class RequestTargetPolicyTests(unittest.TestCase):
         for source in RESOURCE_SOURCES:
             builder.add_coverage(source, target, SourceResult([], "supported"))
         bundle = builder.finish()
-        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertFalse(bundle["coverage"]["render_eligible"])
         self.assertEqual(
             bundle["collection"]["group_status"],
             "diagnostic_insecure_transport",
@@ -253,22 +254,22 @@ class RequestTargetPolicyTests(unittest.TestCase):
                 bundle["collection"] = (
                     {"groups": [diagnostic]} if nested else diagnostic
                 )
-                bundle["coverage"]["allow_publish"] = True
+                bundle["coverage"]["render_eligible"] = True
                 self.assertIn(
                     "collection.insecure_transport",
-                    {issue.code for issue in validate_bundle(bundle)},
+                    {issue.code for issue in validate_output(bundle)},
                 )
                 with self.assertRaises(RenderError):
                     render_bundle(bundle)
 
     def test_aggregate_preserves_insecure_transport_metric(self) -> None:
-        bundle = load_bundle(FIXTURE)
+        bundle = GitHubProvider(github_transport()).collect(
+            request_for("github", "github.com")
+        )
         bundle["collection"] = {
             "group_status": "diagnostic_insecure_transport",
             "metrics": {"insecure_transport": True},
         }
-        # This legacy fixture predates response-level Retrieval provenance;
-        # exercise the aggregate metric fold without presenting it as provider output.
         validated = bundle
         self.assertEqual(
             validated["collection"]["group_status"],
@@ -276,16 +277,16 @@ class RequestTargetPolicyTests(unittest.TestCase):
         )
         merged = _merge_bundles(
             [validated],
-            window_start=bundle["run"]["window"]["start"],
-            window_end=bundle["run"]["window"]["end"],
-            timezone=bundle["run"]["window"]["timezone"],
-            repository_ids=bundle["run"]["scope"]["repositories"],
-            actor_ids=bundle["run"]["scope"]["actors"],
+            window_start=bundle["window"]["start"],
+            window_end=bundle["window"]["end"],
+            timezone=bundle["window"]["timezone"],
+            repository_ids=bundle["scope"]["repositories"],
+            actor_ids=bundle["scope"]["actors"],
         )
         self.assertTrue(merged["collection"]["metrics"]["insecure_transport"])
         self.assertIn(
             "collection.insecure_transport",
-            {issue.code for issue in validate_bundle(merged)},
+            {issue.code for issue in validate_output(merged)},
         )
 
     def test_redirect_handler_rejects_escape_downgrade_and_cycle(self) -> None:

@@ -10,13 +10,8 @@ LEGACY_DUPLICATE_ROOT = ROOT / "schemas"
 
 def main() -> int:
     schema_paths = sorted(SCHEMA_ROOT.glob("evidence-bundle-*.schema.json"))
-    if {path.name for path in schema_paths} != {
-        "evidence-bundle-0.1.schema.json",
-        "evidence-bundle-0.2.schema.json",
-    }:
-        raise SystemExit(
-            "authoritative package must contain exactly the 0.1 and 0.2 Schemas"
-        )
+    if {path.name for path in schema_paths} != {"evidence-bundle-0.3.schema.json"}:
+        raise SystemExit("authoritative package must contain exactly Schema 0.3")
     duplicate_paths = list(LEGACY_DUPLICATE_ROOT.glob("evidence-bundle-*.schema.json"))
     if duplicate_paths:
         raise SystemExit("Schema copies outside src/git_evidence/schemas are forbidden")
@@ -24,7 +19,7 @@ def main() -> int:
         parsed = json.loads(path.read_text(encoding="utf-8"))
         if parsed.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
             raise SystemExit(f"{path.name} does not declare draft 2020-12")
-    print("SCHEMA: package resources are the single authority for 0.1 and 0.2")
+    print("SCHEMA: package resources are the single authority for 0.3")
     return 0
 
 

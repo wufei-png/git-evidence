@@ -1,5 +1,7 @@
 from .base import (
     ACTIVITY_SOURCES,
+    CHANGE_REQUEST_COVERAGE_SOURCES,
+    CORE_RESOURCE_SOURCES,
     RESOURCE_SOURCES,
     CollectionRequest,
     ProviderDescriptor,
@@ -19,6 +21,8 @@ from .gitlab import GitLabProvider
 
 __all__ = [
     "ACTIVITY_SOURCES",
+    "CHANGE_REQUEST_COVERAGE_SOURCES",
+    "CORE_RESOURCE_SOURCES",
     "PROVIDER_REGISTRY",
     "RESOURCE_SOURCES",
     "CollectionRequest",

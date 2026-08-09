@@ -5,6 +5,9 @@ date: 2026-08-08
 
 # Evidence bundles are sensitive; report publication is explicit
 
+Schema-specific names in this historical decision are superseded by ADR-0022;
+the disclosure boundary remains accepted.
+
 The canonical Evidence Bundle is a provenance-preserving audit artifact and is
 sensitive by default. Removing credentials and hiding actor names in a renderer
 does not make the bundle anonymous: stable actor and repository identities,

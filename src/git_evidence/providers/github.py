@@ -4,7 +4,7 @@ from typing import Any
 from urllib.parse import quote
 
 from .base import (
-    RESOURCE_SOURCES,
+    CORE_RESOURCE_SOURCES,
     CollectionRequest,
     RepositoryTarget,
     instance_web_base,
@@ -273,7 +273,7 @@ class GitHubProvider(ResourceProvider):
                 source: SourceResult(
                     [], "incomplete", str(exc), api_error_diagnostics(exc)
                 )
-                for source in RESOURCE_SOURCES
+                for source in CORE_RESOURCE_SOURCES
             }
             return RepositorySnapshot(None, failed)
 
@@ -575,7 +575,7 @@ class GitHubProvider(ResourceProvider):
         self, target: RepositoryTarget, item: dict[str, Any]
     ) -> dict[str, Any]:
         number = item.get("number")
-        merged_at = item.get("merged_at")
+        merged_at = first_timestamp(item, "merged_at")
         head = item.get("head") if isinstance(item.get("head"), dict) else {}
         association_shas = [
             item.get("merge_commit_sha"),

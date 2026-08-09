@@ -1,15 +1,64 @@
 {
-  "schema_version": "0.1",
-  "run": {
-    "run_id": "run:example:2026-08-01",
+  "schema_version": "0.3",
+  "canonicalization": {
+    "algorithm": "RFC8785",
+    "version": "v1",
+    "unicode_normalization": "NFC"
+  },
+  "plan_id": "plan:sha256:24d841f434a93f3c03faeadd8a64764f9347d191792f9e82f199870212b4eeea",
+  "plan": {
+    "origin": "collection",
     "window": {
-      "start": "2026-07-27T00:00:00Z",
-      "end": "2026-08-03T00:00:00Z",
+      "start": "2026-07-27T00:00:00.000000Z",
+      "end": "2026-08-03T00:00:00.000000Z",
       "timezone": "UTC"
     },
     "scope": {
-      "repositories": ["repo:github:github.com:example/project"],
+      "repositories": [
+        "repo:github:github.com:example/project"
+      ],
       "actors": []
+    },
+    "providers": [
+      {
+        "kind": "github",
+        "instance": "github.com",
+        "selected_sources": [
+          "activities",
+          "change_request_merges",
+          "change_request_observations",
+          "commits",
+          "interactions",
+          "ref_changes",
+          "releases",
+          "repositories",
+          "work_items"
+        ],
+        "options": {
+          "include_activity_api": false,
+          "verify_tls": true,
+          "allow_insecure_loopback": false,
+          "timeout_seconds": 30.0,
+          "max_retries": 2,
+          "max_pages": 100,
+          "max_requests": 1000,
+          "retry_backoff_seconds": 0.5,
+          "retry_jitter_seconds": 0.25,
+          "retry_after_max_seconds": 60.0,
+          "cache_enabled": false,
+          "cache_ttl_seconds": 300.0,
+          "cache_max_entries": 256
+        }
+      }
+    ]
+  },
+  "invocation": {
+    "id": "invocation:93472a9e-20e0-4b34-afcc-23ee453f1d9e",
+    "started_at": "2026-08-09T17:12:39.659188Z",
+    "finished_at": "2026-08-09T17:12:39.668599Z",
+    "generator": {
+      "name": "git-evidence",
+      "version": "0.3.0"
     }
   },
   "providers": [
@@ -20,10 +69,12 @@
       "capabilities": {
         "repositories": "supported",
         "work_items": "supported",
-        "change_requests": "supported",
+        "change_request_observations": "supported",
+        "change_request_merges": "supported",
         "interactions": "supported",
         "commits": "supported",
         "releases": "supported",
+        "activities": "unavailable",
         "ref_changes": "unavailable"
       }
     }
@@ -33,208 +84,708 @@
       "id": "repo:github:github.com:example/project",
       "provider_id": "provider:github:github.com",
       "full_name": "example/project",
+      "name": "project",
       "web_url": "https://github.com/example/project"
     }
   ],
   "actors": [
     {
-      "id": "actor:github:github.com:42",
+      "id": "actor:github:github.com:7",
       "provider_id": "provider:github:github.com",
-      "source_id": "42",
-      "handle": "example-maintainer"
+      "source_id": "7",
+      "handle": "synthetic-user"
     }
   ],
   "work_items": [
     {
-      "id": "work_item:github:github.com:example/project:7",
+      "id": "work_item:github:github.com:example/project:1",
       "kind": "issue",
       "repository_id": "repo:github:github.com:example/project",
-      "number": 7,
-      "title": "Document the evidence export",
+      "number": 1,
+      "title": "Synthetic issue",
       "state": "open",
-      "web_url": "https://github.com/example/project/issues/7"
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "web_url": "https://github.com/example/project/issues/1",
+      "actor_id": "actor:github:github.com:7"
     }
   ],
   "change_requests": [
     {
-      "id": "change_request:github:github.com:example/project:12",
+      "id": "change_request:github:github.com:example/project:2",
       "kind": "pull_request",
       "repository_id": "repo:github:github.com:example/project",
-      "number": 12,
-      "title": "Add replayable evidence output",
+      "number": 2,
+      "title": "Synthetic pull",
       "state": "merged",
-      "merged_at": "2026-07-29T10:00:00Z",
-      "web_url": "https://github.com/example/project/pull/12"
+      "merged_at": "2026-07-30T12:00:00Z",
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "web_url": "https://github.com/example/project/pull/2",
+      "actor_id": "actor:github:github.com:7"
+    },
+    {
+      "id": "change_request:github:github.com:example/project:3",
+      "kind": "pull_request",
+      "repository_id": "repo:github:github.com:example/project",
+      "number": 3,
+      "title": "Synthetic ambiguous pull",
+      "state": "open",
+      "merged_at": null,
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "web_url": "https://github.com/example/project/pull/3",
+      "actor_id": "actor:github:github.com:7"
     }
   ],
   "interactions": [
     {
-      "id": "interaction:github:github.com:example/project:issue-comment:91",
+      "id": "interaction:github:github.com:example/project:issue_comment:101",
       "kind": "issue_comment",
       "repository_id": "repo:github:github.com:example/project",
       "subject_type": "work_item",
-      "subject_id": "work_item:github:github.com:example/project:7",
-      "actor_id": "actor:github:github.com:42",
-      "occurred_at": "2026-07-30T09:00:00Z",
+      "subject_id": "work_item:github:github.com:example/project:1",
+      "subject_number": 1,
+      "occurred_at": "2026-07-30T12:00:00Z",
       "body_collected": false,
-      "web_url": "https://github.com/example/project/issues/7#issuecomment-91"
+      "web_url": "https://github.com/example/project/issues/1#issuecomment-101",
+      "actor_id": "actor:github:github.com:7"
+    },
+    {
+      "id": "interaction:github:github.com:example/project:review:201",
+      "kind": "review",
+      "repository_id": "repo:github:github.com:example/project",
+      "subject_type": "change_request",
+      "subject_id": "change_request:github:github.com:example/project:2",
+      "subject_number": 2,
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "body_collected": false,
+      "web_url": "https://github.com/example/project/pull/2#review-201",
+      "actor_id": "actor:github:github.com:7"
+    },
+    {
+      "id": "interaction:github:github.com:example/project:review_comment:202",
+      "kind": "review_comment",
+      "repository_id": "repo:github:github.com:example/project",
+      "subject_type": "change_request",
+      "subject_id": "change_request:github:github.com:example/project:2",
+      "subject_number": 2,
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "body_collected": false,
+      "web_url": "https://github.com/example/project/pull/2#discussion_r202",
+      "actor_id": "actor:github:github.com:7"
     }
   ],
   "commits": [
     {
       "id": "commit:github:github.com:example/project:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repository_id": "repo:github:github.com:example/project",
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "title": "Synthetic commit",
+      "web_url": "https://github.com/example/project/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "hash_algorithm": "sha1",
-      "repository_id": "repo:github:github.com:example/project",
-      "actor_id": "actor:github:github.com:42",
-      "occurred_at": "2026-07-29T09:30:00Z",
-      "title": "Add evidence bundle replay",
-      "web_url": "https://github.com/example/project/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    }
-  ],
-  "ref_changes": [
+      "actor_id": "actor:github:github.com:7"
+    },
     {
-      "id": "ref_change:github:github.com:example/project:1",
+      "id": "commit:github:github.com:example/project:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "repository_id": "repo:github:github.com:example/project",
-      "kind": "push",
-      "ref": "refs/heads/main",
-      "occurred_at": "2026-07-29T09:30:00Z",
-      "commit_ids": ["commit:github:github.com:example/project:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
-      "change_association": "unknown",
-      "evidence_ids": []
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "title": "Synthetic unlinked commit",
+      "web_url": "https://github.com/example/project/commit/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "hash_algorithm": "sha1",
+      "actor_id": "actor:github:github.com:7"
+    },
+    {
+      "id": "commit:github:github.com:example/project:cccccccccccccccccccccccccccccccccccccccc",
+      "sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "repository_id": "repo:github:github.com:example/project",
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "title": "Synthetic ambiguous commit",
+      "web_url": "https://github.com/example/project/commit/cccccccccccccccccccccccccccccccccccccccc",
+      "hash_algorithm": "sha1",
+      "actor_id": "actor:github:github.com:7"
     }
   ],
+  "ref_changes": [],
   "releases": [
     {
-      "id": "release:github:github.com:example/project:v0.1.0",
+      "id": "release:github:github.com:example/project:301",
       "repository_id": "repo:github:github.com:example/project",
-      "tag": "v0.1.0",
-      "name": "Evidence contract preview",
-      "occurred_at": "2026-07-31T12:00:00Z",
-      "web_url": "https://github.com/example/project/releases/tag/v0.1.0"
+      "tag": "v1.0.0",
+      "name": "Synthetic release",
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "web_url": "https://github.com/example/project/releases/tag/v1.0.0"
+    }
+  ],
+  "retrievals": [
+    {
+      "mode": "recorded_replay",
+      "replayed_at": "2026-08-09T17:12:39.659623Z",
+      "target_ref": "/repos/example/project",
+      "id": "retrieval:provider:github:github.com:1",
+      "provider_id": "provider:github:github.com",
+      "endpoint_kind": "repositories",
+      "repository_id": "repo:github:github.com:example/project"
+    },
+    {
+      "mode": "recorded_replay",
+      "replayed_at": "2026-08-09T17:12:39.659820Z",
+      "target_ref": "/repos/example/project/issues",
+      "page": 1,
+      "pagination_outcome": "link_exhausted",
+      "id": "retrieval:provider:github:github.com:2",
+      "provider_id": "provider:github:github.com",
+      "endpoint_kind": "work_items",
+      "repository_id": "repo:github:github.com:example/project"
+    },
+    {
+      "mode": "recorded_replay",
+      "replayed_at": "2026-08-09T17:12:39.660055Z",
+      "target_ref": "/repos/example/project/pulls",
+      "page": 1,
+      "pagination_outcome": "link_exhausted",
+      "id": "retrieval:provider:github:github.com:3",
+      "provider_id": "provider:github:github.com",
+      "endpoint_kind": "change_requests",
+      "repository_id": "repo:github:github.com:example/project"
+    },
+    {
+      "mode": "recorded_replay",
+      "replayed_at": "2026-08-09T17:12:39.661010Z",
+      "target_ref": "/repos/example/project/issues/1/comments",
+      "page": 1,
+      "pagination_outcome": "link_exhausted",
+      "id": "retrieval:provider:github:github.com:4",
+      "provider_id": "provider:github:github.com",
+      "endpoint_kind": "issue_comment",
+      "repository_id": "repo:github:github.com:example/project"
+    },
+    {
+      "mode": "recorded_replay",
+      "replayed_at": "2026-08-09T17:12:39.660647Z",
+      "target_ref": "/repos/example/project/issues/2/comments",
+      "page": 1,
+      "pagination_outcome": "link_exhausted",
+      "id": "retrieval:provider:github:github.com:5",
+      "provider_id": "provider:github:github.com",
+      "endpoint_kind": "issue_comment",
+      "repository_id": "repo:github:github.com:example/project"
+    },
+    {
+      "mode": "recorded_replay",
+      "replayed_at": "2026-08-09T17:12:39.660687Z",
+      "target_ref": "/repos/example/project/pulls/2/reviews",
+      "page": 1,
+      "pagination_outcome": "link_exhausted",
+      "id": "retrieval:provider:github:github.com:6",
+      "provider_id": "provider:github:github.com",
+      "endpoint_kind": "review",
+      "repository_id": "repo:github:github.com:example/project"
+    },
+    {
+      "mode": "recorded_replay",
+      "replayed_at": "2026-08-09T17:12:39.660796Z",
+      "target_ref": "/repos/example/project/pulls/2/comments",
+      "page": 1,
+      "pagination_outcome": "link_exhausted",
+      "id": "retrieval:provider:github:github.com:7",
+      "provider_id": "provider:github:github.com",
+      "endpoint_kind": "review_comment",
+      "repository_id": "repo:github:github.com:example/project"
+    },
+    {
+      "mode": "recorded_replay",
+      "replayed_at": "2026-08-09T17:12:39.660913Z",
+      "target_ref": "/repos/example/project/issues/3/comments",
+      "page": 1,
+      "pagination_outcome": "link_exhausted",
+      "id": "retrieval:provider:github:github.com:8",
+      "provider_id": "provider:github:github.com",
+      "endpoint_kind": "issue_comment",
+      "repository_id": "repo:github:github.com:example/project"
+    },
+    {
+      "mode": "recorded_replay",
+      "replayed_at": "2026-08-09T17:12:39.660953Z",
+      "target_ref": "/repos/example/project/pulls/3/reviews",
+      "page": 1,
+      "pagination_outcome": "link_exhausted",
+      "id": "retrieval:provider:github:github.com:9",
+      "provider_id": "provider:github:github.com",
+      "endpoint_kind": "review",
+      "repository_id": "repo:github:github.com:example/project"
+    },
+    {
+      "mode": "recorded_replay",
+      "replayed_at": "2026-08-09T17:12:39.660984Z",
+      "target_ref": "/repos/example/project/pulls/3/comments",
+      "page": 1,
+      "pagination_outcome": "link_exhausted",
+      "id": "retrieval:provider:github:github.com:10",
+      "provider_id": "provider:github:github.com",
+      "endpoint_kind": "review_comment",
+      "repository_id": "repo:github:github.com:example/project"
+    },
+    {
+      "mode": "recorded_replay",
+      "replayed_at": "2026-08-09T17:12:39.660258Z",
+      "target_ref": "/repos/example/project/commits",
+      "page": 1,
+      "pagination_outcome": "link_exhausted",
+      "id": "retrieval:provider:github:github.com:11",
+      "provider_id": "provider:github:github.com",
+      "endpoint_kind": "commits",
+      "repository_id": "repo:github:github.com:example/project"
+    },
+    {
+      "mode": "recorded_replay",
+      "replayed_at": "2026-08-09T17:12:39.660497Z",
+      "target_ref": "/repos/example/project/releases",
+      "page": 1,
+      "pagination_outcome": "link_exhausted",
+      "id": "retrieval:provider:github:github.com:12",
+      "provider_id": "provider:github:github.com",
+      "endpoint_kind": "releases",
+      "repository_id": "repo:github:github.com:example/project"
     }
   ],
   "evidence": [
     {
-      "id": "evidence:issue:7",
+      "id": "evidence:work_items:work_item:github:github.com:example/project:1",
       "provider_id": "provider:github:github.com",
       "subject_type": "work_item",
-      "subject_id": "work_item:github:github.com:example/project:7",
+      "subject_id": "work_item:github:github.com:example/project:1",
       "source": "resource_api",
-      "url": "https://github.com/example/project/issues/7"
+      "retrieval_id": "retrieval:provider:github:github.com:2",
+      "native_identity": {
+        "state": "known",
+        "value": "1"
+      },
+      "url": "https://github.com/example/project/issues/1"
     },
     {
-      "id": "evidence:pull:12",
+      "id": "evidence:change_requests:change_request:github:github.com:example/project:2",
       "provider_id": "provider:github:github.com",
       "subject_type": "change_request",
-      "subject_id": "change_request:github:github.com:example/project:12",
+      "subject_id": "change_request:github:github.com:example/project:2",
       "source": "resource_api",
-      "url": "https://github.com/example/project/pull/12"
+      "retrieval_id": "retrieval:provider:github:github.com:3",
+      "native_identity": {
+        "state": "known",
+        "value": "2"
+      },
+      "url": "https://github.com/example/project/pull/2"
     },
     {
-      "id": "evidence:commit:a",
+      "id": "evidence:change_requests:change_request:github:github.com:example/project:3",
+      "provider_id": "provider:github:github.com",
+      "subject_type": "change_request",
+      "subject_id": "change_request:github:github.com:example/project:3",
+      "source": "resource_api",
+      "retrieval_id": "retrieval:provider:github:github.com:3",
+      "native_identity": {
+        "state": "known",
+        "value": "3"
+      },
+      "url": "https://github.com/example/project/pull/3"
+    },
+    {
+      "id": "evidence:interactions:interaction:github:github.com:example/project:issue_comment:101",
+      "provider_id": "provider:github:github.com",
+      "subject_type": "interaction",
+      "subject_id": "interaction:github:github.com:example/project:issue_comment:101",
+      "source": "resource_api",
+      "retrieval_id": "retrieval:provider:github:github.com:4",
+      "native_identity": {
+        "state": "known",
+        "value": "101"
+      },
+      "url": "https://github.com/example/project/issues/1#issuecomment-101"
+    },
+    {
+      "id": "evidence:interactions:interaction:github:github.com:example/project:review:201",
+      "provider_id": "provider:github:github.com",
+      "subject_type": "interaction",
+      "subject_id": "interaction:github:github.com:example/project:review:201",
+      "source": "resource_api",
+      "retrieval_id": "retrieval:provider:github:github.com:6",
+      "native_identity": {
+        "state": "known",
+        "value": "201"
+      },
+      "url": "https://github.com/example/project/pull/2#review-201"
+    },
+    {
+      "id": "evidence:interactions:interaction:github:github.com:example/project:review_comment:202",
+      "provider_id": "provider:github:github.com",
+      "subject_type": "interaction",
+      "subject_id": "interaction:github:github.com:example/project:review_comment:202",
+      "source": "resource_api",
+      "retrieval_id": "retrieval:provider:github:github.com:7",
+      "native_identity": {
+        "state": "known",
+        "value": "202"
+      },
+      "url": "https://github.com/example/project/pull/2#discussion_r202"
+    },
+    {
+      "id": "evidence:commits:commit:github:github.com:example/project:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "provider_id": "provider:github:github.com",
       "subject_type": "commit",
       "subject_id": "commit:github:github.com:example/project:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "source": "resource_api",
+      "retrieval_id": "retrieval:provider:github:github.com:11",
+      "native_identity": {
+        "state": "known",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
       "url": "https://github.com/example/project/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     },
     {
-      "id": "evidence:release:v0.1.0",
+      "id": "evidence:commits:commit:github:github.com:example/project:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider_id": "provider:github:github.com",
+      "subject_type": "commit",
+      "subject_id": "commit:github:github.com:example/project:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "source": "resource_api",
+      "retrieval_id": "retrieval:provider:github:github.com:11",
+      "native_identity": {
+        "state": "known",
+        "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "url": "https://github.com/example/project/commit/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "evidence:commits:commit:github:github.com:example/project:cccccccccccccccccccccccccccccccccccccccc",
+      "provider_id": "provider:github:github.com",
+      "subject_type": "commit",
+      "subject_id": "commit:github:github.com:example/project:cccccccccccccccccccccccccccccccccccccccc",
+      "source": "resource_api",
+      "retrieval_id": "retrieval:provider:github:github.com:11",
+      "native_identity": {
+        "state": "known",
+        "value": "cccccccccccccccccccccccccccccccccccccccc"
+      },
+      "url": "https://github.com/example/project/commit/cccccccccccccccccccccccccccccccccccccccc"
+    },
+    {
+      "id": "evidence:releases:release:github:github.com:example/project:301",
       "provider_id": "provider:github:github.com",
       "subject_type": "release",
-      "subject_id": "release:github:github.com:example/project:v0.1.0",
+      "subject_id": "release:github:github.com:example/project:301",
       "source": "resource_api",
-      "url": "https://github.com/example/project/releases/tag/v0.1.0"
+      "retrieval_id": "retrieval:provider:github:github.com:12",
+      "native_identity": {
+        "state": "known",
+        "value": "301"
+      },
+      "url": "https://github.com/example/project/releases/tag/v1.0.0"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "assertion:change_request.merged.v1:change_request:github:github.com:example/project:2",
+      "subject_type": "change_request",
+      "subject_id": "change_request:github:github.com:example/project:2",
+      "predicate": "change_request.merged.v1",
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "repository_id": "repo:github:github.com:example/project",
+      "evidence_ids": [
+        "evidence:change_requests:change_request:github:github.com:example/project:2"
+      ],
+      "actor_id": "actor:github:github.com:7"
     },
     {
-      "id": "evidence:comment:91",
-      "provider_id": "provider:github:github.com",
+      "id": "assertion:change_request.observed.v1:change_request:github:github.com:example/project:2",
+      "subject_type": "change_request",
+      "subject_id": "change_request:github:github.com:example/project:2",
+      "predicate": "change_request.observed.v1",
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "repository_id": "repo:github:github.com:example/project",
+      "evidence_ids": [
+        "evidence:change_requests:change_request:github:github.com:example/project:2"
+      ],
+      "actor_id": "actor:github:github.com:7"
+    },
+    {
+      "id": "assertion:change_request.observed.v1:change_request:github:github.com:example/project:3",
+      "subject_type": "change_request",
+      "subject_id": "change_request:github:github.com:example/project:3",
+      "predicate": "change_request.observed.v1",
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "repository_id": "repo:github:github.com:example/project",
+      "evidence_ids": [
+        "evidence:change_requests:change_request:github:github.com:example/project:3"
+      ],
+      "actor_id": "actor:github:github.com:7"
+    },
+    {
+      "id": "assertion:commit.observed.v1:commit:github:github.com:example/project:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "subject_type": "commit",
+      "subject_id": "commit:github:github.com:example/project:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "predicate": "commit.observed.v1",
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "repository_id": "repo:github:github.com:example/project",
+      "evidence_ids": [
+        "evidence:commits:commit:github:github.com:example/project:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "actor_id": "actor:github:github.com:7"
+    },
+    {
+      "id": "assertion:commit.observed.v1:commit:github:github.com:example/project:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "subject_type": "commit",
+      "subject_id": "commit:github:github.com:example/project:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "predicate": "commit.observed.v1",
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "repository_id": "repo:github:github.com:example/project",
+      "evidence_ids": [
+        "evidence:commits:commit:github:github.com:example/project:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ],
+      "actor_id": "actor:github:github.com:7"
+    },
+    {
+      "id": "assertion:commit.observed.v1:commit:github:github.com:example/project:cccccccccccccccccccccccccccccccccccccccc",
+      "subject_type": "commit",
+      "subject_id": "commit:github:github.com:example/project:cccccccccccccccccccccccccccccccccccccccc",
+      "predicate": "commit.observed.v1",
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "repository_id": "repo:github:github.com:example/project",
+      "evidence_ids": [
+        "evidence:commits:commit:github:github.com:example/project:cccccccccccccccccccccccccccccccccccccccc"
+      ],
+      "actor_id": "actor:github:github.com:7"
+    },
+    {
+      "id": "assertion:interaction.observed.v1:interaction:github:github.com:example/project:issue_comment:101",
       "subject_type": "interaction",
-      "subject_id": "interaction:github:github.com:example/project:issue-comment:91",
-      "source": "resource_api",
-      "url": "https://github.com/example/project/issues/7#issuecomment-91"
+      "subject_id": "interaction:github:github.com:example/project:issue_comment:101",
+      "predicate": "interaction.observed.v1",
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "repository_id": "repo:github:github.com:example/project",
+      "evidence_ids": [
+        "evidence:interactions:interaction:github:github.com:example/project:issue_comment:101"
+      ],
+      "actor_id": "actor:github:github.com:7"
+    },
+    {
+      "id": "assertion:interaction.observed.v1:interaction:github:github.com:example/project:review:201",
+      "subject_type": "interaction",
+      "subject_id": "interaction:github:github.com:example/project:review:201",
+      "predicate": "interaction.observed.v1",
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "repository_id": "repo:github:github.com:example/project",
+      "evidence_ids": [
+        "evidence:interactions:interaction:github:github.com:example/project:review:201"
+      ],
+      "actor_id": "actor:github:github.com:7"
+    },
+    {
+      "id": "assertion:interaction.observed.v1:interaction:github:github.com:example/project:review_comment:202",
+      "subject_type": "interaction",
+      "subject_id": "interaction:github:github.com:example/project:review_comment:202",
+      "predicate": "interaction.observed.v1",
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "repository_id": "repo:github:github.com:example/project",
+      "evidence_ids": [
+        "evidence:interactions:interaction:github:github.com:example/project:review_comment:202"
+      ],
+      "actor_id": "actor:github:github.com:7"
+    },
+    {
+      "id": "assertion:release.observed.v1:release:github:github.com:example/project:301",
+      "subject_type": "release",
+      "subject_id": "release:github:github.com:example/project:301",
+      "predicate": "release.observed.v1",
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "repository_id": "repo:github:github.com:example/project",
+      "evidence_ids": [
+        "evidence:releases:release:github:github.com:example/project:301"
+      ]
+    },
+    {
+      "id": "assertion:work_item.observed.v1:work_item:github:github.com:example/project:1",
+      "subject_type": "work_item",
+      "subject_id": "work_item:github:github.com:example/project:1",
+      "predicate": "work_item.observed.v1",
+      "occurred_at": "2026-07-30T12:00:00Z",
+      "repository_id": "repo:github:github.com:example/project",
+      "evidence_ids": [
+        "evidence:work_items:work_item:github:github.com:example/project:1"
+      ],
+      "actor_id": "actor:github:github.com:7"
     }
   ],
-  "facts": [
-    {
-      "id": "fact:issue-context",
-      "kind": "work_item_observed",
-      "section": "project",
-      "repository_id": "repo:github:github.com:example/project",
-      "occurred_at": "2026-07-28T08:00:00Z",
-      "summary": "Issue tracks the evidence export documentation",
-      "evidence_ids": ["evidence:issue:7"]
-    },
-    {
-      "id": "fact:merged-change",
-      "kind": "change_request_merged",
-      "section": "release",
-      "repository_id": "repo:github:github.com:example/project",
-      "actor_id": "actor:github:github.com:42",
-      "occurred_at": "2026-07-29T10:00:00Z",
-      "summary": "Merged replayable evidence output",
-      "evidence_ids": ["evidence:pull:12"]
-    },
-    {
-      "id": "fact:commit-observed",
-      "kind": "commit_observed",
-      "section": "change",
-      "repository_id": "repo:github:github.com:example/project",
-      "actor_id": "actor:github:github.com:42",
-      "occurred_at": "2026-07-29T09:30:00Z",
-      "summary": "Observed a commit adding evidence bundle replay",
-      "evidence_ids": ["evidence:commit:a"]
-    },
-    {
-      "id": "fact:release",
-      "kind": "release_published",
-      "section": "release",
-      "repository_id": "repo:github:github.com:example/project",
-      "occurred_at": "2026-07-31T12:00:00Z",
-      "summary": "Published v0.1.0 evidence contract preview",
-      "evidence_ids": ["evidence:release:v0.1.0"]
-    },
-    {
-      "id": "fact:comment",
-      "kind": "interaction_observed",
-      "section": "project",
-      "repository_id": "repo:github:github.com:example/project",
-      "actor_id": "actor:github:github.com:42",
-      "occurred_at": "2026-07-30T09:00:00Z",
-      "summary": "Observed an Issue comment without collecting its body",
-      "evidence_ids": ["evidence:comment:91"]
+  "collection": {
+    "groups": [
+      {
+        "provider": "github",
+        "instance": "github.com",
+        "group_status": "completed",
+        "limits": {
+          "timeout_seconds": 30.0,
+          "max_retries": 2,
+          "max_pages": 100,
+          "max_requests": 1000,
+          "retry_jitter_seconds": 0.25,
+          "retry_after_max_seconds": 60.0
+        },
+        "metrics": {
+          "request_count": 12,
+          "page_count": 11,
+          "retry_count": 0,
+          "budget_exhausted": false,
+          "cache_hits": 0,
+          "cache_misses": 0,
+          "cache_enabled": false,
+          "insecure_transport": false
+        }
+      }
+    ],
+    "metrics": {
+      "request_count": 12,
+      "page_count": 11,
+      "retry_count": 0,
+      "budget_exhausted": false,
+      "cache_hits": 0,
+      "cache_misses": 0,
+      "cache_enabled": false,
+      "insecure_transport": false
     }
-  ],
+  },
+  "privacy": {
+    "actor_display": "anonymous",
+    "source_urls": "sanitized",
+    "auth_redaction": true
+  },
   "coverage": {
     "required_sources": [
       "repositories",
       "work_items",
-      "change_requests",
+      "change_request_observations",
+      "change_request_merges",
       "interactions",
       "commits",
       "releases"
     ],
     "observations": [
-      {"source": "repositories", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported"},
-      {"source": "work_items", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported", "diagnostics": {"pagination": {"outcome": "link_exhausted", "complete": true}}},
-      {"source": "change_requests", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported", "diagnostics": {"pagination": {"outcome": "link_exhausted", "complete": true}}},
-      {"source": "interactions", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported", "note": "metadata only", "diagnostics": {"pagination": {"outcome": "link_exhausted", "complete": true}}},
-      {"source": "commits", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported", "diagnostics": {"pagination": {"outcome": "link_exhausted", "complete": true}}},
-      {"source": "releases", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "supported", "diagnostics": {"pagination": {"outcome": "link_exhausted", "complete": true}}},
-      {"source": "ref_changes", "provider_id": "provider:github:github.com", "repository_id": "repo:github:github.com:example/project", "status": "unavailable", "note": "activity API not enabled; ref completeness is not claimed"}
+      {
+        "source": "repositories",
+        "provider_id": "provider:github:github.com",
+        "repository_id": "repo:github:github.com:example/project",
+        "status": "supported",
+        "note": "repository resource observed"
+      },
+      {
+        "source": "work_items",
+        "provider_id": "provider:github:github.com",
+        "repository_id": "repo:github:github.com:example/project",
+        "status": "supported",
+        "note": "1 page(s)",
+        "diagnostics": {
+          "pagination": {
+            "outcome": "link_exhausted",
+            "complete": true
+          }
+        }
+      },
+      {
+        "source": "change_request_observations",
+        "provider_id": "provider:github:github.com",
+        "repository_id": "repo:github:github.com:example/project",
+        "status": "supported",
+        "note": "1 page(s)",
+        "diagnostics": {
+          "pagination": {
+            "outcome": "link_exhausted",
+            "complete": true
+          }
+        }
+      },
+      {
+        "source": "change_request_merges",
+        "provider_id": "provider:github:github.com",
+        "repository_id": "repo:github:github.com:example/project",
+        "status": "supported",
+        "note": "1 page(s)",
+        "diagnostics": {
+          "pagination": {
+            "outcome": "link_exhausted",
+            "complete": true
+          }
+        }
+      },
+      {
+        "source": "interactions",
+        "provider_id": "provider:github:github.com",
+        "repository_id": "repo:github:github.com:example/project",
+        "status": "supported",
+        "diagnostics": {
+          "pagination": {
+            "outcome": "link_exhausted",
+            "complete": true
+          }
+        }
+      },
+      {
+        "source": "commits",
+        "provider_id": "provider:github:github.com",
+        "repository_id": "repo:github:github.com:example/project",
+        "status": "supported",
+        "note": "1 page(s)",
+        "diagnostics": {
+          "pagination": {
+            "outcome": "link_exhausted",
+            "complete": true
+          }
+        }
+      },
+      {
+        "source": "releases",
+        "provider_id": "provider:github:github.com",
+        "repository_id": "repo:github:github.com:example/project",
+        "status": "supported",
+        "note": "1 page(s)",
+        "diagnostics": {
+          "pagination": {
+            "outcome": "link_exhausted",
+            "complete": true
+          }
+        }
+      },
+      {
+        "source": "activities",
+        "provider_id": "provider:github:github.com",
+        "repository_id": "repo:github:github.com:example/project",
+        "status": "unavailable",
+        "note": "activity API disabled; push/ref completeness is not claimed"
+      },
+      {
+        "source": "ref_changes",
+        "provider_id": "provider:github:github.com",
+        "repository_id": "repo:github:github.com:example/project",
+        "status": "unavailable",
+        "note": "activity API disabled; push/ref completeness is not claimed"
+      }
     ],
     "fatal": [],
+    "group_failures": [],
     "warnings": [
+      {
+        "code": "optional_coverage_warning",
+        "source": "activities",
+        "provider_id": "provider:github:github.com",
+        "repository_id": "repo:github:github.com:example/project",
+        "status": "unavailable",
+        "message": "activity API disabled; push/ref completeness is not claimed"
+      },
       {
         "code": "optional_coverage_warning",
         "source": "ref_changes",
         "provider_id": "provider:github:github.com",
         "repository_id": "repo:github:github.com:example/project",
         "status": "unavailable",
-        "message": "activity API not enabled; ref completeness is not claimed"
+        "message": "activity API disabled; push/ref completeness is not claimed"
       }
     ],
-    "allow_publish": true
-  }
+    "render_eligible": true
+  },
+  "bundle_digest": "bundle:sha256:fbf9eb9ffa68203923b31a0106f6a71e77bb5f9b4d0113119365bc9f35dd964b"
 }

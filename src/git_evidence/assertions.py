@@ -53,22 +53,22 @@ def build_assertions(bundle: Mapping[str, Any]) -> list[dict[str, Any]]:
                 )
             ):
                 continue
-            predicate = default_predicate
-            if collection_name == "change_requests" and (
-                entity.get("merged_at") is not None or entity.get("state") == "merged"
-            ):
-                predicate = "change_request.merged.v1"
-            assertion: dict[str, Any] = {
-                "id": f"assertion:{predicate}:{subject_id}",
-                "subject_type": subject_type,
-                "subject_id": subject_id,
-                "predicate": predicate,
-                "occurred_at": occurred_at,
-                "repository_id": repository_id,
-                "evidence_ids": evidence_ids,
-            }
-            actor_id = entity.get("actor_id")
-            if isinstance(actor_id, str) and actor_id:
-                assertion["actor_id"] = actor_id
-            assertions.append(assertion)
+            events = [(default_predicate, occurred_at)]
+            merged_at = entity.get("merged_at")
+            if collection_name == "change_requests" and isinstance(merged_at, str):
+                events.append(("change_request.merged.v1", merged_at))
+            for predicate, event_time in events:
+                assertion: dict[str, Any] = {
+                    "id": f"assertion:{predicate}:{subject_id}",
+                    "subject_type": subject_type,
+                    "subject_id": subject_id,
+                    "predicate": predicate,
+                    "occurred_at": event_time,
+                    "repository_id": repository_id,
+                    "evidence_ids": evidence_ids,
+                }
+                actor_id = entity.get("actor_id")
+                if isinstance(actor_id, str) and actor_id:
+                    assertion["actor_id"] = actor_id
+                assertions.append(assertion)
     return sorted(assertions, key=lambda item: item["id"])

@@ -72,20 +72,16 @@ jobs:
           import json
           from importlib.resources import files
 
-          for version in ("0.1", "0.2"):
-              schema = files("git_evidence").joinpath(
-                  f"schemas/evidence-bundle-{version}.schema.json"
-              ).read_text(encoding="utf-8")
-              assert json.loads(schema)["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+          schema = files("git_evidence").joinpath(
+              "schemas/evidence-bundle-0.3.schema.json"
+          ).read_text(encoding="utf-8")
+          assert json.loads(schema)["$schema"] == "https://json-schema.org/draft/2020-12/schema"
           assert files("git_evidence").joinpath("py.typed").is_file()
           PY
           "$smoke_root/venv/bin/git-evidence" --version
           "$smoke_root/venv/bin/git-evidence" providers > providers.json
           "$smoke_root/venv/bin/git-evidence" doctor --config "$repo/config.example.toml"
           "$smoke_root/venv/bin/git-evidence" validate "$repo/fixtures/example_bundle.json"
-          "$smoke_root/venv/bin/git-evidence" migrate \
-            "$repo/fixtures/example_bundle.json" --output migrated.json
-          "$smoke_root/venv/bin/git-evidence" validate migrated.json
           "$smoke_root/venv/bin/git-evidence" render \
             "$repo/fixtures/example_bundle.json" \
             --config "$repo/config.example.toml" \

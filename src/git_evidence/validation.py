@@ -4,12 +4,11 @@ import json
 import math
 import re
 from collections.abc import Iterable, Mapping
-from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from importlib.resources import files
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -33,8 +32,10 @@ from .providers.base import (
     is_verifiable_sha,
     merge_capability_status,
     validate_instance,
+    validate_timezone,
 )
 from .providers.resource_base import repository_url_matches_target
+from .time import TimeValueError, parse_instant
 
 CAPABILITY_STATES = {"supported", "unsupported", "unavailable", "incomplete"}
 ASSOCIATION_STATES = {"linked", "unlinked", "ambiguous", "unknown"}
@@ -90,10 +91,8 @@ SUBJECT_COLLECTIONS = {
     "ref_change": "ref_changes",
     "release": "releases",
 }
-FACT_SUBJECT_TYPES = tuple(SUBJECT_COLLECTIONS)
 SCHEMA_RESOURCES = {
-    "0.1": "schemas/evidence-bundle-0.1.schema.json",
-    "0.2": "schemas/evidence-bundle-0.2.schema.json",
+    "0.3": "schemas/evidence-bundle-0.3.schema.json",
 }
 RFC3339_DATE_TIME = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
@@ -252,7 +251,6 @@ def _issue(
         "commit": "$.commits",
         "interaction": "$.interactions",
         "association": "$.ref_changes",
-        "fact": "$.facts",
         "evidence": "$.evidence",
         "entity": "$",
         "provenance": "$",
@@ -299,6 +297,35 @@ def _schema_validator(schema_version: str) -> Draft202012Validator:
     return Draft202012Validator(schema, format_checker=checker)
 
 
+@lru_cache(maxsize=1)
+def _provider_fragment_schema_validator() -> Draft202012Validator:
+    """Project the canonical 0.3 record schemas onto the internal fragment."""
+    canonical = _schema_validator("0.3")
+    canonical_schema = cast(dict[str, Any], canonical.schema)
+    canonical_properties = canonical_schema["properties"]
+    fragment_properties = {
+        "fragment_version": {"const": "0.3"},
+        "window": canonical_schema["$defs"]["window"],
+        "scope": canonical_schema["$defs"]["scope"],
+        **{
+            key: canonical_properties[key]
+            for key in (*COLLECTION_KEYS, "retrievals", "assertions")
+        },
+        "collection": canonical_properties["collection"],
+        "privacy": canonical_properties["privacy"],
+        "coverage": canonical_properties["coverage"],
+    }
+    fragment_schema = {
+        "$schema": canonical_schema["$schema"],
+        "type": "object",
+        "additionalProperties": False,
+        "required": [key for key in fragment_properties if key != "privacy"],
+        "properties": fragment_properties,
+        "$defs": canonical_schema["$defs"],
+    }
+    return cast(Draft202012Validator, canonical.evolve(schema=fragment_schema))
+
+
 def _schema_path(path: Iterable[Any]) -> str:
     rendered = "$"
     for part in path:
@@ -338,14 +365,39 @@ def _validate_schema(
         )
 
 
+def _validate_provider_fragment_schema(
+    value: Any, issues: list[ValidationIssue]
+) -> None:
+    try:
+        validator = _provider_fragment_schema_validator()
+    except (OSError, json.JSONDecodeError, SchemaError, KeyError) as exc:
+        _issue(issues, "schema.load", f"cannot load provider fragment schema: {exc}")
+        return
+    errors = sorted(
+        validator.iter_errors(value),
+        key=lambda error: (
+            tuple(str(part) for part in error.absolute_path),
+            str(error.validator),
+            error.message,
+        ),
+    )
+    for error in errors:
+        _issue(
+            issues,
+            f"schema.{error.validator}",
+            f"{_schema_path(error.absolute_path)}: {error.message}",
+            path=_schema_path(error.absolute_path),
+            remediation="Emit a provider fragment that conforms to Schema 0.3 record shapes.",
+        )
+
+
 def _parse_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
     try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
+        return parse_instant(value)
+    except TimeValueError:
         return None
-    return parsed if parsed.tzinfo is not None else None
 
 
 def _validate_ids(
@@ -379,19 +431,21 @@ def _validate_ids(
     return indexes
 
 
-def _validate_run(
+def _validate_plan_scope(
     bundle: dict[str, Any], issues: list[ValidationIssue]
 ) -> tuple[set[str], set[str] | None]:
-    run = bundle.get("run")
-    if not isinstance(run, dict):
-        _issue(issues, "run.missing", "run must be an object")
+    plan = bundle.get("plan")
+    if not isinstance(plan, dict):
+        _issue(issues, "plan.missing", "plan must be an object", path="$.plan")
         return set(), None
-    run_id = run.get("run_id")
-    if not isinstance(run_id, str) or not run_id.strip():
-        _issue(issues, "run.run_id", "run.run_id must be a non-empty string")
-    window = run.get("window")
+    window = plan.get("window")
     if not isinstance(window, dict):
-        _issue(issues, "window.missing", "run.window must be an object")
+        _issue(
+            issues,
+            "window.missing",
+            "plan.window must be an object",
+            path="$.plan.window",
+        )
     else:
         start = _parse_timestamp(window.get("start"))
         end = _parse_timestamp(window.get("end"))
@@ -403,11 +457,15 @@ def _validate_run(
             )
         elif start >= end:
             _issue(issues, "window.order", "window start must be before end")
-        if not isinstance(window.get("timezone"), str) or not window["timezone"]:
-            _issue(issues, "window.timezone", "window.timezone must be non-empty")
-    scope = run.get("scope")
+        try:
+            validate_timezone(window.get("timezone"))
+        except ValueError as exc:
+            _issue(issues, "window.timezone", str(exc), path="$.plan.window.timezone")
+    scope = plan.get("scope")
     if not isinstance(scope, dict):
-        _issue(issues, "scope.missing", "run.scope must be an object")
+        _issue(
+            issues, "scope.missing", "plan.scope must be an object", path="$.plan.scope"
+        )
         return set(), None
     repositories = scope.get("repositories")
     if (
@@ -418,7 +476,7 @@ def _validate_run(
         _issue(
             issues,
             "scope.repositories",
-            "run.scope.repositories must be a non-empty id allowlist",
+            "plan.scope.repositories must be a non-empty id allowlist",
         )
         return set(), None
     if len(repositories) != len(set(repositories)):
@@ -468,26 +526,24 @@ def _validate_evidence(
                 _issue(
                     issues, "evidence.url", f"evidence {evidence_id} has an invalid URL"
                 )
-    for fact_id, fact in indexes.get("facts", {}).items():
-        evidence_ids = fact.get("evidence_ids")
-        if not isinstance(evidence_ids, list) or not evidence_ids:
-            _issue(issues, "fact.evidence", f"fact {fact_id} has no evidence_ids")
-            continue
-        for evidence_id in evidence_ids:
-            if not isinstance(evidence_id, str) or evidence_id not in evidence:
+        if item.get("subject_type") == "commit":
+            subject_id = item.get("subject_id")
+            commit = (
+                indexes.get("commits", {}).get(subject_id)
+                if isinstance(subject_id, str)
+                else None
+            )
+            native_identity = item.get("native_identity")
+            if isinstance(commit, dict) and (
+                not isinstance(native_identity, dict)
+                or native_identity.get("state") != "known"
+                or native_identity.get("value") != commit.get("sha")
+            ):
                 _issue(
                     issues,
-                    "fact.evidence_ref",
-                    f"fact {fact_id} references missing evidence {evidence_id}",
+                    "evidence.commit_native_identity",
+                    f"evidence {evidence_id} native identity does not match its commit SHA",
                 )
-                continue
-            _validate_fact_evidence_subject(
-                fact_id,
-                fact,
-                evidence[evidence_id],
-                indexes,
-                issues,
-            )
     commits = indexes.get("commits", {})
     change_requests = indexes.get("change_requests", {})
     for ref_change_id, ref_change in indexes.get("ref_changes", {}).items():
@@ -528,147 +584,6 @@ def _validate_evidence(
                     "ref_change.commit_ref",
                     f"ref_change {ref_change_id} references missing commit {commit_id}",
                 )
-
-
-def _inferred_fact_subject_type(fact: dict[str, Any]) -> str | None:
-    explicit_type = fact.get("subject_type")
-    if explicit_type is not None:
-        return explicit_type if isinstance(explicit_type, str) else None
-    kind = fact.get("kind")
-    if not isinstance(kind, str):
-        return None
-    for subject_type in sorted(FACT_SUBJECT_TYPES, key=len, reverse=True):
-        if kind == subject_type or kind.startswith(f"{subject_type}_"):
-            return subject_type
-    return None
-
-
-def _validate_fact_evidence_subject(
-    fact_id: str,
-    fact: dict[str, Any],
-    evidence: dict[str, Any],
-    indexes: dict[str, dict[str, dict[str, Any]]],
-    issues: list[ValidationIssue],
-) -> None:
-    fact_subject_type = fact.get("subject_type")
-    fact_subject_id = fact.get("subject_id")
-    if (fact_subject_type is None) != (fact_subject_id is None):
-        _issue(
-            issues,
-            "fact.subject",
-            f"fact {fact_id} must provide both subject_type and subject_id",
-        )
-    if fact_subject_type is not None and (
-        not isinstance(fact_subject_type, str) or not fact_subject_type
-    ):
-        _issue(issues, "fact.subject", f"fact {fact_id} has an invalid subject_type")
-    if fact_subject_id is not None and (
-        not isinstance(fact_subject_id, str) or not fact_subject_id
-    ):
-        _issue(issues, "fact.subject", f"fact {fact_id} has an invalid subject_id")
-
-    expected_type = _inferred_fact_subject_type(fact)
-    expected_id = (
-        fact_subject_id
-        if isinstance(fact_subject_id, str) and fact_subject_id
-        else None
-    )
-    subject_type = evidence.get("subject_type")
-    subject_id = evidence.get("subject_id")
-    if subject_type is None and subject_id is None:
-        if expected_type is not None or fact_subject_type is not None:
-            _issue(
-                issues,
-                "fact.evidence_subject",
-                f"fact {fact_id} evidence {evidence.get('id')} must bind to a subject",
-            )
-        return
-    if not isinstance(subject_type, str) or not subject_type:
-        _issue(
-            issues,
-            "fact.evidence_subject",
-            f"fact {fact_id} evidence {evidence.get('id')} has an invalid subject_type",
-        )
-        return
-    if not isinstance(subject_id, str) or not subject_id:
-        _issue(
-            issues,
-            "fact.evidence_subject",
-            f"fact {fact_id} evidence {evidence.get('id')} has an invalid subject_id",
-        )
-        return
-    if expected_type is not None and subject_type != expected_type:
-        _issue(
-            issues,
-            "fact.evidence_subject",
-            f"fact {fact_id} evidence {evidence.get('id')} subject_type "
-            f"{subject_type!r} does not match {expected_type!r}",
-        )
-    if expected_id is not None and subject_id != expected_id:
-        _issue(
-            issues,
-            "fact.evidence_subject",
-            f"fact {fact_id} evidence {evidence.get('id')} subject_id "
-            f"{subject_id!r} does not match {expected_id!r}",
-        )
-
-    collection_key = SUBJECT_COLLECTIONS.get(subject_type)
-    if collection_key is None:
-        _issue(
-            issues,
-            "fact.evidence_subject",
-            f"fact {fact_id} evidence {evidence.get('id')} has unknown subject_type {subject_type!r}",
-        )
-        return
-    subject = indexes.get(collection_key, {}).get(subject_id)
-    if subject is None:
-        _issue(
-            issues,
-            "fact.evidence_subject_ref",
-            f"fact {fact_id} evidence {evidence.get('id')} references missing "
-            f"{subject_type} {subject_id}",
-        )
-        return
-
-    subject_provider_id = _entity_provider_id(subject_type, subject, indexes)
-    evidence_provider_id = evidence.get("provider_id")
-    if subject_provider_id:
-        if not isinstance(evidence_provider_id, str) or not evidence_provider_id:
-            _issue(
-                issues,
-                "fact.evidence_provenance",
-                f"fact {fact_id} evidence {evidence.get('id')} must provide provider_id",
-            )
-        elif evidence_provider_id != subject_provider_id:
-            _issue(
-                issues,
-                "fact.evidence_provenance",
-                f"fact {fact_id} evidence {evidence.get('id')} provider_id does not match subject",
-            )
-    elif evidence_provider_id is not None and (
-        not isinstance(evidence_provider_id, str)
-        or evidence_provider_id not in indexes.get("providers", {})
-    ):
-        _issue(
-            issues,
-            "fact.evidence_provenance",
-            f"fact {fact_id} evidence {evidence.get('id')} references an unknown provider",
-        )
-
-    fact_repository_id = fact.get("repository_id")
-    subject_repository_id = subject.get("repository_id")
-    if isinstance(fact_repository_id, str) and fact_repository_id:
-        if subject_type == "repository":
-            repository_matches = subject_id == fact_repository_id
-        else:
-            repository_matches = subject_repository_id == fact_repository_id
-        if not repository_matches:
-            _issue(
-                issues,
-                "fact.evidence_repository",
-                f"fact {fact_id} evidence {evidence.get('id')} subject is outside "
-                f"the fact repository {fact_repository_id}",
-            )
 
 
 def _provider_id_from_entity_id(
@@ -930,7 +845,7 @@ def _validate_provenance(
     entity_collections = tuple(
         key
         for key in COLLECTION_KEYS
-        if key not in {"providers", "repositories", "evidence", "facts"}
+        if key not in {"providers", "repositories", "evidence"}
     )
     for collection_key in entity_collections:
         singular = {
@@ -1070,7 +985,6 @@ def _validate_scope(
         "commits",
         "ref_changes",
         "releases",
-        "facts",
     ):
         for entity_id, item in indexes.get(key, {}).items():
             repository_id = item.get("repository_id")
@@ -1977,10 +1891,6 @@ def _validate_privacy(bundle: dict[str, Any], issues: list[ValidationIssue]) -> 
         )
 
     policy = bundle.get("privacy")
-    if policy is None:
-        # 0.1 bundles predating the explicit policy remain compatible; the
-        # renderer still applies the anonymous/default-deny behavior below.
-        return
     if not isinstance(policy, dict):
         _issue(issues, "privacy.policy_shape", "privacy must be an object")
         return
@@ -2038,108 +1948,6 @@ def _validate_collection_transport(
             pending.extend(item for item in nested_groups if isinstance(item, dict))
 
 
-def _validate_v01_intrinsic(
-    bundle: dict[str, Any],
-    *,
-    required_sources_contract: Iterable[str] | None = None,
-    check_schema: bool = True,
-) -> list[ValidationIssue]:
-    """Validate bundle content without trusting its publication declaration."""
-    issues: list[ValidationIssue] = []
-    if check_schema:
-        _validate_schema(bundle, issues, schema_version="0.1")
-    if not isinstance(bundle, dict):
-        return issues
-    if bundle.get("schema_version") != "0.1":
-        _issue(issues, "schema.version", "schema_version must be '0.1'")
-    indexes = _validate_ids(bundle, issues)
-    scope_repository_ids, scope_actor_ids = _validate_run(bundle, issues)
-    _validate_provenance(indexes, issues)
-    _validate_scope(indexes, scope_repository_ids, scope_actor_ids, issues)
-    _validate_interactions(indexes, issues)
-    _validate_evidence(indexes, issues)
-    _validate_privacy(bundle, issues)
-    _validate_collection_transport(bundle, issues)
-    contract = (
-        tuple(RESOURCE_SOURCES)
-        if required_sources_contract is None
-        else tuple(required_sources_contract)
-    )
-    _validate_coverage(bundle, indexes, scope_repository_ids, issues, contract)
-    run = bundle.get("run")
-    window = run.get("window") if isinstance(run, dict) else None
-    window_start = (
-        _parse_timestamp(window.get("start")) if isinstance(window, dict) else None
-    )
-    window_end = (
-        _parse_timestamp(window.get("end")) if isinstance(window, dict) else None
-    )
-    for key in COLLECTION_KEYS:
-        for entity_id, item in indexes.get(key, {}).items():
-            if "occurred_at" not in item:
-                continue
-            occurred_at = item.get("occurred_at")
-            parsed_at = _parse_timestamp(occurred_at)
-            if parsed_at is None:
-                _issue(
-                    issues,
-                    "entity.timestamp",
-                    f"{key} {entity_id} has an invalid occurred_at",
-                )
-            elif (
-                window_start is not None
-                and window_end is not None
-                and not window_start <= parsed_at < window_end
-            ):
-                _issue(
-                    issues,
-                    "entity.timestamp_window",
-                    f"{key} {entity_id} occurred_at must be within "
-                    f"[{window.get('start')}, {window.get('end')})",
-                )
-    for entity_id, item in indexes.get("commits", {}).items():
-        sha = item.get("sha")
-        algorithm = git_object_id_algorithm(sha)
-        if algorithm is None or not is_verifiable_sha(sha):
-            code = (
-                "commit.sha_missing"
-                if not isinstance(sha, str) or not sha.strip()
-                else "commit.sha_unverifiable"
-            )
-            _issue(issues, code, f"commit {entity_id} has no verifiable sha")
-        elif not entity_id.endswith(f":{sha}"):
-            _issue(
-                issues,
-                "commit.sha_mismatch",
-                f"commit {entity_id} sha does not match its canonical id",
-            )
-        if algorithm is not None and item.get("hash_algorithm") != algorithm:
-            _issue(
-                issues,
-                "commit.hash_algorithm",
-                f"commit {entity_id} hash_algorithm does not match its object id",
-            )
-    for entity_id, item in indexes.get("ref_changes", {}).items():
-        association = item.get("change_association")
-        if not isinstance(association, str) or association not in ASSOCIATION_STATES:
-            _issue(
-                issues,
-                "association.state",
-                f"ref_change {entity_id} has invalid change_association",
-            )
-    return issues
-
-
-_FACT_KIND_BY_PREDICATE = {
-    "work_item.observed.v1": ("work_item_observed", "project"),
-    "change_request.observed.v1": ("change_request_observed", "change"),
-    "change_request.merged.v1": ("change_request_merged", "release"),
-    "interaction.observed.v1": ("interaction_observed", "project"),
-    "commit.observed.v1": ("commit_observed", "change"),
-    "ref_change.observed.v1": ("ref_change_observed", "change"),
-    "release.observed.v1": ("release_observed", "release"),
-    "release.published.v1": ("release_published", "release"),
-}
 _SUBJECT_TYPE_BY_PREDICATE = {
     "work_item.observed.v1": "work_item",
     "change_request.observed.v1": "change_request",
@@ -2151,70 +1959,222 @@ _SUBJECT_TYPE_BY_PREDICATE = {
     "release.published.v1": "release",
 }
 
+_OBSERVED_PREDICATE_BY_COLLECTION = {
+    "work_items": "work_item.observed.v1",
+    "change_requests": "change_request.observed.v1",
+    "interactions": "interaction.observed.v1",
+    "commits": "commit.observed.v1",
+    "ref_changes": "ref_change.observed.v1",
+    "releases": "release.observed.v1",
+}
 
-def _v02_semantic_view(bundle: dict[str, Any]) -> dict[str, Any]:
-    """Build a non-serialized v0.1-shaped view for shared semantic checks."""
-    view = deepcopy(bundle)
-    plan = view.get("plan") if isinstance(view.get("plan"), dict) else {}
-    view["schema_version"] = "0.1"
-    view["run"] = {
-        "run_id": f"compat:{view.get('plan_id', 'unknown')}",
-        "window": deepcopy(plan.get("window")),
-        "scope": deepcopy(plan.get("scope")),
-    }
-    subjects: dict[str, dict[str, Any]] = {}
-    for key in (
-        "repositories",
-        "actors",
-        "work_items",
-        "change_requests",
-        "interactions",
-        "commits",
-        "ref_changes",
-        "releases",
-    ):
-        for item in view.get(key, []):
-            if isinstance(item, dict) and isinstance(item.get("id"), str):
-                subjects[item["id"]] = item
-    facts: list[dict[str, Any]] = []
-    for assertion in view.get("assertions", []):
+
+def _validate_assertions(
+    bundle: dict[str, Any],
+    indexes: dict[str, dict[str, dict[str, Any]]],
+    scope_repository_ids: set[str],
+    scope_actor_ids: set[str] | None,
+    issues: list[ValidationIssue],
+) -> None:
+    assertions = bundle.get("assertions")
+    if not isinstance(assertions, list):
+        _issue(issues, "collection.shape", "assertions must be an array")
+        return
+    actors = indexes.get("actors", {})
+    evidence_index = indexes.get("evidence", {})
+    seen_ids: set[str] = set()
+    asserted_events: set[tuple[str, str]] = set()
+    for position, assertion in enumerate(assertions):
+        path = f"$.assertions[{position}]"
         if not isinstance(assertion, dict):
+            _issue(issues, "assertion.shape", "assertion must be an object", path=path)
             continue
-        kind, section = _FACT_KIND_BY_PREDICATE.get(
-            assertion.get("predicate"),
-            (str(assertion.get("predicate") or "unknown"), "project"),
+        assertion_id = assertion.get("id")
+        if not isinstance(assertion_id, str) or not assertion_id:
+            _issue(
+                issues,
+                "assertion.id",
+                "assertion must have a non-empty id",
+                path=f"{path}.id",
+            )
+        elif assertion_id in seen_ids:
+            _issue(
+                issues,
+                "assertion.duplicate_id",
+                f"duplicate assertion id: {assertion_id}",
+                path=f"{path}.id",
+            )
+        else:
+            seen_ids.add(assertion_id)
+
+        subject_type = assertion.get("subject_type")
+        subject_id = assertion.get("subject_id")
+        predicate = assertion.get("predicate")
+        if isinstance(subject_id, str) and isinstance(predicate, str):
+            asserted_events.add((subject_id, predicate))
+        expected_subject_type = _SUBJECT_TYPE_BY_PREDICATE.get(predicate)
+        if expected_subject_type is not None and subject_type != expected_subject_type:
+            _issue(
+                issues,
+                "assertion.predicate_subject",
+                f"assertion {assertion_id} predicate requires subject_type {expected_subject_type}",
+                path=f"{path}.subject_type",
+            )
+        subject_collection = SUBJECT_COLLECTIONS.get(subject_type)
+        subject = indexes.get(subject_collection or "", {}).get(subject_id)
+        if subject is None:
+            _issue(
+                issues,
+                "assertion.subject_missing",
+                f"assertion {assertion_id} references an unknown subject",
+                path=f"{path}.subject_id",
+            )
+        elif expected_subject_type is not None:
+            subject_time_field = (
+                "merged_at"
+                if predicate == "change_request.merged.v1"
+                else "occurred_at"
+            )
+            assertion_time = _parse_timestamp(assertion.get("occurred_at"))
+            subject_time = _parse_timestamp(subject.get(subject_time_field))
+            if (
+                assertion_time is None
+                or subject_time is None
+                or assertion_time != subject_time
+            ):
+                _issue(
+                    issues,
+                    "assertion.event_time",
+                    f"assertion {assertion_id} occurred_at does not match subject {subject_time_field}",
+                    path=f"{path}.occurred_at",
+                )
+        repository_id = assertion.get("repository_id")
+        subject_repository_id = (
+            subject.get("repository_id") if isinstance(subject, dict) else None
         )
-        subject = subjects.get(assertion.get("subject_id"), {})
-        summary = (
-            subject.get("title")
-            or subject.get("name")
-            or subject.get("tag")
-            or assertion.get("predicate")
+        if subject_type == "repository" and isinstance(subject, dict):
+            subject_repository_id = subject.get("id")
+        if repository_id != subject_repository_id:
+            _issue(
+                issues,
+                "assertion.repository",
+                f"assertion {assertion_id} repository does not match its subject",
+                path=f"{path}.repository_id",
+            )
+        if (
+            not isinstance(repository_id, str)
+            or repository_id not in scope_repository_ids
+        ):
+            _issue(
+                issues,
+                "scope.entity_outside",
+                f"assertion {assertion_id} is outside the repository allowlist",
+                path=f"{path}.repository_id",
+            )
+
+        evidence_ids = assertion.get("evidence_ids")
+        if not isinstance(evidence_ids, list) or not evidence_ids:
+            _issue(
+                issues,
+                "assertion.evidence",
+                f"assertion {assertion_id} must reference evidence",
+                path=f"{path}.evidence_ids",
+            )
+        else:
+            for evidence_id in evidence_ids:
+                evidence = evidence_index.get(evidence_id)
+                if evidence is None:
+                    _issue(
+                        issues,
+                        "assertion.evidence_ref",
+                        f"assertion {assertion_id} references unknown evidence {evidence_id}",
+                        path=f"{path}.evidence_ids",
+                    )
+                    continue
+                if (
+                    evidence.get("subject_type") != subject_type
+                    or evidence.get("subject_id") != subject_id
+                ):
+                    _issue(
+                        issues,
+                        "assertion.evidence_subject",
+                        f"assertion {assertion_id} evidence does not match its subject",
+                        path=f"{path}.evidence_ids",
+                    )
+                evidence_subject = indexes.get(subject_collection or "", {}).get(
+                    evidence.get("subject_id")
+                )
+                evidence_repository_id = (
+                    evidence_subject.get("repository_id")
+                    if isinstance(evidence_subject, dict)
+                    else None
+                )
+                if evidence_repository_id != repository_id:
+                    _issue(
+                        issues,
+                        "assertion.evidence_repository",
+                        f"assertion {assertion_id} evidence resolves to a different repository",
+                        path=f"{path}.evidence_ids",
+                    )
+
+        actor_id = assertion.get("actor_id")
+        if actor_id is not None:
+            if not isinstance(actor_id, str) or not actor_id:
+                _issue(
+                    issues,
+                    "scope.actor_ref_invalid",
+                    f"assertion {assertion_id} has an invalid actor_id",
+                    path=f"{path}.actor_id",
+                )
+            else:
+                if actor_id not in actors:
+                    _issue(
+                        issues,
+                        "scope.actor_ref_missing",
+                        f"assertion {assertion_id} references missing actor {actor_id}",
+                        path=f"{path}.actor_id",
+                    )
+                if scope_actor_ids and actor_id not in scope_actor_ids:
+                    _issue(
+                        issues,
+                        "scope.actor_outside",
+                        f"assertion {assertion_id} has an actor outside the actor allowlist",
+                        path=f"{path}.actor_id",
+                    )
+
+    for collection_key, predicate in _OBSERVED_PREDICATE_BY_COLLECTION.items():
+        for subject_id, subject in indexes.get(collection_key, {}).items():
+            if (
+                isinstance(subject.get("occurred_at"), str)
+                and (subject_id, predicate) not in asserted_events
+            ):
+                _issue(
+                    issues,
+                    "assertion.observation_missing",
+                    f"{collection_key} {subject_id} has no {predicate} assertion",
+                )
+
+    for change_request_id, change_request in indexes.get("change_requests", {}).items():
+        merged_at = change_request.get("merged_at")
+        merged_event = (
+            change_request_id,
+            "change_request.merged.v1",
         )
-        fact = {
-            key: deepcopy(value)
-            for key, value in assertion.items()
-            if key
-            in {
-                "id",
-                "subject_type",
-                "subject_id",
-                "repository_id",
-                "actor_id",
-                "occurred_at",
-                "evidence_ids",
-            }
-        }
-        fact.update({"kind": kind, "section": section, "summary": summary})
-        facts.append(fact)
-    view["facts"] = facts
-    coverage = view.get("coverage")
-    if isinstance(coverage, dict):
-        coverage["allow_publish"] = coverage.get("render_eligible")
-    return view
+        if isinstance(merged_at, str) and merged_event not in asserted_events:
+            _issue(
+                issues,
+                "assertion.change_request_merge_missing",
+                f"change request {change_request_id} has no merge assertion",
+            )
+        if merged_event in asserted_events and not isinstance(merged_at, str):
+            _issue(
+                issues,
+                "assertion.change_request_merge_time",
+                f"change request {change_request_id} merge assertion has no merged_at",
+            )
 
 
-def _validate_v02_identity_and_retrievals(
+def _validate_v03_identity_and_retrievals(
     bundle: dict[str, Any],
     issues: list[ValidationIssue],
     *,
@@ -2284,7 +2244,6 @@ def _validate_v02_identity_and_retrievals(
     }
     plan_provider_pairs: list[tuple[str, str]] = []
     plan_sources: dict[str, set[str]] = {}
-    plan_origin = plan.get("origin") if isinstance(plan, dict) else None
     if isinstance(plan, dict) and isinstance(plan.get("providers"), list):
         for position, provider in enumerate(plan["providers"]):
             if not isinstance(provider, dict):
@@ -2301,13 +2260,6 @@ def _validate_v02_identity_and_retrievals(
                 plan_sources[provider_id] = {
                     source for source in sources if isinstance(source, str)
                 }
-            if plan_origin == "legacy_migration" and "options" in provider:
-                _issue(
-                    issues,
-                    "plan.legacy_options",
-                    "a legacy migration cannot claim unavailable collection options",
-                    path=f"$.plan.providers[{position}].options",
-                )
     if len(plan_provider_pairs) != len(set(plan_provider_pairs)):
         _issue(
             issues,
@@ -2464,7 +2416,6 @@ def _validate_v02_identity_and_retrievals(
             "last_modified",
             "api_version",
             "payload_digest",
-            "extensions",
         }
         mode_fields = {
             "live": common_fields | {"fetched_at"},
@@ -2477,15 +2428,6 @@ def _validate_v02_identity_and_retrievals(
                 "cache_ttl_seconds",
             },
             "recorded_replay": common_fields | {"replayed_at"},
-            "legacy_import": {
-                "id",
-                "provider_id",
-                "mode",
-                "endpoint_kind",
-                "target_ref",
-                "source_artifact_digest",
-                "extensions",
-            },
         }
         allowed_fields = mode_fields.get(retrieval.get("mode"))
         if allowed_fields is not None and set(retrieval) - allowed_fields:
@@ -2515,54 +2457,134 @@ def _validate_v02_identity_and_retrievals(
                 f"evidence {evidence.get('id')} and its Retrieval use different providers",
                 path=f"$.evidence[{position}].retrieval_id",
             )
-        if retrieval.get("mode") != "legacy_import":
-            subject_repository = subject_repositories.get(evidence.get("subject_id"))
-            if subject_repository != retrieval.get("repository_id"):
-                _issue(
-                    issues,
-                    "evidence.retrieval_repository",
-                    f"evidence {evidence.get('id')} and its Retrieval use different repositories",
-                    path=f"$.evidence[{position}].retrieval_id",
-                )
-    for position, assertion in enumerate(bundle.get("assertions", [])):
-        if not isinstance(assertion, dict):
-            continue
-        expected_subject_type = _SUBJECT_TYPE_BY_PREDICATE.get(
-            assertion.get("predicate")
-        )
-        if (
-            expected_subject_type is not None
-            and assertion.get("subject_type") != expected_subject_type
-        ):
+        subject_repository = subject_repositories.get(evidence.get("subject_id"))
+        if subject_repository != retrieval.get("repository_id"):
             _issue(
                 issues,
-                "assertion.predicate_subject",
-                f"assertion {assertion.get('id')} predicate requires subject_type {expected_subject_type}",
-                path=f"$.assertions[{position}].subject_type",
+                "evidence.retrieval_repository",
+                f"evidence {evidence.get('id')} and its Retrieval use different repositories",
+                path=f"$.evidence[{position}].retrieval_id",
             )
 
 
-def _validate_v02_intrinsic(
+def _validate_event_and_revision_semantics(
+    bundle: dict[str, Any],
+    indexes: dict[str, dict[str, dict[str, Any]]],
+    window: Any,
+    issues: list[ValidationIssue],
+) -> None:
+    window_start = (
+        _parse_timestamp(window.get("start")) if isinstance(window, dict) else None
+    )
+    window_end = (
+        _parse_timestamp(window.get("end")) if isinstance(window, dict) else None
+    )
+    for key in COLLECTION_KEYS:
+        for entity_id, item in indexes.get(key, {}).items():
+            if "occurred_at" not in item:
+                continue
+            parsed_at = _parse_timestamp(item.get("occurred_at"))
+            if parsed_at is None:
+                _issue(
+                    issues,
+                    "entity.timestamp",
+                    f"{key} {entity_id} has an invalid occurred_at",
+                )
+            elif (
+                window_start is not None
+                and window_end is not None
+                and not window_start <= parsed_at < window_end
+            ):
+                _issue(
+                    issues,
+                    "entity.timestamp_window",
+                    f"{key} {entity_id} occurred_at must be within "
+                    f"[{window.get('start')}, {window.get('end')})",
+                )
+    for assertion in bundle.get("assertions", []):
+        if not isinstance(assertion, dict):
+            continue
+        parsed_at = _parse_timestamp(assertion.get("occurred_at"))
+        if parsed_at is None:
+            _issue(
+                issues,
+                "entity.timestamp",
+                f"assertion {assertion.get('id')} has an invalid occurred_at",
+            )
+        elif (
+            window_start is not None
+            and window_end is not None
+            and not window_start <= parsed_at < window_end
+        ):
+            _issue(
+                issues,
+                "entity.timestamp_window",
+                f"assertion {assertion.get('id')} occurred_at must be within "
+                f"[{window.get('start')}, {window.get('end')})",
+            )
+    for entity_id, item in indexes.get("commits", {}).items():
+        sha = item.get("sha")
+        algorithm = git_object_id_algorithm(sha)
+        if algorithm is None or not is_verifiable_sha(sha):
+            code = (
+                "commit.sha_missing"
+                if not isinstance(sha, str) or not sha.strip()
+                else "commit.sha_unverifiable"
+            )
+            _issue(issues, code, f"commit {entity_id} has no verifiable sha")
+        elif not entity_id.endswith(f":{sha}"):
+            _issue(
+                issues,
+                "commit.sha_mismatch",
+                f"commit {entity_id} sha does not match its canonical id",
+            )
+        if algorithm is not None and item.get("hash_algorithm") != algorithm:
+            _issue(
+                issues,
+                "commit.hash_algorithm",
+                f"commit {entity_id} hash_algorithm does not match its object id",
+            )
+    for entity_id, item in indexes.get("ref_changes", {}).items():
+        association = item.get("change_association")
+        if not isinstance(association, str) or association not in ASSOCIATION_STATES:
+            _issue(
+                issues,
+                "association.state",
+                f"ref_change {entity_id} has invalid change_association",
+            )
+
+
+def _validate_v03_intrinsic(
     bundle: dict[str, Any],
     *,
     required_sources_contract: Iterable[str] | None = None,
     verify_bundle_digest: bool = True,
 ) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
-    _validate_schema(bundle, issues, schema_version="0.2")
-    _validate_v02_identity_and_retrievals(
+    _validate_schema(bundle, issues, schema_version="0.3")
+    _validate_v03_identity_and_retrievals(
         bundle,
         issues,
         verify_bundle_digest=verify_bundle_digest,
     )
-    view = _v02_semantic_view(bundle)
-    issues.extend(
-        _validate_v01_intrinsic(
-            view,
-            required_sources_contract=required_sources_contract,
-            check_schema=False,
-        )
+    indexes = _validate_ids(bundle, issues)
+    scope_repository_ids, scope_actor_ids = _validate_plan_scope(bundle, issues)
+    _validate_assertions(bundle, indexes, scope_repository_ids, scope_actor_ids, issues)
+    _validate_provenance(indexes, issues)
+    _validate_scope(indexes, scope_repository_ids, scope_actor_ids, issues)
+    _validate_interactions(indexes, issues)
+    _validate_evidence(indexes, issues)
+    _validate_privacy(bundle, issues)
+    _validate_collection_transport(bundle, issues)
+    contract = (
+        tuple(RESOURCE_SOURCES)
+        if required_sources_contract is None
+        else tuple(required_sources_contract)
     )
+    _validate_coverage(bundle, indexes, scope_repository_ids, issues, contract)
+    plan = bundle.get("plan")
+    window = plan.get("window") if isinstance(plan, dict) else None
+    _validate_event_and_revision_semantics(bundle, indexes, window, issues)
     return issues
 
 
@@ -2573,13 +2595,8 @@ def _validate_intrinsic(
     verify_bundle_digest: bool = True,
 ) -> list[ValidationIssue]:
     schema_version = bundle.get("schema_version") if isinstance(bundle, dict) else None
-    if schema_version == "0.1":
-        return _validate_v01_intrinsic(
-            bundle,
-            required_sources_contract=required_sources_contract,
-        )
-    if schema_version == "0.2":
-        return _validate_v02_intrinsic(
+    if schema_version == "0.3":
+        return _validate_v03_intrinsic(
             bundle,
             required_sources_contract=required_sources_contract,
             verify_bundle_digest=verify_bundle_digest,
@@ -2588,7 +2605,7 @@ def _validate_intrinsic(
     _issue(
         issues,
         "schema.version",
-        "schema_version must be '0.1' or '0.2' during the compatibility window",
+        "schema_version must be '0.3'",
         path="$.schema_version",
     )
     return issues
@@ -2609,7 +2626,7 @@ def compute_render_eligibility(
     )
 
 
-def recompute_allow_publish(
+def recompute_render_eligibility(
     bundle: dict[str, Any],
     *,
     required_sources_contract: Iterable[str] | None = None,
@@ -2618,7 +2635,7 @@ def recompute_allow_publish(
     coverage = bundle.get("coverage")
     if not isinstance(coverage, dict):
         return False
-    if bundle.get("schema_version") == "0.2":
+    if bundle.get("schema_version") == "0.3":
         coverage["render_eligible"] = False
         eligible = not any(
             issue.severity == "error"
@@ -2635,13 +2652,7 @@ def recompute_allow_publish(
             coverage["render_eligible"] = False
             return False
         return eligible
-    coverage["allow_publish"] = False
-    eligible = compute_render_eligibility(
-        bundle,
-        required_sources_contract=required_sources_contract,
-    )
-    coverage["allow_publish"] = eligible
-    return eligible
+    return False
 
 
 def validate_bundle(
@@ -2649,30 +2660,97 @@ def validate_bundle(
     *,
     required_sources_contract: Iterable[str] | None = None,
 ) -> list[ValidationIssue]:
-    """Validate deterministic invariants; an empty list means publishable."""
+    """Validate deterministic invariants; an empty list means render_eligible."""
     issues = _validate_intrinsic(
         bundle,
         required_sources_contract=required_sources_contract,
     )
     eligible = not any(issue.severity == "error" for issue in issues)
     coverage = bundle.get("coverage") if isinstance(bundle, dict) else None
-    declaration_name = (
-        "render_eligible" if bundle.get("schema_version") == "0.2" else "allow_publish"
-    )
+    declaration_name = "render_eligible"
     declared = coverage.get(declaration_name) if isinstance(coverage, dict) else None
     if not eligible:
         _issue(
             issues,
-            "coverage.publish_blocked",
-            "intrinsic validation blockers make this bundle ineligible for publication",
-            remediation="Resolve every validation blocker, then recompute allow_publish.",
+            "coverage.render_blocked",
+            "intrinsic validation blockers make this bundle not render eligible",
+            remediation="Resolve every validation blocker, then recompute render_eligible.",
         )
     if declared is not eligible:
         _issue(
             issues,
-            "coverage.publish_mismatch",
+            "coverage.render_mismatch",
             f"coverage.{declaration_name} must equal the derived value {eligible}",
             remediation=f"Set {declaration_name} only through the authoritative eligibility computation.",
+        )
+    return issues
+
+
+def validate_provider_fragment(
+    fragment: dict[str, Any],
+    *,
+    required_sources_contract: Iterable[str] | None = None,
+) -> list[ValidationIssue]:
+    """Validate the current internal provider/aggregate fragment contract."""
+    issues: list[ValidationIssue] = []
+    _validate_provider_fragment_schema(fragment, issues)
+    if fragment.get("fragment_version") != "0.3":
+        _issue(
+            issues,
+            "fragment.version",
+            "fragment_version must be '0.3'",
+            path="$.fragment_version",
+        )
+        return issues
+    semantic = dict(fragment)
+    semantic["plan"] = {
+        "window": fragment.get("window"),
+        "scope": fragment.get("scope"),
+    }
+    indexes = _validate_ids(semantic, issues)
+    scope_repository_ids, scope_actor_ids = _validate_plan_scope(semantic, issues)
+    _validate_assertions(
+        fragment, indexes, scope_repository_ids, scope_actor_ids, issues
+    )
+    _validate_provenance(indexes, issues)
+    _validate_scope(indexes, scope_repository_ids, scope_actor_ids, issues)
+    _validate_interactions(indexes, issues)
+    _validate_evidence(indexes, issues)
+    _validate_collection_transport(semantic, issues)
+    contract = (
+        tuple(RESOURCE_SOURCES)
+        if required_sources_contract is None
+        else tuple(required_sources_contract)
+    )
+    _validate_coverage(semantic, indexes, scope_repository_ids, issues, contract)
+    _validate_event_and_revision_semantics(
+        fragment, indexes, fragment.get("window"), issues
+    )
+    coverage = fragment.get("coverage")
+    declared = coverage.get("render_eligible") if isinstance(coverage, dict) else None
+    provider_ids_by_repository = {
+        repository_id: str(repository["provider_id"])
+        for repository_id, repository in indexes.get("repositories", {}).items()
+        if isinstance(repository.get("provider_id"), str)
+    }
+    blocked_by_semantics = any(issue.severity == "error" for issue in issues)
+    blocked_by_coverage = has_blocking_core_coverage(
+        coverage,
+        repository_ids=scope_repository_ids,
+        provider_ids_by_repository=provider_ids_by_repository,
+    )
+    expected = not blocked_by_semantics and not blocked_by_coverage
+    if not expected:
+        _issue(
+            issues,
+            "coverage.render_blocked",
+            "fragment validation blockers make this output not render eligible",
+        )
+    if declared is not expected:
+        _issue(
+            issues,
+            "coverage.render_mismatch",
+            f"coverage.render_eligible must equal the derived value {expected}",
         )
     return issues
 

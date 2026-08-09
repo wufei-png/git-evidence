@@ -21,6 +21,7 @@ from test_contract import (
     gitlab_transport,
     request_for,
     rewrite_transport_urls,
+    validate_output,
 )
 
 from git_evidence.cli import main as cli_main
@@ -59,7 +60,7 @@ from git_evidence.providers.transport import (
     UrllibTransport,
     paginate,
 )
-from git_evidence.validation import has_blocking_core_coverage, validate_bundle
+from git_evidence.validation import has_blocking_core_coverage
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "fixtures" / "example_bundle.json"
@@ -182,7 +183,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
                 bundle = provider_type(transport).collect(
                     request_for(provider_kind, instance)
                 )
-                self.assertFalse(bundle["coverage"]["allow_publish"])
+                self.assertFalse(bundle["coverage"]["render_eligible"])
                 observations = {
                     item["source"]: item for item in bundle["coverage"]["observations"]
                 }
@@ -191,7 +192,8 @@ class ReviewLoopFindingTests(unittest.TestCase):
                     for source in (
                         "repositories",
                         "work_items",
-                        "change_requests",
+                        "change_request_observations",
+                        "change_request_merges",
                         "interactions",
                         "commits",
                         "releases",
@@ -202,7 +204,8 @@ class ReviewLoopFindingTests(unittest.TestCase):
                     {
                         "repositories",
                         "work_items",
-                        "change_requests",
+                        "change_request_observations",
+                        "change_request_merges",
                         "interactions",
                         "commits",
                         "releases",
@@ -270,7 +273,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
                     request_for(provider_kind, instance)
                 )
                 self.assertEqual(bundle["repositories"], [])
-                self.assertFalse(bundle["coverage"]["allow_publish"])
+                self.assertFalse(bundle["coverage"]["render_eligible"])
                 repository_observation = next(
                     item
                     for item in bundle["coverage"]["observations"]
@@ -282,7 +285,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
                 )
                 self.assertIn(
                     "coverage.required_missing",
-                    {issue.code for issue in validate_bundle(bundle)},
+                    {issue.code for issue in validate_output(bundle)},
                 )
 
     def test_repository_root_identity_mismatch_blocks_without_placeholder(self) -> None:
@@ -324,7 +327,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
                         request_for(provider_kind, instance)
                     )
                     self.assertEqual(bundle["repositories"], [])
-                    self.assertFalse(bundle["coverage"]["allow_publish"])
+                    self.assertFalse(bundle["coverage"]["render_eligible"])
                     repository_observation = next(
                         item
                         for item in bundle["coverage"]["observations"]
@@ -336,8 +339,8 @@ class ReviewLoopFindingTests(unittest.TestCase):
                     )
                     self.assertTrue(has_blocking_core_coverage(bundle["coverage"]))
                     self.assertIn(
-                        "coverage.publish_blocked",
-                        {issue.code for issue in validate_bundle(bundle)},
+                        "coverage.render_blocked",
+                        {issue.code for issue in validate_output(bundle)},
                     )
 
     def test_repository_root_url_identity_and_shape_are_fail_closed(self) -> None:
@@ -386,7 +389,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
                         "malformed_response",
                     )
                     self.assertEqual(bundle["repositories"], [])
-                    self.assertFalse(bundle["coverage"]["allow_publish"])
+                    self.assertFalse(bundle["coverage"]["render_eligible"])
 
     def test_custom_instances_reject_public_root_and_native_urls(self) -> None:
         cases = (
@@ -429,7 +432,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
                     request_for(provider_kind, instance)
                 )
                 self.assertEqual(bundle["repositories"], [])
-                self.assertFalse(bundle["coverage"]["allow_publish"])
+                self.assertFalse(bundle["coverage"]["render_eligible"])
                 self.assertEqual(
                     next(
                         item
@@ -459,7 +462,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
                 self.assertEqual(
                     work_items["diagnostics"]["failure_class"], "malformed_response"
                 )
-                self.assertFalse(bundle["coverage"]["allow_publish"])
+                self.assertFalse(bundle["coverage"]["render_eligible"])
 
     def test_supported_core_operational_diagnostics_close_gate_during_collection(
         self,
@@ -485,7 +488,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
             if item["source"] == "commits"
         )
         self.assertEqual(commits["status"], "incomplete")
-        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertFalse(bundle["coverage"]["render_eligible"])
         self.assertTrue(has_blocking_core_coverage(bundle["coverage"]))
         self.assertTrue(
             any(
@@ -519,9 +522,9 @@ class ReviewLoopFindingTests(unittest.TestCase):
                     "child_diagnostics": [{"failure_classes": [failure_class]}],
                 }
                 self.assertTrue(has_blocking_core_coverage(bundle["coverage"]))
-                codes = {issue.code for issue in validate_bundle(bundle)}
+                codes = {issue.code for issue in validate_output(bundle)}
                 self.assertIn("coverage.supported_operational_failure", codes)
-                self.assertIn("coverage.publish_blocked", codes)
+                self.assertIn("coverage.render_blocked", codes)
 
     def test_supported_optional_operational_diagnostics_do_not_close_gate(self) -> None:
         bundle = GitHubProvider(github_transport()).collect(
@@ -536,8 +539,8 @@ class ReviewLoopFindingTests(unittest.TestCase):
         bundle["providers"][0]["capabilities"]["activities"] = "supported"
         bundle["providers"][0]["capabilities"]["ref_changes"] = "supported"
         bundle["coverage"]["warnings"] = []
-        self.assertTrue(bundle["coverage"]["allow_publish"])
-        self.assertEqual(validate_bundle(bundle), [])
+        self.assertTrue(bundle["coverage"]["render_eligible"])
+        self.assertEqual(validate_output(bundle), [])
 
     def test_validator_rejects_optional_privacy_without_fatal_ledger(self) -> None:
         bundle = load_bundle(FIXTURE)
@@ -565,9 +568,9 @@ class ReviewLoopFindingTests(unittest.TestCase):
                 "message": "activity privacy boundary failed",
             }
         )
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("coverage.optional_privacy_fatal", codes)
-        self.assertIn("coverage.publish_blocked", codes)
+        self.assertIn("coverage.render_blocked", codes)
 
     def test_optional_privacy_collection_is_fatal_but_typed_optional_failures_warn(
         self,
@@ -581,7 +584,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
             bundle = provider.collect(
                 request_for("github", "github.com", include_activity_api=True)
             )
-        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertFalse(bundle["coverage"]["render_eligible"])
         self.assertTrue(
             all(
                 any(
@@ -593,7 +596,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
             )
         )
         self.assertIn(
-            "coverage.fatal", {issue.code for issue in validate_bundle(bundle)}
+            "coverage.fatal", {issue.code for issue in validate_output(bundle)}
         )
 
     def test_optional_warning_enrichment_is_single_and_monotonic(self) -> None:
@@ -646,7 +649,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
             "child_diagnostics": [{"failure_classes": ["service_error"]}],
         }
         bundle["coverage"]["observations"].append(duplicate)
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("coverage.warning_diagnostics", codes)
 
         warning = next(
@@ -658,10 +661,10 @@ class ReviewLoopFindingTests(unittest.TestCase):
         warning["failure_classes"] = ["service_error"]
         self.assertNotIn(
             "coverage.warning_diagnostics",
-            {issue.code for issue in validate_bundle(bundle)},
+            {issue.code for issue in validate_output(bundle)},
         )
 
-    def test_group_failure_cannot_coexist_with_publishable_ledger(self) -> None:
+    def test_group_failure_cannot_coexist_with_render_eligible_ledger(self) -> None:
         bundle = load_bundle(FIXTURE)
         failure = {
             "provider": "github",
@@ -671,15 +674,15 @@ class ReviewLoopFindingTests(unittest.TestCase):
             "failure_class": "rate_limited",
         }
         bundle["coverage"]["group_failures"] = [failure]
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("coverage.group_failure_contradiction", codes)
         self.assertIn("coverage.group_failure_fatal", codes)
-        self.assertIn("coverage.publish_blocked", codes)
+        self.assertIn("coverage.render_blocked", codes)
 
     def test_coverage_observation_requires_registered_provider_provenance(self) -> None:
         bundle = load_bundle(FIXTURE)
         bundle["coverage"]["observations"][0].pop("provider_id")
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("coverage.provider_required", codes)
         self.assertIn("coverage.required_missing", codes)
 
@@ -687,7 +690,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
         bundle["coverage"]["observations"][0]["provider_id"] = (
             "provider:gitlab:gitlab.com"
         )
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("coverage.provider_unknown", codes)
         self.assertIn("coverage.required_missing", codes)
 
@@ -695,26 +698,27 @@ class ReviewLoopFindingTests(unittest.TestCase):
         bundle = load_bundle(FIXTURE)
         bundle["evidence"][0].pop("subject_id")
         self.assertIn(
-            "fact.evidence_subject", {issue.code for issue in validate_bundle(bundle)}
+            "assertion.evidence_subject",
+            {issue.code for issue in validate_output(bundle)},
         )
 
         bundle = load_bundle(FIXTURE)
         bundle["evidence"][0]["provider_id"] = "provider:gitlab:gitlab.com"
-        codes = {issue.code for issue in validate_bundle(bundle)}
+        codes = {issue.code for issue in validate_output(bundle)}
         self.assertIn("evidence.provenance", codes)
-        self.assertIn("fact.evidence_provenance", codes)
+        self.assertIn("evidence.retrieval_provider", codes)
 
     def test_validator_checks_canonical_repository_identity_and_url(self) -> None:
         bundle = load_bundle(FIXTURE)
         bundle["repositories"][0]["full_name"] = "other/project"
         self.assertIn(
-            "repository.identity", {issue.code for issue in validate_bundle(bundle)}
+            "repository.identity", {issue.code for issue in validate_output(bundle)}
         )
 
         bundle = load_bundle(FIXTURE)
         bundle["repositories"][0]["web_url"] = "https://github.com/other/project"
         self.assertIn(
-            "repository.url_identity", {issue.code for issue in validate_bundle(bundle)}
+            "repository.url_identity", {issue.code for issue in validate_output(bundle)}
         )
 
     def test_foreign_optional_activity_is_dropped_without_pseudo_ref_change(
@@ -727,7 +731,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
         bundle = GitHubProvider(transport).collect(
             request_for("github", "github.com", include_activity_api=True)
         )
-        self.assertTrue(bundle["coverage"]["allow_publish"])
+        self.assertTrue(bundle["coverage"]["render_eligible"])
         self.assertFalse(
             any(item["id"].endswith(":event-1") for item in bundle["ref_changes"])
         )
@@ -738,13 +742,13 @@ class ReviewLoopFindingTests(unittest.TestCase):
                 if observation["source"] in {"activities", "ref_changes"}
             )
         )
-        self.assertEqual(validate_bundle(bundle), [])
+        self.assertEqual(validate_output(bundle), [])
 
     def test_internal_api_failure_has_group_ledger_and_preserves_siblings(self) -> None:
         transport = github_transport()
         transport.responses.pop("/repos/example/project/issues")
         bundle = GitHubProvider(transport).collect(request_for("github", "github.com"))
-        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertFalse(bundle["coverage"]["render_eligible"])
         self.assertTrue(bundle["work_items"] == [])
         self.assertGreater(len(bundle["change_requests"]), 0)
         self.assertTrue(
@@ -756,7 +760,9 @@ class ReviewLoopFindingTests(unittest.TestCase):
         )
 
     def test_merge_does_not_silently_drop_duplicate_records(self) -> None:
-        bundle = load_bundle(FIXTURE)
+        bundle = GitHubProvider(github_transport()).collect(
+            request_for("github", "github.com")
+        )
         duplicate = deepcopy(bundle)
         merged = _merge_bundles(
             [bundle, duplicate],
@@ -766,18 +772,20 @@ class ReviewLoopFindingTests(unittest.TestCase):
             repository_ids=[bundle["repositories"][0]["id"]],
             actor_ids=[],
         )
-        self.assertEqual(len(merged["facts"]), len(bundle["facts"]))
+        self.assertEqual(len(merged["assertions"]), len(bundle["assertions"]))
         self.assertTrue(
             any(
                 "duplicate record id" in failure.get("reason", "")
                 for failure in merged["coverage"]["group_failures"]
             )
         )
-        self.assertFalse(merged["coverage"]["allow_publish"])
+        self.assertFalse(merged["coverage"]["render_eligible"])
 
     def test_merge_ignores_optional_only_provider_gate(self) -> None:
-        bundle = load_bundle(FIXTURE)
-        bundle["coverage"]["allow_publish"] = False
+        bundle = GitHubProvider(github_transport()).collect(
+            request_for("github", "github.com")
+        )
+        bundle["coverage"]["render_eligible"] = False
         merged = _merge_bundles(
             [bundle],
             window_start=WINDOW_START,
@@ -786,11 +794,13 @@ class ReviewLoopFindingTests(unittest.TestCase):
             repository_ids=[bundle["repositories"][0]["id"]],
             actor_ids=[],
         )
-        self.assertTrue(merged["coverage"]["allow_publish"])
-        self.assertEqual(validate_bundle(merged), [])
+        self.assertTrue(merged["coverage"]["render_eligible"])
+        self.assertEqual(validate_output(merged), [])
 
     def test_merge_blocks_missing_core_coverage(self) -> None:
-        bundle = load_bundle(FIXTURE)
+        bundle = GitHubProvider(github_transport()).collect(
+            request_for("github", "github.com")
+        )
         bundle["coverage"]["observations"] = [
             observation
             for observation in bundle["coverage"]["observations"]
@@ -804,14 +814,14 @@ class ReviewLoopFindingTests(unittest.TestCase):
             repository_ids=[bundle["repositories"][0]["id"]],
             actor_ids=[],
         )
-        self.assertFalse(merged["coverage"]["allow_publish"])
+        self.assertFalse(merged["coverage"]["render_eligible"])
         self.assertIn(
             "coverage.required_missing",
-            {issue.code for issue in validate_bundle(merged)},
+            {issue.code for issue in validate_output(merged)},
         )
         self.assertIn(
-            "coverage.publish_blocked",
-            {issue.code for issue in validate_bundle(merged)},
+            "coverage.render_blocked",
+            {issue.code for issue in validate_output(merged)},
         )
 
     def test_validation_scopes_core_gate_per_repository(self) -> None:
@@ -845,7 +855,7 @@ class ReviewLoopFindingTests(unittest.TestCase):
                 and observation.get("source") == "commits"
             )
         ]
-        merged["coverage"]["allow_publish"] = True
+        merged["coverage"]["render_eligible"] = True
 
         # An unscoped check sees the first repository's commits and would
         # incorrectly allow this multi-repository bundle.
@@ -861,9 +871,9 @@ class ReviewLoopFindingTests(unittest.TestCase):
                 provider_ids_by_repository=provider_ids,
             )
         )
-        codes = {issue.code for issue in validate_bundle(merged)}
+        codes = {issue.code for issue in validate_output(merged)}
         self.assertIn("coverage.required_missing", codes)
-        self.assertIn("coverage.publish_blocked", codes)
+        self.assertIn("coverage.render_blocked", codes)
 
     def test_cache_replays_allowlisted_pagination_headers_and_rejects_old_or_unsafe_entries(
         self,
@@ -1478,11 +1488,30 @@ class ReviewLoopFindingTests(unittest.TestCase):
             work_item_observation["diagnostics"]["failure_class"], "malformed_response"
         )
         self.assertEqual(work_item_observation["diagnostics"]["duplicate_count"], 1)
-        self.assertFalse(bundle["coverage"]["allow_publish"])
+        self.assertFalse(bundle["coverage"]["render_eligible"])
         self.assertEqual(
             len(bundle["work_items"]),
             len({item["id"] for item in bundle["work_items"]}),
         )
+
+    def test_duplicate_change_request_blocks_both_core_event_surfaces(self) -> None:
+        transport = github_transport()
+        pulls = transport.responses["/repos/example/project/pulls"][0].body
+        pulls.append(deepcopy(pulls[0]))
+        bundle = GitHubProvider(transport).collect(request_for("github", "github.com"))
+        observations = {
+            item["source"]: item for item in bundle["coverage"]["observations"]
+        }
+        for source in (
+            "change_request_observations",
+            "change_request_merges",
+        ):
+            self.assertEqual(observations[source]["status"], "incomplete")
+            self.assertEqual(
+                observations[source]["diagnostics"]["failure_class"],
+                "malformed_response",
+            )
+        self.assertFalse(bundle["coverage"]["render_eligible"])
 
     def test_collect_config_validates_direct_library_entry(self) -> None:
         config = {

@@ -5,7 +5,7 @@ from typing import Any
 from urllib.parse import quote
 
 from .base import (
-    RESOURCE_SOURCES,
+    CORE_RESOURCE_SOURCES,
     CollectionRequest,
     RepositoryTarget,
     instance_web_base,
@@ -142,6 +142,11 @@ class GitLabProvider(ResourceProvider):
             "order_by": "updated_at",
             "sort": "asc",
         }
+        change_request_params = dict(window_params)
+        # merged_at is the merge event clock. A merge request can be updated
+        # after the requested window, so updated_before would hide a merge that
+        # actually occurred inside the window.
+        change_request_params.pop("updated_before")
         return [
             PageSourceRequest(
                 target,
@@ -157,7 +162,7 @@ class GitLabProvider(ResourceProvider):
                 target,
                 "change_requests",
                 f"{root}/merge_requests",
-                dict(window_params),
+                change_request_params,
                 lambda item: self._normalize_merge_request(target, item),
                 lambda item: self._change_request_in_window(item, request),
             ),
@@ -243,7 +248,7 @@ class GitLabProvider(ResourceProvider):
                 source: SourceResult(
                     [], "incomplete", str(exc), api_error_diagnostics(exc)
                 )
-                for source in RESOURCE_SOURCES
+                for source in CORE_RESOURCE_SOURCES
             }
             return RepositorySnapshot(None, failed)
 
@@ -286,7 +291,6 @@ class GitLabProvider(ResourceProvider):
                 {
                     "state": "all",
                     "updated_after": request.window_start,
-                    "updated_before": request.window_end,
                     "order_by": "updated_at",
                     "sort": "asc",
                 },
@@ -581,7 +585,7 @@ class GitLabProvider(ResourceProvider):
         self, target: RepositoryTarget, item: dict[str, Any]
     ) -> dict[str, Any]:
         iid = item.get("iid")
-        merged_at = item.get("merged_at")
+        merged_at = first_timestamp(item, "merged_at")
         diff_refs = (
             item.get("diff_refs") if isinstance(item.get("diff_refs"), dict) else {}
         )
@@ -680,7 +684,6 @@ class GitLabProvider(ResourceProvider):
             "subject_number": number,
             "occurred_at": first_timestamp(note, "created_at", "updated_at"),
             "body_collected": False,
-            "extensions": {"gitlab": {"system": bool(note.get("system"))}},
             "web_url": note.get("noteable_url") or subject.get("web_url"),
             "_native_id": note_id,
             "_actor": actor_from(note, "author"),

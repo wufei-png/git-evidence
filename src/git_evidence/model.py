@@ -28,7 +28,6 @@ COLLECTION_KEYS = (
     "ref_changes",
     "releases",
     "evidence",
-    "facts",
 )
 ALL_COLLECTION_KEYS = (*COLLECTION_KEYS, "retrievals", "assertions")
 
@@ -60,6 +59,8 @@ def load_bundle(source: str | Path | TextIO) -> dict[str, Any]:
         raise BundleLoadError(str(exc)) from exc
     if not isinstance(value, dict):
         raise BundleLoadError("evidence bundle root must be a JSON object")
+    if value.get("schema_version") != "0.3":
+        raise BundleLoadError("only schema_version 0.3 bundles are supported")
     entity_count = sum(
         len(value.get(key, []))
         for key in ALL_COLLECTION_KEYS

@@ -33,6 +33,7 @@ from .providers.base import (
 )
 from .providers.catalog import PROVIDER_REGISTRY
 from .render import LANGUAGES, PROFILES
+from .time import TimeValueError, parse_instant
 
 
 class ConfigError(ValueError):
@@ -227,8 +228,8 @@ def _aware_timestamp(value: Any, path: str) -> datetime:
         timestamp = value
     elif isinstance(value, str) and value:
         try:
-            timestamp = datetime.fromisoformat(value)
-        except ValueError as exc:
+            timestamp = parse_instant(value)
+        except TimeValueError as exc:
             raise ConfigError(f"{path} is not a valid ISO timestamp") from exc
     else:
         raise ConfigError(f"{path} must be an offset-aware TOML datetime")

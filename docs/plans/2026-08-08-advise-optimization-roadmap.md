@@ -1,7 +1,7 @@
 # Optimization roadmap after the external advice review
 
-Status: design decisions accepted; implementation is not authorized by this
-document. The reviewed code baseline is `5cc040b` on `main`.
+Status: superseded by ADR-0021, ADR-0022, and the current implementation. This
+document records the earlier design sequence; it is not a current contract.
 
 This roadmap challenges `/tmp/git-evidence/advise.md` against the current code,
 tests, glossary, and accepted ADRs. It separates credential safety and core

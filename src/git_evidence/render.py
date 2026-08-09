@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping
+from datetime import datetime
 from hashlib import sha256
 from html import escape as html_escape
 from typing import Any
@@ -9,6 +10,7 @@ from urllib.parse import quote
 
 from .model import collection
 from .privacy import sanitize_public_url
+from .time import local_date, parse_instant
 from .validation import format_issues, validate_bundle
 
 PROFILES = ("project-first", "timeline", "release-focused", "actor-summary")
@@ -131,12 +133,15 @@ def _indexes(
     return repositories, evidence
 
 
-def _fact_sort_key(fact: dict[str, Any]) -> tuple[str, str]:
-    return (str(fact.get("occurred_at") or ""), str(fact.get("id") or ""))
+def _claim_sort_key(claim: dict[str, Any]) -> tuple[datetime, str]:
+    return (
+        parse_instant(str(claim.get("occurred_at") or "")),
+        str(claim.get("id") or ""),
+    )
 
 
-def _fact_repository_id(fact: dict[str, Any]) -> str | None:
-    repository_id = fact.get("repository_id")
+def _claim_repository_id(claim: dict[str, Any]) -> str | None:
+    repository_id = claim.get("repository_id")
     if isinstance(repository_id, str):
         return repository_id
     return None
@@ -155,8 +160,6 @@ _ASSERTION_SECTIONS = {
 
 
 def _renderable_claims(bundle: dict[str, Any]) -> list[dict[str, Any]]:
-    if bundle.get("schema_version") != "0.2":
-        return collection(bundle, "facts")
     subjects: dict[str, dict[str, Any]] = {}
     for key in (
         "repositories",
@@ -194,8 +197,8 @@ def _renderable_claims(bundle: dict[str, Any]) -> list[dict[str, Any]]:
     return claims
 
 
-def _fact_line(
-    fact: dict[str, Any],
+def _claim_line(
+    claim: dict[str, Any],
     evidence: dict[str, dict[str, Any]],
     actor_labels: dict[str, str],
     language: str,
@@ -205,17 +208,17 @@ def _fact_line(
     include_actor: bool = True,
 ) -> str:
     summary = _escape_text(
-        fact.get("summary")
-        or fact.get("title")
-        or fact.get("kind")
+        claim.get("summary")
+        or claim.get("title")
+        or claim.get("kind")
         or "verified activity"
     )
-    actor_id = fact.get("actor_id")
+    actor_id = claim.get("actor_id")
     actor = actor_labels.get(actor_id) if actor_id else None
     if actor and include_actor:
         summary = f"{summary} — {actor}"
     links = []
-    for evidence_id in fact.get("evidence_ids") or []:
+    for evidence_id in claim.get("evidence_ids") or []:
         item = evidence.get(evidence_id)
         if not item:
             continue
@@ -285,8 +288,6 @@ def _render_coverage(bundle: dict[str, Any], language: str) -> list[str]:
 
 
 def _render_metadata(bundle: dict[str, Any], profile: str, language: str) -> list[str]:
-    if bundle.get("schema_version") != "0.2":
-        return []
     invocation = (
         bundle.get("invocation") if isinstance(bundle.get("invocation"), dict) else {}
     )
@@ -399,7 +400,7 @@ def render_bundle(
     blocking_issues = [issue for issue in issues if issue.severity == "error"]
     if blocking_issues:
         raise RenderError(
-            "bundle is not publishable:\n" + format_issues(blocking_issues)
+            "bundle is not render eligible:\n" + format_issues(blocking_issues)
         )
 
     labels = LABELS[language]
@@ -414,11 +415,8 @@ def render_bundle(
         display_actor_names=display_actor_names,
         actor_labels=actor_labels,
     )
-    facts = sorted(_renderable_claims(bundle), key=_fact_sort_key)
-    run_or_plan = (
-        bundle["plan"] if bundle.get("schema_version") == "0.2" else bundle["run"]
-    )
-    window = run_or_plan["window"]
+    claims = sorted(_renderable_claims(bundle), key=_claim_sort_key)
+    window = bundle["plan"]["window"]
     lines = [
         f"# {labels['title']}",
         "",
@@ -430,8 +428,10 @@ def render_bundle(
     if profile == "timeline":
         lines.extend([f"## {labels['timeline']}", ""])
         current_date = None
-        for fact in facts:
-            date = str(fact.get("occurred_at") or "unknown")[:10]
+        for claim in claims:
+            date = local_date(
+                str(claim.get("occurred_at")), window["timezone"]
+            ).isoformat()
             if date != current_date:
                 if current_date is not None:
                     lines.append("")
@@ -439,8 +439,8 @@ def render_bundle(
                 lines.append("")
                 current_date = date
             lines.append(
-                _fact_line(
-                    fact,
+                _claim_line(
+                    claim,
                     evidence,
                     rendered_actor_labels,
                     language,
@@ -451,17 +451,17 @@ def render_bundle(
     elif profile == "actor-summary":
         lines.extend([f"## {labels['actors']}", "", f"> {labels['actor_warning']}", ""])
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for fact in facts:
-            grouped[str(fact.get("actor_id") or "anonymous")].append(fact)
+        for claim in claims:
+            grouped[str(claim.get("actor_id") or "anonymous")].append(claim)
         for actor_id in sorted(grouped):
             lines.append(
                 f"### {rendered_actor_labels.get(actor_id, labels['anonymous'])}"
             )
             lines.append("")
-            for fact in grouped[actor_id]:
+            for claim in grouped[actor_id]:
                 lines.append(
-                    _fact_line(
-                        fact,
+                    _claim_line(
+                        claim,
                         evidence,
                         rendered_actor_labels,
                         language,
@@ -472,24 +472,24 @@ def render_bundle(
                 )
             lines.append("")
     else:
-        project_facts: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        other_facts: list[dict[str, Any]] = []
-        for fact in facts:
-            repository_id = _fact_repository_id(fact)
+        project_claims: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        other_claims: list[dict[str, Any]] = []
+        for claim in claims:
+            repository_id = _claim_repository_id(claim)
             if repository_id and repository_id in repositories:
-                project_facts[repository_id].append(fact)
+                project_claims[repository_id].append(claim)
             else:
-                other_facts.append(fact)
+                other_claims.append(claim)
 
         if profile == "release-focused":
-            release_facts = [
-                fact for fact in facts if str(fact.get("section")) == "release"
+            release_claims = [
+                claim for claim in claims if str(claim.get("section")) == "release"
             ]
             lines.extend([f"## {labels['releases']}", ""])
-            for fact in release_facts:
+            for claim in release_claims:
                 lines.append(
-                    _fact_line(
-                        fact,
+                    _claim_line(
+                        claim,
                         evidence,
                         rendered_actor_labels,
                         language,
@@ -497,7 +497,7 @@ def render_bundle(
                         allow_source_urls=allow_source_urls,
                     )
                 )
-            if not release_facts:
+            if not release_claims:
                 lines.append(f"- {labels['no_releases']}")
             lines.append("")
 
@@ -507,21 +507,21 @@ def render_bundle(
             else labels["project_activity"]
         )
         lines.extend([f"## {heading}", ""])
-        for repository_id in sorted(project_facts):
+        for repository_id in sorted(project_claims):
             repository = repositories[repository_id]
             name = _escape_text(
                 repository.get("full_name") or repository.get("name") or repository_id
             )
             lines.extend([f"### {name}", ""])
-            for fact in project_facts[repository_id]:
+            for claim in project_claims[repository_id]:
                 if (
                     profile == "release-focused"
-                    and str(fact.get("section")) == "release"
+                    and str(claim.get("section")) == "release"
                 ):
                     continue
                 lines.append(
-                    _fact_line(
-                        fact,
+                    _claim_line(
+                        claim,
                         evidence,
                         rendered_actor_labels,
                         language,
@@ -530,12 +530,12 @@ def render_bundle(
                     )
                 )
             lines.append("")
-        if other_facts:
+        if other_claims:
             lines.extend([f"## {labels['other']}", ""])
-            for fact in other_facts:
+            for claim in other_claims:
                 lines.append(
-                    _fact_line(
-                        fact,
+                    _claim_line(
+                        claim,
                         evidence,
                         rendered_actor_labels,
                         language,

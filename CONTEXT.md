@@ -2,7 +2,7 @@
 
 This project turns time-bounded activity from Git hosting platforms into
 engineering reports whose claims can be checked against source objects. It
-records engineering facts and coverage limits; it is not a productivity or
+records evidence-backed assertions and coverage limits; it is not a productivity or
 performance scoring system.
 
 ## Platform model
@@ -82,13 +82,10 @@ _Avoid_: Public bundle, anonymous bundle
 The record of what the run was asked to inspect, what each provider actually
 covered, and which limits, failures, or unknown associations remain.
 
-**Publishable report**:
-A rendered report whose evidence and core coverage checks pass and whose
-visibility has been explicitly approved by its operator. An incomplete core
-run cannot produce a candidate report; an incomplete optional activity/ref
-source may remain eligible when it carries a machine-readable coverage
-warning. Visibility approval is an external workflow action, not a property of
-the evidence bundle.
+**Disclosed report**:
+A rendered report whose visibility has been explicitly approved by its
+operator. Render eligibility is a prerequisite, not that approval. Visibility
+approval is an external workflow action, not a property of the evidence bundle.
 
 **Render eligibility**:
 The validation result that an evidence bundle has sufficient evidence and core

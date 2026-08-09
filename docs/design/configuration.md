@@ -1,7 +1,7 @@
 # Configuration boundary
 
 Configuration describes what a run is authorized and expected to inspect. It
-does not contain secrets or report facts.
+does not contain secrets or report Assertions.
 
 ```toml
 [window]
@@ -67,13 +67,15 @@ Rules:
   entities remain in scope. Bundle validation also rejects actor references
   that do not resolve to an actor entity or fall outside a non-empty allowlist.
 - `window` is a timezone-aware half-open interval `[start, end)`.
+- Change-request observation and merge coverage are separate required core
+  sources. One supported observation cannot substitute for the other.
 - Tokens come from environment variables, a keyring, or a CI secret; they are
   never stored in this file or passed as a command-line value.
 - Authenticated collection requires HTTPS with `verify_tls: true` and has no
   bypass. Credentialless HTTP or disabled TLS verification is accepted only
   with `allow_insecure_loopback: true` on a loopback instance; its output is
   diagnostic and cannot pass the render gate.
-- `include_activity_api: false` is honest: resource-backed facts remain
+- `include_activity_api: false` is honest: resource-backed assertions remain
   available, but push/ref completeness is unavailable.
 - `display_actor_names` defaults to false. Names are rendered only when it is
   true and `report.actor_labels` contains an explicit mapping from the full
@@ -137,10 +139,10 @@ or unexpected collection failure is recorded in `coverage.group_failures` with
 provider, instance, repository, source, and `failure_class`, and is linked to
 the matching observation (and to a structured fatal entry for required
 sources). Other groups remain in the bundle for diagnosis. A core resource
-group failure forces `allow_publish: false`; ordinary optional activity/ref
+group failure forces `render_eligible: false`; ordinary optional activity/ref
 malformed, typed, transport, or capability failures remain render-eligible with a
 structured coverage warning. An optional `privacy_violation` is the security
-exception: it requires a fatal ledger entry and keeps `allow_publish: false`.
+exception: it requires a fatal ledger entry and keeps `render_eligible: false`.
 Configuration and missing-token errors are preflight failures and return CLI
 status 2; a bundle with one or more failed core provider groups returns status
 3, while an optional-only non-privacy failure returns status 0 with coverage
