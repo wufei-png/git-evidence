@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import unittest
 from copy import deepcopy
 from io import BytesIO, StringIO
@@ -636,31 +637,28 @@ class ContractTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;", report)
 
     def test_render_cli_reads_explicit_identity_map_from_config(self) -> None:
-        temporary = ROOT / "tests" / ".tmp-render-config.toml"
-        temporary.write_text(
-            '[report]\nprofile = "actor-summary"\n'
-            "display_actor_names = true\n"
-            "[report.actor_labels]\n"
-            '"actor:github:github.com:7" = "Alice"\n',
-            encoding="utf-8",
-        )
-        output = StringIO()
-        try:
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory) / "report.toml"
+            temporary.write_text(
+                '[report]\nprofile = "actor-summary"\n'
+                "display_actor_names = true\n"
+                "[report.actor_labels]\n"
+                '"actor:github:github.com:7" = "Alice"\n',
+                encoding="utf-8",
+            )
+            output = StringIO()
             with patch("sys.stdout", output):
                 self.assertEqual(
                     cli_main(["render", str(FIXTURE), "--config", str(temporary)]), 0
                 )
-        finally:
-            temporary.unlink(missing_ok=True)
-        self.assertIn("Alice", output.getvalue())
+            self.assertIn("Alice", output.getvalue())
 
     def test_collect_cli_writes_invalid_diagnostic_bundle_before_failure(self) -> None:
         bundle = load_bundle(FIXTURE)
         bundle["coverage"]["required_sources"] = ["repositories"]
-        output_path = ROOT / "tests" / ".tmp-invalid-collect-bundle.json"
-        output_path.unlink(missing_ok=True)
-        stderr = StringIO()
-        try:
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "invalid-collect-bundle.json"
+            stderr = StringIO()
             with (
                 patch("git_evidence.cli.load_collection_config", return_value={}),
                 patch("git_evidence.cli.collect_config", return_value=bundle),
@@ -680,8 +678,6 @@ class ContractTests(unittest.TestCase):
             self.assertIn("coverage.required_source_contract", stderr.getvalue())
             codes = {issue.code for issue in validate_bundle(load_bundle(output_path))}
             self.assertIn("coverage.required_source_contract", codes)
-        finally:
-            output_path.unlink(missing_ok=True)
 
     def test_provider_catalog_exposes_three_contracts(self) -> None:
         self.assertEqual(
@@ -1990,8 +1986,8 @@ class ContractTests(unittest.TestCase):
     def test_config_requires_explicit_allowlist_and_aware_window(self) -> None:
         config = load_collection_config(ROOT / "config.example.toml")
         self.assertEqual(config.repositories[0].target.provider_kind, "github")
-        temporary = ROOT / "tests" / ".tmp-invalid-config.toml"
-        try:
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory) / "invalid-config.toml"
             temporary.write_text(
                 "[window]\n"
                 "start = 2026-07-27T00:00:00Z\n"
@@ -2004,12 +2000,10 @@ class ContractTests(unittest.TestCase):
             )
             with self.assertRaises(ConfigError):
                 load_collection_config(temporary)
-        finally:
-            temporary.unlink(missing_ok=True)
 
     def test_config_rejects_unknown_provider(self) -> None:
-        temporary = ROOT / "tests" / ".tmp-unknown-provider.toml"
-        try:
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory) / "unknown-provider.toml"
             temporary.write_text(
                 "[window]\n"
                 "start = 2026-07-27T00:00:00Z\n"
@@ -2027,8 +2021,6 @@ class ContractTests(unittest.TestCase):
             )
             with self.assertRaises(ConfigError):
                 load_collection_config(temporary)
-        finally:
-            temporary.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
