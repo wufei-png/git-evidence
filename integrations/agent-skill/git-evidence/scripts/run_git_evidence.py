@@ -189,16 +189,24 @@ def _project_issues(records: list[object]) -> list[dict[str, object]]:
     return projected
 
 
-def _project_records(
+def _project_coverage_records(
     records: list[object],
     *,
     fields: tuple[str, ...],
-    limit: int,
+    required_fields: tuple[str, ...],
 ) -> list[dict[str, object]]:
     projected: list[dict[str, object]] = []
-    for record in records[:limit]:
-        if not isinstance(record, dict):
-            continue
+    for record in records[:MAX_COVERAGE_RECORDS]:
+        if not isinstance(record, dict) or not all(
+            isinstance(record.get(field), str) for field in required_fields
+        ):
+            raise RunnerError("CLI diagnostics contain an invalid Coverage record")
+        failure_classes = record.get("failure_classes")
+        if failure_classes is not None and (
+            not isinstance(failure_classes, list)
+            or not all(isinstance(item, str) for item in failure_classes)
+        ):
+            raise RunnerError("CLI diagnostics contain invalid failure classes")
         item: dict[str, object] = {}
         for field in fields:
             value = record.get(field)
@@ -212,30 +220,6 @@ def _project_records(
                 ]
         projected.append(item)
     return projected
-
-
-def _project_coverage_records(
-    records: list[object],
-    *,
-    fields: tuple[str, ...],
-    required_fields: tuple[str, ...],
-) -> list[dict[str, object]]:
-    for record in records[:MAX_COVERAGE_RECORDS]:
-        if not isinstance(record, dict) or not all(
-            isinstance(record.get(field), str) for field in required_fields
-        ):
-            raise RunnerError("CLI diagnostics contain an invalid Coverage record")
-        failure_classes = record.get("failure_classes")
-        if failure_classes is not None and (
-            not isinstance(failure_classes, list)
-            or not all(isinstance(item, str) for item in failure_classes)
-        ):
-            raise RunnerError("CLI diagnostics contain invalid failure classes")
-    return _project_records(
-        records,
-        fields=fields,
-        limit=MAX_COVERAGE_RECORDS,
-    )
 
 
 def _validate_coverage_counts(
