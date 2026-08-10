@@ -505,6 +505,31 @@ def _record_merge_failure(
         )
 
 
+def _merged_bundle_size(merged: dict[str, Any]) -> int:
+    return json_size_with_limit(merged, max_bytes=MAX_BUNDLE_BYTES - 1) + 1
+
+
+def _refresh_merged_bundle_size(
+    merged: dict[str, Any], previous_size: int
+) -> tuple[int, bool]:
+    try:
+        return _merged_bundle_size(merged), False
+    except (InputLimitError, TypeError, ValueError):
+        return previous_size, True
+
+
+def _record_merge_failure_and_refresh_size(
+    merged: dict[str, Any],
+    bundle: dict[str, Any],
+    source_category: str,
+    item: Any,
+    reason: str,
+    previous_size: int,
+) -> tuple[int, bool]:
+    _record_merge_failure(merged, bundle, source_category, item, reason)
+    return _refresh_merged_bundle_size(merged, previous_size)
+
+
 def _merge_bundles(
     bundles: list[dict[str, Any]],
     *,
@@ -565,13 +590,7 @@ def _merge_bundles(
     seen: dict[str, set[str]] = {key: set() for key in collection_keys}
     provider_gate_blocked = False
     aggregate_limit_exceeded = False
-    estimated_size = (
-        json_size_with_limit(
-            merged,
-            max_bytes=MAX_BUNDLE_BYTES - 1,
-        )
-        + 1
-    )
+    estimated_size = _merged_bundle_size(merged)
     for bundle in bundles:
         coverage = bundle.get("coverage") or {}
         if not _provider_bundle_has_complete_core_coverage(bundle):
@@ -629,50 +648,44 @@ def _merge_bundles(
                     aggregate["insecure_transport"]
                     or incoming_metrics.get("insecure_transport", False)
                 )
-        try:
-            estimated_size = (
-                json_size_with_limit(
-                    merged,
-                    max_bytes=MAX_BUNDLE_BYTES - 1,
-                )
-                + 1
-            )
-        except (InputLimitError, TypeError, ValueError):
-            aggregate_limit_exceeded = True
+        estimated_size, limit_exceeded = _refresh_merged_bundle_size(
+            merged, estimated_size
+        )
+        aggregate_limit_exceeded = aggregate_limit_exceeded or limit_exceeded
         for key in collection_keys:
             for item in bundle.get(key, []):
                 if aggregate_limit_exceeded:
                     continue
                 entity_id = item.get("id") if isinstance(item, dict) else None
                 if not isinstance(entity_id, str) or not entity_id.strip():
-                    _record_merge_failure(
-                        merged, bundle, key, item, "record is missing a non-empty id"
-                    )
-                    try:
-                        estimated_size = (
-                            json_size_with_limit(
-                                merged,
-                                max_bytes=MAX_BUNDLE_BYTES - 1,
-                            )
-                            + 1
+                    estimated_size, limit_exceeded = (
+                        _record_merge_failure_and_refresh_size(
+                            merged,
+                            bundle,
+                            key,
+                            item,
+                            "record is missing a non-empty id",
+                            estimated_size,
                         )
-                    except (InputLimitError, TypeError, ValueError):
-                        aggregate_limit_exceeded = True
+                    )
+                    aggregate_limit_exceeded = (
+                        aggregate_limit_exceeded or limit_exceeded
+                    )
                     continue
                 if entity_id in seen[key]:
-                    _record_merge_failure(
-                        merged, bundle, key, item, f"duplicate record id: {entity_id}"
-                    )
-                    try:
-                        estimated_size = (
-                            json_size_with_limit(
-                                merged,
-                                max_bytes=MAX_BUNDLE_BYTES - 1,
-                            )
-                            + 1
+                    estimated_size, limit_exceeded = (
+                        _record_merge_failure_and_refresh_size(
+                            merged,
+                            bundle,
+                            key,
+                            item,
+                            f"duplicate record id: {entity_id}",
+                            estimated_size,
                         )
-                    except (InputLimitError, TypeError, ValueError):
-                        aggregate_limit_exceeded = True
+                    )
+                    aggregate_limit_exceeded = (
+                        aggregate_limit_exceeded or limit_exceeded
+                    )
                     continue
                 if (
                     sum(len(merged[name]) for name in collection_keys)
@@ -685,15 +698,10 @@ def _merge_bundles(
                 estimated_size += indented_json_growth_upper_bound(item, base_indent=4)
                 if estimated_size <= MAX_BUNDLE_BYTES:
                     continue
-                try:
-                    estimated_size = (
-                        json_size_with_limit(
-                            merged,
-                            max_bytes=MAX_BUNDLE_BYTES - 1,
-                        )
-                        + 1
-                    )
-                except (InputLimitError, TypeError, ValueError):
+                estimated_size, limit_exceeded = _refresh_merged_bundle_size(
+                    merged, estimated_size
+                )
+                if limit_exceeded:
                     merged[key].pop()
                     seen[key].remove(entity_id)
                     aggregate_limit_exceeded = True
@@ -710,10 +718,8 @@ def _merge_bundles(
             ),
         )
     )
-    try:
-        json_size_with_limit(merged, max_bytes=MAX_BUNDLE_BYTES - 1)
-    except (InputLimitError, TypeError, ValueError):
-        aggregate_limit_exceeded = True
+    estimated_size, limit_exceeded = _refresh_merged_bundle_size(merged, estimated_size)
+    aggregate_limit_exceeded = aggregate_limit_exceeded or limit_exceeded
     if aggregate_limit_exceeded:
         for key in collection_keys:
             if key != "providers":
