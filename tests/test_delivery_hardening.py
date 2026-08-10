@@ -364,6 +364,7 @@ token_env = "{token_env}"
         config: str,
         expected_provider: str = "github",
         allowed_instances: str = "github.com",
+        complete_pipeline: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], bool, tuple[str, ...]]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -376,8 +377,15 @@ token_env = "{token_env}"
                 "#!/bin/sh\n"
                 'if [ "$1" = collect ]; then\n'
                 '  touch "$CANARY_STUB_COLLECT_MARKER"\n'
+                '  if [ "$CANARY_STUB_COMPLETE" = 1 ]; then\n'
+                "    printf '{}' > \"$CANARY_STUB_BUNDLE_PATH\"\n"
+                "    exit 0\n"
+                "  fi\n"
                 f"  echo 'required source failed for {sensitive_repository}' >&2\n"
                 "  exit 3\n"
+                "fi\n"
+                'if [ "$1" = render ] && [ "$CANARY_STUB_COMPLETE" = 1 ]; then\n'
+                "  printf '# report\\n' > \"$CANARY_STUB_REPORT_PATH\"\n"
                 "fi\n"
                 "exit 0\n",
                 encoding="utf-8",
@@ -394,6 +402,13 @@ token_env = "{token_env}"
                     "LIVE_ALLOWED_INSTANCES": allowed_instances,
                     "LIVE_PROVIDER_TOKEN": "fixture-token",
                     "CANARY_STUB_COLLECT_MARKER": str(collect_marker),
+                    "CANARY_STUB_COMPLETE": "1" if complete_pipeline else "0",
+                    "CANARY_STUB_BUNDLE_PATH": str(
+                        root / "git-evidence-live-canary" / "bundle.json"
+                    ),
+                    "CANARY_STUB_REPORT_PATH": str(
+                        root / "git-evidence-live-canary" / "report.md"
+                    ),
                 }
             )
             result = subprocess.run(
@@ -413,10 +428,13 @@ token_env = "{token_env}"
             return result, collect_marker.exists(), remaining_artifacts
 
     def test_failure_output_does_not_echo_repository_coordinates(self) -> None:
-        result, collect_invoked, _ = self._run_canary(config=self._canary_config())
+        result, collect_invoked, remaining_artifacts = self._run_canary(
+            config=self._canary_config()
+        )
         combined = result.stdout + result.stderr
         self.assertEqual(result.returncode, 3)
         self.assertTrue(collect_invoked)
+        self.assertEqual(remaining_artifacts, ())
         self.assertIn("CANARY_COLLECT: failed (exit 3)", combined)
         self.assertNotIn(
             "repo:github:github.com:secret-owner/private-project", combined
@@ -478,14 +496,24 @@ token_env = "LIVE_PROVIDER_TOKEN"
         )
         for name, config, expected_provider, allowed_instances, message in cases:
             with self.subTest(name=name):
-                result, collect_invoked, _ = self._run_canary(
+                result, collect_invoked, remaining_artifacts = self._run_canary(
                     config=config,
                     expected_provider=expected_provider,
                     allowed_instances=allowed_instances,
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(collect_invoked)
+                self.assertEqual(remaining_artifacts, ())
                 self.assertIn(message, result.stderr)
+
+    def test_successful_canary_removes_every_sensitive_artifact(self) -> None:
+        result, collect_invoked, remaining_artifacts = self._run_canary(
+            config=self._canary_config(),
+            complete_pipeline=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(collect_invoked)
+        self.assertEqual(remaining_artifacts, ())
 
 
 class RenderingAndPackagingTests(unittest.TestCase):
