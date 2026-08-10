@@ -21,6 +21,22 @@ from .render import LANGUAGES, PROFILES, RenderError, render_bundle
 from .validation import ValidationIssue, format_issues, validate_bundle
 
 MAX_DIAGNOSTIC_COVERAGE_ITEMS = 128
+GROUP_FAILURE_DIAGNOSTIC_FIELDS = (
+    "provider",
+    "instance",
+    "repository",
+    "source",
+    "failure_class",
+)
+COVERAGE_WARNING_DIAGNOSTIC_FIELDS = (
+    "code",
+    "source",
+    "provider_id",
+    "repository_id",
+    "status",
+    "failure_class",
+    "failure_classes",
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -119,22 +135,6 @@ def _emit_collect_diagnostics(
     coverage_warnings: list[object],
 ) -> None:
     if diagnostics_format == "json":
-        projected_failures = _project_coverage_records(
-            group_failures,
-            fields=("provider", "instance", "repository", "source", "failure_class"),
-        )
-        projected_warnings = _project_coverage_records(
-            coverage_warnings,
-            fields=(
-                "code",
-                "source",
-                "provider_id",
-                "repository_id",
-                "status",
-                "failure_class",
-                "failure_classes",
-            ),
-        )
         print(
             _diagnostics_json(
                 status,
@@ -142,13 +142,9 @@ def _emit_collect_diagnostics(
                 group_failure_count=group_failure_count,
                 blocking_group_failure_count=blocking_group_failure_count,
                 coverage_warning_count=coverage_warning_count,
-                group_failures=projected_failures,
-                group_failures_truncated=max(
-                    0, len(group_failures) - len(projected_failures)
-                ),
-                coverage_warnings=projected_warnings,
-                coverage_warnings_truncated=max(
-                    0, len(coverage_warnings) - len(projected_warnings)
+                **_coverage_projections(
+                    group_failures=group_failures,
+                    coverage_warnings=coverage_warnings,
                 ),
             ),
             file=sys.stderr,
@@ -183,6 +179,31 @@ def _project_coverage_records(
     return projected
 
 
+def _coverage_projections(
+    *,
+    group_failures: list[object],
+    coverage_warnings: list[object],
+) -> dict[str, object]:
+    projected_failures = _project_coverage_records(
+        group_failures,
+        fields=GROUP_FAILURE_DIAGNOSTIC_FIELDS,
+    )
+    projected_warnings = _project_coverage_records(
+        coverage_warnings,
+        fields=COVERAGE_WARNING_DIAGNOSTIC_FIELDS,
+    )
+    return {
+        "group_failures": projected_failures,
+        "group_failures_truncated": max(
+            0, len(group_failures) - len(projected_failures)
+        ),
+        "coverage_warnings": projected_warnings,
+        "coverage_warnings_truncated": max(
+            0, len(coverage_warnings) - len(projected_warnings)
+        ),
+    }
+
+
 def _coverage_diagnostics_summary(bundle: dict[str, object]) -> dict[str, object]:
     coverage = bundle.get("coverage")
     if not isinstance(coverage, dict):
@@ -196,32 +217,14 @@ def _coverage_diagnostics_summary(bundle: dict[str, object]) -> dict[str, object
         for failure in group_failures
         if isinstance(failure, dict) and failure.get("source") in RESOURCE_SOURCES
     ]
-    projected_failures = _project_coverage_records(
-        group_failures,
-        fields=("provider", "instance", "repository", "source", "failure_class"),
-    )
-    projected_warnings = _project_coverage_records(
-        warnings,
-        fields=(
-            "code",
-            "source",
-            "provider_id",
-            "repository_id",
-            "status",
-            "failure_class",
-            "failure_classes",
-        ),
-    )
     return {
         "group_failure_count": len(group_failures),
         "blocking_group_failure_count": len(blocking_group_failures),
         "coverage_warning_count": len(warnings),
-        "group_failures": projected_failures,
-        "group_failures_truncated": max(
-            0, len(group_failures) - len(projected_failures)
+        **_coverage_projections(
+            group_failures=group_failures,
+            coverage_warnings=warnings,
         ),
-        "coverage_warnings": projected_warnings,
-        "coverage_warnings_truncated": max(0, len(warnings) - len(projected_warnings)),
     }
 
 
