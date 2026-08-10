@@ -68,18 +68,22 @@ bundle from configured providers:
 python -m pip install .
 git-evidence --version
 git-evidence providers
-git-evidence doctor --config config.example.toml
+git-evidence doctor --config config.example.toml --diagnostics-format json
 git-evidence collect --config config.example.toml \
   --output evidence/bundle.json
 git-evidence validate fixtures/example_bundle.json
 git-evidence render fixtures/example_bundle.json \
-  --config config.example.toml --profile project-first --output report.md
+  --config config.example.toml --profile project-first --output report.md \
+  --diagnostics-format json
 ```
 
-`validate` and `collect` accept `--diagnostics-format json` for structured
-automation output. JSON mode emits one document per diagnostic stream with a
-stable `status`, an `issues` array, and collection summary counts; it never
-mixes prose into that document. Exit statuses are stable: `0` success (possibly with
+`doctor`, `collect`, `validate`, and `render` accept
+`--diagnostics-format json` for structured automation output. JSON mode emits
+one document per diagnostic stream with a stable `status`, an `issues` array,
+and collection summary counts; it never
+mixes prose into that document. `doctor` and `validate` emit diagnostics on
+stdout; artifact-producing `collect` and `render` emit them on stderr. Exit
+statuses are stable: `0` success (possibly with
 non-blocking warnings), `1` validation/render-eligibility failure, `2`
 configuration/input/I/O failure, and `3` a core provider-group collection
 failure. An unknown program failure exits `70`; text mode exposes only an
@@ -122,6 +126,12 @@ The live replay boundary and offline verification checklist are documented in
 [`docs/testing/live-e2e.md`](docs/testing/live-e2e.md) and the
 [`offline/CI/live-canary contract`](docs/runbook/offline-ci-live-canary.md).
 Live bundles are kept outside the public fixture set.
+
+The optional in-repository Agent adapter lives at
+[`integrations/agent-skill/git-evidence/`](integrations/agent-skill/git-evidence/).
+It resolves explicit reporting intent and sequences the same CLI contracts; it
+does not fetch extra provider content, decide coverage, mutate Bundles, or
+authorize disclosure.
 
 With `include_activity_api: true`, GitLab and GitHub may add bounded push/ref
 observations marked `incomplete`; Gitee remains explicitly `unsupported` for

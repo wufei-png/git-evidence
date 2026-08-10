@@ -1,0 +1,4 @@
+interface:
+  display_name: "Git Evidence"
+  short_description: "Collect and render evidence-backed Git activity"
+  default_prompt: "Use $git-evidence to collect, validate, and render an evidence-backed engineering activity report."
