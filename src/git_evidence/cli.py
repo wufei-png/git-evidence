@@ -20,6 +20,8 @@ from .providers import RESOURCE_SOURCES, provider_catalog
 from .render import LANGUAGES, PROFILES, RenderError, render_bundle
 from .validation import ValidationIssue, format_issues, validate_bundle
 
+MAX_DIAGNOSTIC_COVERAGE_ITEMS = 128
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="git-evidence", allow_abbrev=False)
@@ -50,6 +52,11 @@ def _parser() -> argparse.ArgumentParser:
     render.add_argument("--profile", choices=PROFILES)
     render.add_argument("--language", choices=LANGUAGES)
     render.add_argument("--output", "-o", type=Path)
+    render.add_argument(
+        "--diagnostics-format",
+        choices=("text", "json"),
+        default="text",
+    )
 
     subparsers.add_parser(
         "providers", help="list provider contracts", allow_abbrev=False
@@ -59,6 +66,11 @@ def _parser() -> argparse.ArgumentParser:
         "doctor", help="validate a collection configuration", allow_abbrev=False
     )
     doctor.add_argument("--config", required=True, type=Path)
+    doctor.add_argument(
+        "--diagnostics-format",
+        choices=("text", "json"),
+        default="text",
+    )
 
     collect = subparsers.add_parser(
         "collect",
@@ -82,7 +94,7 @@ def _diagnostics_text(issues: list[ValidationIssue]) -> str:
 def _diagnostics_json(
     status: str,
     issues: list[ValidationIssue],
-    **summary: int,
+    **summary: object,
 ) -> str:
     return json.dumps(
         {
@@ -101,15 +113,43 @@ def _emit_collect_diagnostics(
     issues: list[ValidationIssue],
     diagnostics_format: str,
     group_failure_count: int,
+    blocking_group_failure_count: int,
     coverage_warning_count: int,
+    group_failures: list[object],
+    coverage_warnings: list[object],
 ) -> None:
     if diagnostics_format == "json":
+        projected_failures = _project_coverage_records(
+            group_failures,
+            fields=("provider", "instance", "repository", "source", "failure_class"),
+        )
+        projected_warnings = _project_coverage_records(
+            coverage_warnings,
+            fields=(
+                "code",
+                "source",
+                "provider_id",
+                "repository_id",
+                "status",
+                "failure_class",
+                "failure_classes",
+            ),
+        )
         print(
             _diagnostics_json(
                 status,
                 issues,
                 group_failure_count=group_failure_count,
+                blocking_group_failure_count=blocking_group_failure_count,
                 coverage_warning_count=coverage_warning_count,
+                group_failures=projected_failures,
+                group_failures_truncated=max(
+                    0, len(group_failures) - len(projected_failures)
+                ),
+                coverage_warnings=projected_warnings,
+                coverage_warnings_truncated=max(
+                    0, len(coverage_warnings) - len(projected_warnings)
+                ),
             ),
             file=sys.stderr,
         )
@@ -125,13 +165,64 @@ def _emit_collect_diagnostics(
     print(messages[status], file=sys.stderr)
 
 
-def _write_output(path: Path, text: str) -> bool:
-    try:
-        atomic_write_text(path, text)
-    except AtomicWriteError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return False
-    return True
+def _project_coverage_records(
+    records: list[object],
+    *,
+    fields: tuple[str, ...],
+) -> list[dict[str, object]]:
+    projected: list[dict[str, object]] = []
+    for record in records[:MAX_DIAGNOSTIC_COVERAGE_ITEMS]:
+        if not isinstance(record, dict):
+            continue
+        item = {
+            field: record[field]
+            for field in fields
+            if isinstance(record.get(field), (str, list))
+        }
+        projected.append(item)
+    return projected
+
+
+def _coverage_diagnostics_summary(bundle: dict[str, object]) -> dict[str, object]:
+    coverage = bundle.get("coverage")
+    if not isinstance(coverage, dict):
+        return {}
+    group_failures = coverage.get("group_failures")
+    warnings = coverage.get("warnings")
+    if not isinstance(group_failures, list) or not isinstance(warnings, list):
+        return {}
+    blocking_group_failures = [
+        failure
+        for failure in group_failures
+        if isinstance(failure, dict) and failure.get("source") in RESOURCE_SOURCES
+    ]
+    projected_failures = _project_coverage_records(
+        group_failures,
+        fields=("provider", "instance", "repository", "source", "failure_class"),
+    )
+    projected_warnings = _project_coverage_records(
+        warnings,
+        fields=(
+            "code",
+            "source",
+            "provider_id",
+            "repository_id",
+            "status",
+            "failure_class",
+            "failure_classes",
+        ),
+    )
+    return {
+        "group_failure_count": len(group_failures),
+        "blocking_group_failure_count": len(blocking_group_failures),
+        "coverage_warning_count": len(warnings),
+        "group_failures": projected_failures,
+        "group_failures_truncated": max(
+            0, len(group_failures) - len(projected_failures)
+        ),
+        "coverage_warnings": projected_warnings,
+        "coverage_warnings_truncated": max(0, len(warnings) - len(projected_warnings)),
+    }
 
 
 def _requested_diagnostics_format(argv: list[str] | None) -> str:
@@ -143,6 +234,12 @@ def _requested_diagnostics_format(argv: list[str] | None) -> str:
         if value.startswith("--diagnostics-format="):
             requested = value.partition("=")[2]
     return requested
+
+
+def _json_diagnostics_stream(argv: list[str] | None):
+    values = list(sys.argv[1:] if argv is None else argv)
+    command = values[0] if values else None
+    return sys.stdout if command in {"doctor", "validate"} else sys.stderr
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -160,22 +257,52 @@ def _main(argv: list[str] | None = None) -> int:
         try:
             config = load_collection_config(args.config)
         except ConfigError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
+            if args.diagnostics_format == "json":
+                print(
+                    _diagnostics_json("config_error", [], error=str(exc)),
+                )
+            else:
+                print(f"ERROR: {exc}", file=sys.stderr)
             return 2
-        print(
-            f"CONFIGURATION: valid ({len(config.repositories)} allowlisted repositories)"
-        )
+        if args.diagnostics_format == "json":
+            print(
+                _diagnostics_json(
+                    "valid",
+                    [],
+                    repository_count=len(config.repositories),
+                )
+            )
+        else:
+            print(
+                "CONFIGURATION: valid "
+                f"({len(config.repositories)} allowlisted repositories)"
+            )
         return 0
     if args.command == "collect":
         try:
             config = load_collection_config(args.config)
             bundle = collect_config(config)
         except (ConfigError, CollectionError) as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
+            if args.diagnostics_format == "json":
+                print(
+                    _diagnostics_json("collection_error", [], error=str(exc)),
+                    file=sys.stderr,
+                )
+            else:
+                print(f"ERROR: {exc}", file=sys.stderr)
             return 2
         serialized = json.dumps(bundle, ensure_ascii=False, indent=2) + "\n"
         if args.output:
-            if not _write_output(args.output, serialized):
+            try:
+                atomic_write_text(args.output, serialized)
+            except AtomicWriteError as exc:
+                if args.diagnostics_format == "json":
+                    print(
+                        _diagnostics_json("io_error", [], error=str(exc)),
+                        file=sys.stderr,
+                    )
+                else:
+                    print(f"ERROR: {exc}", file=sys.stderr)
                 return 2
         else:
             print(serialized, end="")
@@ -192,8 +319,11 @@ def _main(argv: list[str] | None = None) -> int:
                 status="group_failure",
                 issues=issues,
                 diagnostics_format=args.diagnostics_format,
-                group_failure_count=len(blocking_group_failures),
+                group_failure_count=len(group_failures),
+                blocking_group_failure_count=len(blocking_group_failures),
                 coverage_warning_count=len(warnings),
+                group_failures=group_failures,
+                coverage_warnings=warnings,
             )
             return 3
         blocking_issues = [issue for issue in issues if issue.severity == "error"]
@@ -202,8 +332,11 @@ def _main(argv: list[str] | None = None) -> int:
                 status="invalid",
                 issues=issues,
                 diagnostics_format=args.diagnostics_format,
-                group_failure_count=0,
+                group_failure_count=len(group_failures),
+                blocking_group_failure_count=len(blocking_group_failures),
                 coverage_warning_count=len(warnings),
+                group_failures=group_failures,
+                coverage_warnings=warnings,
             )
             return 1
         _emit_collect_diagnostics(
@@ -212,19 +345,31 @@ def _main(argv: list[str] | None = None) -> int:
             else "render_eligible",
             issues=issues,
             diagnostics_format=args.diagnostics_format,
-            group_failure_count=0,
+            group_failure_count=len(group_failures),
+            blocking_group_failure_count=len(blocking_group_failures),
             coverage_warning_count=len(warnings),
+            group_failures=group_failures,
+            coverage_warnings=warnings,
         )
         return 0
     try:
         bundle = load_bundle(args.bundle)
     except BundleLoadError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        if args.diagnostics_format == "json":
+            print(
+                _diagnostics_json("input_error", [], error=str(exc)),
+                file=sys.stdout if args.command == "validate" else sys.stderr,
+            )
+        else:
+            print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     issues = validate_bundle(bundle)
     if args.command == "validate":
         blocking_issues = [issue for issue in issues if issue.severity == "error"]
         if args.diagnostics_format == "json":
+            coverage_summary = (
+                {} if blocking_issues else _coverage_diagnostics_summary(bundle)
+            )
             print(
                 _diagnostics_json(
                     "invalid"
@@ -233,6 +378,7 @@ def _main(argv: list[str] | None = None) -> int:
                     if issues
                     else "valid",
                     issues,
+                    **coverage_summary,
                 )
             )
         elif issues:
@@ -247,13 +393,29 @@ def _main(argv: list[str] | None = None) -> int:
         try:
             report_config = load_report_config(args.config)
         except ConfigError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
+            if args.diagnostics_format == "json":
+                print(
+                    _diagnostics_json("config_error", [], error=str(exc)),
+                    file=sys.stderr,
+                )
+            else:
+                print(f"ERROR: {exc}", file=sys.stderr)
             return 2
     profile = args.profile or report_config.profile
     language = args.language or report_config.language
     display_actor_names = report_config.display_actor_names
     actor_labels = report_config.actor_label_map()
     allow_source_urls = report_config.allow_source_urls
+    blocking_issues = [issue for issue in issues if issue.severity == "error"]
+    if blocking_issues:
+        if args.diagnostics_format == "json":
+            print(_diagnostics_json("invalid", issues), file=sys.stderr)
+        else:
+            print(
+                "ERROR: bundle is not render eligible:\n" + _diagnostics_text(issues),
+                file=sys.stderr,
+            )
+        return 1
     try:
         rendered = render_bundle(
             bundle,
@@ -264,13 +426,39 @@ def _main(argv: list[str] | None = None) -> int:
             allow_source_urls=allow_source_urls,
         )
     except RenderError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        if args.diagnostics_format == "json":
+            print(
+                _diagnostics_json("render_error", issues, error=str(exc)),
+                file=sys.stderr,
+            )
+        else:
+            print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     if args.output:
-        if not _write_output(args.output, rendered):
+        try:
+            atomic_write_text(args.output, rendered)
+        except AtomicWriteError as exc:
+            if args.diagnostics_format == "json":
+                print(
+                    _diagnostics_json("io_error", issues, error=str(exc)),
+                    file=sys.stderr,
+                )
+            else:
+                print(f"ERROR: {exc}", file=sys.stderr)
             return 2
     else:
         print(rendered, end="")
+    if args.diagnostics_format == "json":
+        print(
+            _diagnostics_json(
+                "rendered_with_warnings" if issues else "rendered",
+                issues,
+                profile=profile,
+                language=language,
+                output_path=str(args.output) if args.output else None,
+            ),
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -290,7 +478,7 @@ def main(argv: list[str] | None = None) -> int:
                     },
                     ensure_ascii=False,
                 ),
-                file=sys.stderr,
+                file=_json_diagnostics_stream(argv),
             )
         else:
             print(

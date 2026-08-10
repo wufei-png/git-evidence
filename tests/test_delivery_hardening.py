@@ -159,10 +159,12 @@ class AtomicOutputTests(unittest.TestCase):
                     ["validate", str(valid), "--diagnostics-format", "json"]
                 )
             self.assertEqual(status, 0)
+            diagnostics = json.loads(stdout.getvalue())
             self.assertEqual(
-                json.loads(stdout.getvalue()),
+                {key: diagnostics[key] for key in ("status", "issues")},
                 {"status": "valid", "issues": []},
             )
+            self.assertEqual(diagnostics["blocking_group_failure_count"], 0)
 
         stderr = StringIO()
         with (
