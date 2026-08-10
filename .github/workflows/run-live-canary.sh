@@ -27,7 +27,7 @@ run_quietly CANARY_DOCTOR "$canary_root/doctor.log" \
 python - \
   "$canary_root/config.toml" \
   "${LIVE_EXPECTED_PROVIDER:?}" \
-  "${LIVE_ALLOWED_INSTANCES:?}" <<'PY'
+  "${LIVE_ALLOWED_INSTANCES-}" <<'PY'
 import sys
 
 from git_evidence.config import load_collection_config

@@ -333,24 +333,14 @@ class PaginationProofValidationTests(unittest.TestCase):
 
 
 class CanaryLogBoundaryTests(unittest.TestCase):
-    def test_failure_output_does_not_echo_repository_coordinates(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            binary = root / "bin"
-            binary.mkdir()
-            stub = binary / "git-evidence"
-            sensitive_repository = "repo:github:github.com:secret-owner/private-project"
-            stub.write_text(
-                "#!/bin/sh\n"
-                'if [ "$1" = collect ]; then\n'
-                f"  echo 'required source failed for {sensitive_repository}' >&2\n"
-                "  exit 3\n"
-                "fi\n"
-                "exit 0\n",
-                encoding="utf-8",
-            )
-            stub.chmod(0o700)
-            config = """\
+    @staticmethod
+    def _canary_config(
+        *,
+        extra_repository: str = "",
+        extra_provider: str = "",
+        token_env: str = "LIVE_PROVIDER_TOKEN",
+    ) -> str:
+        return f"""\
 [window]
 start = 2026-08-01T00:00:00Z
 end = 2026-08-02T00:00:00Z
@@ -361,11 +351,38 @@ actors = []
 provider_ref = "live-github"
 owner = "secret-owner"
 name = "private-project"
+{extra_repository}
 [providers.live-github]
 kind = "github"
 instance = "github.com"
-token_env = "LIVE_PROVIDER_TOKEN"
-"""
+token_env = "{token_env}"
+{extra_provider}"""
+
+    def _run_canary(
+        self,
+        *,
+        config: str,
+        expected_provider: str = "github",
+        allowed_instances: str = "github.com",
+    ) -> tuple[subprocess.CompletedProcess[str], bool, tuple[str, ...]]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "bin"
+            binary.mkdir()
+            stub = binary / "git-evidence"
+            collect_marker = root / "collect-invoked"
+            sensitive_repository = "repo:github:github.com:secret-owner/private-project"
+            stub.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = collect ]; then\n'
+                '  touch "$CANARY_STUB_COLLECT_MARKER"\n'
+                f"  echo 'required source failed for {sensitive_repository}' >&2\n"
+                "  exit 3\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            stub.chmod(0o700)
             environment = os.environ.copy()
             environment.update(
                 {
@@ -373,9 +390,10 @@ token_env = "LIVE_PROVIDER_TOKEN"
                     "PYTHONPATH": str(ROOT / "src"),
                     "RUNNER_TEMP": str(root),
                     "LIVE_CANARY_CONFIG_CONTENT": config,
-                    "LIVE_EXPECTED_PROVIDER": "github",
-                    "LIVE_ALLOWED_INSTANCES": "github.com",
+                    "LIVE_EXPECTED_PROVIDER": expected_provider,
+                    "LIVE_ALLOWED_INSTANCES": allowed_instances,
                     "LIVE_PROVIDER_TOKEN": "fixture-token",
+                    "CANARY_STUB_COLLECT_MARKER": str(collect_marker),
                 }
             )
             result = subprocess.run(
@@ -386,11 +404,88 @@ token_env = "LIVE_PROVIDER_TOKEN"
                 capture_output=True,
                 check=False,
             )
-            combined = result.stdout + result.stderr
-            self.assertEqual(result.returncode, 3)
-            self.assertIn("CANARY_COLLECT: failed (exit 3)", combined)
-            self.assertNotIn(sensitive_repository, combined)
-            self.assertNotIn("secret-owner", combined)
+            canary_root = root / "git-evidence-live-canary"
+            remaining_artifacts = (
+                tuple(sorted(path.name for path in canary_root.iterdir()))
+                if canary_root.exists()
+                else ()
+            )
+            return result, collect_marker.exists(), remaining_artifacts
+
+    def test_failure_output_does_not_echo_repository_coordinates(self) -> None:
+        result, collect_invoked, _ = self._run_canary(config=self._canary_config())
+        combined = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 3)
+        self.assertTrue(collect_invoked)
+        self.assertIn("CANARY_COLLECT: failed (exit 3)", combined)
+        self.assertNotIn(
+            "repo:github:github.com:secret-owner/private-project", combined
+        )
+        self.assertNotIn("secret-owner", combined)
+
+    def test_scope_preflight_rejects_every_unauthorized_configuration(self) -> None:
+        extra_repository = """\
+[[scope.repositories]]
+provider_ref = "extra"
+owner = "second-owner"
+name = "second-project"
+"""
+        extra_github = """\
+[providers.extra]
+kind = "github"
+instance = "github.example.com"
+token_env = "LIVE_PROVIDER_TOKEN"
+"""
+        cases = (
+            (
+                "empty instance allowlist",
+                self._canary_config(),
+                "github",
+                "",
+                "canary instance allowlist is empty",
+            ),
+            (
+                "repository provider mismatch",
+                self._canary_config(),
+                "gitlab",
+                "github.com",
+                "canary repository allowlist does not match selected provider",
+            ),
+            (
+                "unauthorized instance",
+                self._canary_config(),
+                "github",
+                "gitlab.com",
+                "canary repository instance is not independently allowlisted",
+            ),
+            (
+                "multiple provider configs",
+                self._canary_config(
+                    extra_repository=extra_repository,
+                    extra_provider=extra_github,
+                ),
+                "github",
+                "github.com,github.example.com",
+                "canary config must use token_env: LIVE_PROVIDER_TOKEN",
+            ),
+            (
+                "incorrect token env",
+                self._canary_config(token_env="OTHER_TOKEN"),
+                "github",
+                "github.com",
+                "canary config must use token_env: LIVE_PROVIDER_TOKEN",
+            ),
+        )
+        for name, config, expected_provider, allowed_instances, message in cases:
+            with self.subTest(name=name):
+                result, collect_invoked, _ = self._run_canary(
+                    config=config,
+                    expected_provider=expected_provider,
+                    allowed_instances=allowed_instances,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(collect_invoked)
+                self.assertIn(message, result.stderr)
 
 
 class RenderingAndPackagingTests(unittest.TestCase):
