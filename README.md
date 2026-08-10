@@ -16,6 +16,39 @@ into a versioned JSON evidence bundle, validates coverage, and renders
 reproducible Markdown reports. Agent skills and scheduled jobs are optional
 adapters around that core, not the source of truth.
 
+## Core workflow and trust boundaries
+
+The optional Agent Skill resolves intent and sequences the same CLI commands;
+it is not a second collector or validation authority. Every non-zero stage in
+that orchestration stops with bounded diagnostics. A successful render still
+produces a sensitive artifact, and disclosure remains an external operator
+decision.
+
+```mermaid
+flowchart TB
+    operator["Operator or direct CLI caller"] --> mode{"Choose input mode"}
+    caller["Calling agent"] --> skill["Optional Agent Skill<br/>intent and orchestration only"]
+    skill --> mode
+
+    subgraph core["Git Evidence core CLI"]
+        mode -->|new or cached collection| doctor["doctor"]
+        mode -->|existing Schema 0.3 Bundle| validate["validate"]
+        doctor -->|valid configuration| collect["collect"]
+        providers["Allowlisted provider APIs<br/>or private cache"] --> collect
+        collect --> bundle["Sensitive Schema 0.3 Bundle<br/>may remain for diagnostics"]
+        bundle -->|collect exit 0| validate
+        validate -->|render eligible| render["render<br/>offline"]
+        doctor -.->|non-zero| stop["Stop with bounded diagnostics"]
+        collect -.->|non-zero| stop
+        validate -.->|non-zero| stop
+    end
+
+    render --> report["Sensitive Markdown report"]
+    report --> approval{"External operator<br/>disclosure approval"}
+    approval -->|approved for an audience| disclose["Audience-visible disclosure"]
+    approval -->|not approved| private["Keep private"]
+```
+
 ## Why it exists
 
 The useful distinction is not “AI-generated weekly summary”. It is whether a

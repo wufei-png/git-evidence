@@ -32,6 +32,41 @@ The top-level collections are `providers`, `repositories`, `actors`,
 `releases`, `retrievals`, `evidence`, and `assertions`. Unknown generic
 extension objects are not part of the contract.
 
+### Provenance and render gate
+
+Retrieval provenance, evidence binding, and coverage answer different
+questions and remain separate records. The validator derives render
+eligibility from the complete Bundle; the diagram does not grant disclosure
+approval or turn an incomplete Retrieval into complete Coverage.
+
+```mermaid
+flowchart TB
+    plan["Retained collection plan"] --> operation["Logical provider operation"]
+    operation --> source["Native provider response<br/>or cache replay"]
+    source --> retrieval["Retrieval<br/>how and when data was obtained"]
+    source --> entity["Normalized Entity<br/>observed subject"]
+    retrieval --> evidence["Evidence<br/>native identity and source binding"]
+    entity -->|subject binding| evidence
+    entity -->|subject_id| assertion["Typed Assertion<br/>reportable claim"]
+    evidence -->|evidence_ids| assertion
+
+    plan --> coverage["Coverage<br/>what the run completely observed"]
+    operation -->|completion or failure outcome| coverage
+
+    retrieval --> intrinsic["Contract validation<br/>identity, scope, provenance, and privacy"]
+    entity --> intrinsic
+    evidence --> intrinsic
+    assertion --> intrinsic
+    coverage --> core["Core coverage gate"]
+    intrinsic --> gate{"Derived render_eligible"}
+    core --> gate
+    gate -->|false| blocked["Rendering blocked"]
+    gate -->|true| renderer["Offline renderer"]
+    assertion -.->|claims after validation| renderer
+    coverage -.->|coverage metadata| renderer
+    renderer --> report["Sensitive Markdown report"]
+```
+
 ## Required coverage
 
 Every in-scope provider/repository pair requires supported observations for:
