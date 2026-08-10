@@ -43,3 +43,26 @@ Issue backfill, push partitioning, report structure, link coverage, duplicate
 prevention, and incomplete-manifest rejection. They are a behavior inventory,
 not a public fixture set. Public tests must replace internal names and live
 URLs with synthetic provider responses and explicit capability failures.
+
+## Post-extraction branch audit (2026-08-10)
+
+The audit compared the private extraction baseline with a bounded
+post-extraction range on 2026-08-10. Seven later Skill changes were inspected.
+Exact private branch names, paths, and commit coordinates are intentionally not
+retained in the public tree.
+
+Only two new ideas cross the public design boundary:
+
+- evidence-bound Work item-to-Change request relations, with bare short
+  references rejected and provider/repository scope preserved (ADR-0024);
+- an optional separate Narrative Source Pack with an explicit source hierarchy
+  and calibrated bounds (ADR-0025).
+
+The other changes are not adopted as new public work. Duplicate summary-line
+rejection is an Agent-output concern rather than an evidence contract. Private
+MR/direct-push partitioning and merge/squash metadata overlap the public
+core's existing Change association and resource/merge Assertion semantics;
+copying their algorithms would import different event assumptions. User
+deduplication is already enforced through provider-qualified actor identity and
+does not justify another identity path. The private targeted-diff constants
+remain research data, not public limits.

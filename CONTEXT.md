@@ -94,6 +94,24 @@ bundle or the resulting report to an audience, and successful validation or
 rendering never grants that approval.
 _Avoid_: Publishable bundle, public-safe bundle
 
+**Agent orchestration adapter**:
+An optional client that resolves reporting intent and sequences core commands;
+it is not an authority for provider facts, coverage, or disclosure.
+_Avoid_: Agent collector, Agent evidence engine
+
+**Work item relation**:
+A future, unimplemented evidence-bound statement that a Change request
+references or resolves a Work item. An Agent suggestion is only a candidate and
+is not a canonical relation; see ADR-0024.
+_Avoid_: Inferred Issue link, bare short reference
+
+**Narrative Source Pack**:
+A future, unimplemented separate sensitive artifact containing bounded,
+digested narrative source material linked to Bundle Assertions and Evidence. It
+is not part of the Evidence bundle and does not grant disclosure approval; see
+ADR-0025.
+_Avoid_: Enriched bundle, Agent context dump
+
 **Collection plan identity**:
 A stable digest of the normalized, non-secret collection configuration that
 affects scope, source selection, and collection semantics. It groups repeated
