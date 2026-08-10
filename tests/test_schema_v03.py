@@ -40,16 +40,38 @@ class CanonicalIdentityTests(unittest.TestCase):
     def test_bundle_digest_sorts_canonical_collections_but_preserves_other_arrays(
         self,
     ) -> None:
-        bundle = canonical_fixture()
-        reversed_entities = deepcopy(bundle)
-        reversed_entities["assertions"] = list(
-            reversed(reversed_entities["assertions"])
+        canonical_collections = (
+            "providers",
+            "repositories",
+            "actors",
+            "work_items",
+            "change_requests",
+            "interactions",
+            "commits",
+            "ref_changes",
+            "releases",
+            "retrievals",
+            "evidence",
+            "assertions",
         )
-        self.assertEqual(
-            compute_bundle_digest(bundle),
-            compute_bundle_digest(reversed_entities),
-        )
+        for collection in canonical_collections:
+            bundle = {
+                collection: [
+                    {"id": "entity:b", "value": 2},
+                    {"id": "entity:a", "value": 1},
+                ]
+            }
+            reversed_entities = deepcopy(bundle)
+            reversed_entities[collection] = list(
+                reversed(reversed_entities[collection])
+            )
+            with self.subTest(collection=collection):
+                self.assertEqual(
+                    compute_bundle_digest(bundle),
+                    compute_bundle_digest(reversed_entities),
+                )
 
+        bundle = canonical_fixture()
         reordered_scope = deepcopy(bundle)
         reordered_scope["plan"]["scope"]["actors"] = ["actor:b", "actor:a"]
         self.assertNotEqual(
