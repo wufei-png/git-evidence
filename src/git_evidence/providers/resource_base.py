@@ -104,6 +104,20 @@ EXPECTED_PROVIDER_FAILURES = (ApiError, ProviderNotReady, PrivacyError)
 MALFORMED_NORMALIZATION_ERRORS = (ResponseShapeError,)
 
 
+def _with_transport_metrics(
+    diagnostics: dict[str, Any] | None,
+    transport: Any,
+) -> dict[str, Any]:
+    combined = dict(diagnostics or {})
+    metrics = transport_metrics(transport)
+    if any(
+        metrics[key]
+        for key in ("retry_count", "budget_exhausted", "cache_hits", "cache_misses")
+    ):
+        combined.setdefault("metrics", metrics)
+    return combined
+
+
 def is_valid_native_id(value: Any) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, str)):
         return False
@@ -935,15 +949,7 @@ class BundleBuilder:
             key: len(ledgers[key])
             for key in ("observations", "fatal", "group_failures", "warnings")
         }
-        diagnostics = dict(result.diagnostics)
-        metrics = transport_metrics(self.transport)
-        if (
-            metrics["retry_count"]
-            or metrics["budget_exhausted"]
-            or metrics["cache_hits"]
-            or metrics["cache_misses"]
-        ):
-            diagnostics.setdefault("metrics", metrics)
+        diagnostics = _with_transport_metrics(result.diagnostics, self.transport)
         failure_classes = self._failure_classes(diagnostics)
         group_failure_classes = failure_classes & OPERATIONAL_FAILURE_CLASSES
         if (
@@ -2145,15 +2151,7 @@ class ResourceProvider:
         task: PageSourceRequest,
         page: PageResult,
     ) -> SourceResult:
-        diagnostics = dict(page.diagnostics or {})
-        metrics = transport_metrics(self.transport)
-        if (
-            metrics["retry_count"]
-            or metrics["budget_exhausted"]
-            or metrics["cache_hits"]
-            or metrics["cache_misses"]
-        ):
-            diagnostics.setdefault("metrics", metrics)
+        diagnostics = _with_transport_metrics(page.diagnostics, self.transport)
         result = SourceResult(
             page.items,
             "supported" if page.complete else "incomplete",
@@ -2382,15 +2380,7 @@ class ResourceProvider:
             )
         for retrieval in result.retrievals:
             retrieval.setdefault("endpoint_kind", source)
-        diagnostics = dict(result.diagnostics or {})
-        metrics = transport_metrics(self.transport)
-        if (
-            metrics["retry_count"]
-            or metrics["budget_exhausted"]
-            or metrics["cache_hits"]
-            or metrics["cache_misses"]
-        ):
-            diagnostics.setdefault("metrics", metrics)
+        diagnostics = _with_transport_metrics(result.diagnostics, self.transport)
         return SourceResult(
             result.items,
             "supported" if result.complete else "incomplete",
