@@ -1558,10 +1558,10 @@ class BundleBuilder:
         self.bundle["coverage"]["render_eligible"] = not has_blocking_core_coverage(
             self.bundle["coverage"],
             repository_ids=self.request.repository_ids,
-            provider_ids_by_repository={
-                repository_id: self.provider_id
-                for repository_id in self.request.repository_ids
-            },
+            provider_ids_by_repository=dict.fromkeys(
+                self.request.repository_ids,
+                self.provider_id,
+            ),
         )
         try:
             json_size_with_limit(

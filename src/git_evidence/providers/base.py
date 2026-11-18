@@ -144,7 +144,7 @@ def canonicalize_hostname(hostname: str | None, *, field: str) -> str:
         ipaddress.ip_address(canonical)
     except ValueError:
         if _is_legacy_numeric_host(canonical):
-            raise ValueError(f"{field} uses a non-canonical numeric address")
+            raise ValueError(f"{field} uses a non-canonical numeric address") from None
     else:
         raise ValueError(f"{field} uses a non-canonical numeric address")
     return canonical

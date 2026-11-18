@@ -245,9 +245,10 @@ def _failed_group_bundle(
     observations: list[dict[str, Any]] = []
     fatal: list[dict[str, Any]] = []
     group_failures: list[dict[str, Any]] = []
-    capabilities = {
-        source: "incomplete" for source in (*RESOURCE_SOURCES, *ACTIVITY_SOURCES)
-    }
+    capabilities = dict.fromkeys(
+        (*RESOURCE_SOURCES, *ACTIVITY_SOURCES),
+        "incomplete",
+    )
     for target in targets:
         for source in (*RESOURCE_SOURCES, *ACTIVITY_SOURCES):
             diagnostics = {

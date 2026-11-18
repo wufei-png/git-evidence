@@ -2244,7 +2244,7 @@ def _validate_v03_identity_and_retrievals(
     plan_provider_pairs: list[tuple[str, str]] = []
     plan_sources: dict[str, set[str]] = {}
     if isinstance(plan, dict) and isinstance(plan.get("providers"), list):
-        for position, provider in enumerate(plan["providers"]):
+        for provider in plan["providers"]:
             if not isinstance(provider, dict):
                 continue
             kind = provider.get("kind")
