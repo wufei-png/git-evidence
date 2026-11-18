@@ -8,11 +8,12 @@ runs. Neither lane may be represented as the other.
 ## Offline CI gate
 
 The required offline lane has no provider secrets and performs no intentional
-provider I/O. `pytest-socket` blocks sockets inside the pytest process while
-test items run; it does not cover collection/import or child processes, and it
-is not OS-level network isolation. Checked-in synthetic `MappingTransport`
-fixtures and test doubles are the offline boundary. The lane must run all of
-the following gates:
+network access during tests. Setup steps, including dependency installation,
+may need network access. `pytest-socket` blocks sockets inside the pytest
+process while test items run; it does not cover collection/import or child
+processes, and it is not OS-level network isolation. Checked-in synthetic
+`MappingTransport` fixtures and test doubles are the offline boundary. The lane
+must run all of the following gates:
 
 1. **Fixture/provider gate** — replay the checked-in
    `fixtures/provider_contract/*.json` responses through every registered
@@ -49,8 +50,8 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
 Offline CI may produce diagnostic bundles for failed fixture cases, but it must
-not call a provider endpoint, consume a provider secret, or label a fixture
-replay as a live canary.
+not perform intentional network access during tests, consume a provider secret,
+or label a fixture replay as a live canary.
 
 ## Live provider canary
 
