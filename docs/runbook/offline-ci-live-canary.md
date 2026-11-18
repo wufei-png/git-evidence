@@ -7,8 +7,12 @@ runs. Neither lane may be represented as the other.
 
 ## Offline CI gate
 
-The required offline lane has no network access and no provider secrets. It must
-run all of the following gates:
+The required offline lane has no provider secrets and performs no intentional
+provider I/O. `pytest-socket` blocks sockets inside the pytest process while
+test items run; it does not cover collection/import or child processes, and it
+is not OS-level network isolation. Checked-in synthetic `MappingTransport`
+fixtures and test doubles are the offline boundary. The lane must run all of
+the following gates:
 
 1. **Fixture/provider gate** — replay the checked-in
    `fixtures/provider_contract/*.json` responses through every registered
@@ -37,8 +41,8 @@ python scripts/check_schema_sync.py
 python -m build
 ```
 
-The repository's `unittest` suite is an equivalent dependency-light test entry
-point when pytest is not installed:
+The repository's `unittest` suite runs the same test cases as a dependency-light
+fallback when pytest is not installed; it does not apply the pytest-socket guard.
 
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests -v

@@ -7,7 +7,7 @@ Production code uses the `src/` layout under `src/git_evidence/`. Provider adapt
 ## Build, Test, and Development Commands
 
 - `python -m pip install --editable .` installs the package and `git-evidence` CLI for local development.
-- `python -m pytest -q --disable-socket` runs the offline contract suite without network access.
+- `python -m pytest -q --disable-socket` runs the offline contract suite. `pytest-socket` blocks sockets in the pytest process while test items run; it does not isolate collection/import or child processes. Provider tests replay checked-in synthetic fixtures through `MappingTransport`; this is not an OS-level network sandbox.
 - `ruff check .` and `ruff format --check .` enforce lint and formatting rules.
 - `python scripts/check_pyright_baseline.py` checks the production-source type-error ratchet.
 - `python scripts/check_schema_sync.py` verifies the packaged Schema is synchronized.
@@ -20,7 +20,7 @@ Target Python 3.11 or newer. Use four-space indentation, Ruff formatting, and ty
 
 ## Testing Guidelines
 
-Use pytest and name files and tests `test_*.py`. Add regression tests beside the closest contract area and use synthetic or anonymous fixtures only. Tests must be deterministic and offline by default; do not add live-provider calls to the normal suite. For schema, privacy, identity, transport, or rendering changes, test both the success path and fail-closed behavior.
+Use pytest and name files and tests `test_*.py`. Add regression tests beside the closest contract area and use synthetic or anonymous fixtures only. Tests must be deterministic and provider-free by default; do not add live-provider calls to the normal suite. Do not treat `--disable-socket` as full-process or OS-level network isolation. For schema, privacy, identity, transport, or rendering changes, test both the success path and fail-closed behavior.
 
 ## Commit & Pull Request Guidelines
 
